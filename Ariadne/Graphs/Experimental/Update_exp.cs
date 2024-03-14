@@ -96,7 +96,7 @@ namespace Ariadne.GH_Design.Experimental
             {
                 Guid guid = guids[i];
 
-                Curve newcurve = network.Graph.Edges[i].Curve;
+                Curve newcurve = network.Graph.Edges[i].Value;
 
                 doc.Objects.Replace(guid, newcurve);
 

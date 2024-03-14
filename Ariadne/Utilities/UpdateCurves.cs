@@ -99,7 +99,7 @@ namespace Ariadne.Utilities
             {
                 Guid guid = guids[i];
 
-                Curve newcurve = network.Network.Graph.Edges[i].Curve;
+                Curve newcurve = network.Network.Graph.Edges[i].Value;
 
                 doc.Objects.Replace(guid, newcurve);
 

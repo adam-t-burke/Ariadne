@@ -53,7 +53,7 @@ namespace Ariadne.Graphs
             curveGraph.AdjacencyListToTree();
 
             DA.SetDataList(0, curveGraph.Nodes.Select(node => node.Value));
-            DA.SetDataList(1, curveGraph.Edges.Select(edge => edge.Curve));
+            DA.SetDataList(1, curveGraph.Edges.Select(edge => edge.Value));
             DA.SetDataTree(2, curveGraph.IndicesTree);
             DA.SetDataTree(3, curveGraph.AdjacencyTree);
 

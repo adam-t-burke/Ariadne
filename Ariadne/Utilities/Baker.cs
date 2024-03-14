@@ -127,7 +127,7 @@ namespace Ariadne.Utilities
         {
             for (int i = 0; i < network.Network.Graph.Edges.Count; i++)
             {
-                var curve = network.Network.Graph.Edges[i].Curve;
+                var curve = network.Network.Graph.Edges[i].Value;
 
                 curve.Translate(fulloffset);
 

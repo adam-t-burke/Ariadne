@@ -65,7 +65,7 @@ namespace Ariadne.Utilities
             List<double> lengths = new List<double>();
             foreach (Edge edge in edges)
             {
-                lengths.Add(edge.Curve.GetLength());
+                lengths.Add(edge.Value.GetLength());
             }
             return lengths;
         }

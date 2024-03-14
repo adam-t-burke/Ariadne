@@ -132,11 +132,15 @@ namespace Ariadne.FDM
                 (bool anchorFound, int ianchor) = UtilityFunctions.WithinTolerance(nodes, anchor, ATol);
                 if (anchorFound)
                 {
+                    nodes[ianchor].Anchor = true;
                     Fixed.Add(nodes[ianchor]);
                 }
             });
 
             Free = nodes.Except(Fixed).ToList();
+
+            // update the order of nodes to place fixed nodes at the end
+            Graph.Nodes = Free.Concat(Fixed).ToList();
         }
 
         /// <summary>

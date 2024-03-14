@@ -101,8 +101,8 @@ namespace Ariadne.Utilities
 
             for (int i = 0; i < n1.Network.Graph.Edges.Count; i++)
             {
-                Curve c1 = n1.Network.Graph.Edges[i].Curve;
-                Curve c2 = n2.Network.Graph.Edges[i].Curve;
+                Curve c1 = n1.Network.Graph.Edges[i].Value;
+                Curve c2 = n2.Network.Graph.Edges[i].Value;
 
                 ls[i] = new Line(c1.PointAtNormalizedLength(0.5), c2.PointAtNormalizedLength(0.5));
             }

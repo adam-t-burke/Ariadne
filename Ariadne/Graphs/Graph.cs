@@ -69,7 +69,7 @@ namespace Ariadne.Graphs
         /// <param name="other"></param>
         public Graph(Graph other)
         {
-            List<Curve> curves = other.Edges.Select(edge => edge.Curve).ToList();
+            List<Curve> curves = other.Edges.Select(edge => edge.Value).ToList();
             Tolerance = other.Tolerance;
             ConstructGraph(curves, Tolerance);
         }
@@ -89,7 +89,7 @@ namespace Ariadne.Graphs
                 Point3d start = curve.PointAtStart;
                 Point3d end = curve.PointAtEnd;
 
-                Edge edge = new() { Curve = curve };
+                Edge edge = new() { Value = curve };
                 
                 // check if start and end points are within tolerance of existing nodes
                 (bool startFound, int istart) = WithinTolerance(Nodes, start, tol);                
@@ -223,35 +223,29 @@ namespace Ariadne.Graphs
     {
         public Node Start { get; set; }
         public Node End { get; set; }
-        public double Length { get; set; }
         public double Q { get; set; }
-        public Curve Curve { get; set; }
 
         public Edge()
         {
             Start = new();
             End = new();
-            Length = 0;
             Q = 0;
-            Curve = null;
         }
 
-        public Edge(Node start, Node end, double length, double q, Curve curve)
+        public Edge(Node start, Node end, double q, Curve curve)
         {
             Start = start;
             End = end;
-            Length = length;
             Q = q;
-            Curve = curve;
+            Value = curve;
         }
 
         public Edge(Edge other)
         {
             Start = other.Start;
             End = other.End;
-            Length = other.Length;
             Q = other.Q;
-            Curve = other.Curve;
+            Value = other.Value;
         }
     }
 }
