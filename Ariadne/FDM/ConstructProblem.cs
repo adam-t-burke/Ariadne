@@ -14,7 +14,7 @@ namespace Ariadne.FDM
 {
     public class ConstructProblem : GH_Component
     {
-        JsonSerializerOptions options = new JsonSerializerOptions { WriteIndented = true, ReferenceHandler = ReferenceHandler.IgnoreCycles };
+        JsonSerializerOptions options = new() { WriteIndented = true, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull};
         /// <summary>
         /// Initializes a new instance of the FDM_Problem class.
         /// </summary>
@@ -120,11 +120,13 @@ namespace Ariadne.FDM
             }
 
 
-            string message = JsonSerializer.Serialize(problem, options);
+            string message = JsonSerializer.Serialize<FDM_Problem>(problem, options);
 
             DA.SetData(0, problem);
             DA.SetData(1, message);
         }
+
+
 
         /// <summary>
         /// Provides an Icon for the component.

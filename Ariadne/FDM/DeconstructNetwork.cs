@@ -70,30 +70,15 @@ namespace Ariadne.FDM
 
 
 
-            List<int> freeIndices = new List<int>();
-            List<int> fixedIndices = new List<int>();
 
-            List<Node> nodes = network.Graph.Nodes;
-
-            Parallel.ForEach(network.Graph.Nodes, node =>
-            {
-                if (node.Anchor == false)
-                {
-                    freeIndices.Add(network.Graph.Nodes.IndexOf(node));
-                }
-                else
-                {
-                    fixedIndices.Add(network.Graph.Nodes.IndexOf(node));
-                }
-            });
 
             DA.SetDataList(0, network.Graph.Nodes.Select(node => node.Value));
             DA.SetDataList(1, network.Graph.Edges.Select(edge => edge.Value));
             DA.SetDataTree(2, network.Graph.IndicesTree);
             DA.SetDataTree(3, network.Graph.AdjacencyTree);
-            DA.SetDataList(4, freeIndices);
+            DA.SetDataList(4, network.FreeNodes);
             DA.SetDataList(5, network.Free);
-            DA.SetDataList(6, fixedIndices);
+            DA.SetDataList(6, network.FixedNodes);
             DA.SetDataList(7, network.Fixed);
         }
 

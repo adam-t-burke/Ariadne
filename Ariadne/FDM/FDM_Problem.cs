@@ -50,7 +50,7 @@ namespace Ariadne.FDM
             Network = _network;
             ExtractPxyz(_P); //force vectors for each axis
             IJV(Network); // CSC format of connectivity matrix
-            ExtractXYZf(Network);
+            ExtractXYZf();
 
         }
         public FDM_Problem(FDM_Network _network, List<double> _Q, List<Vector3d> _P, List<int> _LoadNodes)
@@ -60,7 +60,7 @@ namespace Ariadne.FDM
             ExtractPxyz(_P); //force vectors for each axis
             IJV(Network); // CSC format of connectivity matrix
             LoadNodes = _LoadNodes;
-            ExtractXYZf(Network);
+            ExtractXYZf();
 
         }
 
@@ -71,7 +71,7 @@ namespace Ariadne.FDM
             Parameters = _Parameters; // optimization parameters
             ExtractPxyz(_P); //force vectors for each axis
             IJV(Network); // CSC format of connectivity matrix
-            ExtractXYZf(Network);
+            ExtractXYZf();
 
         }
         public FDM_Problem(FDM_Network _Network, List<double> _Q, List<Vector3d> _P, OBJParameters _Parameters, List<int> _LoadNodes)
@@ -82,7 +82,7 @@ namespace Ariadne.FDM
             ExtractPxyz(_P); //force vectors for each axis
             IJV(Network); // CSC format of connectivity matrix
             LoadNodes = _LoadNodes;
-            ExtractXYZf(Network);
+            ExtractXYZf();
 
         }
 
@@ -93,7 +93,7 @@ namespace Ariadne.FDM
             Parameters = _Parameters; // optimization parameters
             ExtractPxyz(_P); //force vectors for each axis
             IJV(Network); // CSC format of connectivity matrix
-            ExtractXYZf(Network);
+            ExtractXYZf();
             VariableAnchors = _Anchors;
         }
 
@@ -105,7 +105,7 @@ namespace Ariadne.FDM
             ExtractPxyz(_P); //force vectors for each axis
             IJV(Network); // CSC format of connectivity matrix
             LoadNodes = _LoadNodes;
-            ExtractXYZf(Network);
+            ExtractXYZf();
             VariableAnchors = _Anchors;
         }
 
@@ -122,14 +122,15 @@ namespace Ariadne.FDM
             }           
         }
 
-        private void ExtractXYZf(FDM_Network _Network)
+        private void ExtractXYZf()
         {
-            List<Point3d> nodes = _Network.Anchors;
+            List<Node> nodes = Network.Fixed;
 
             XYZf = new List<double[]>();
 
-            foreach (Point3d p in nodes)
+            foreach (Node node in nodes)
             {
+                Point3d p = node.Value;
                 double[] _XYZ = new double[] { p.X, p.Y, p.Z };
                 
                 XYZf.Add(_XYZ);

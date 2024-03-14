@@ -21,31 +21,31 @@ namespace Ariadne.Graphs
         /// <summary>
         /// Tolerance for merging curves into a graph
         /// </summary>
-        [JsonIgnore(Condition = JsonIgnoreCondition.Always)]
+        [JsonIgnore]
         public double Tolerance { get; set;}
 
         /// <summary>
         /// All nodes in the graph represented as 3d points.
         /// </summary>
-        [JsonIgnore(Condition = JsonIgnoreCondition.Always)]
+        [JsonIgnore]
         public List<Node> Nodes { get; set; }
 
         /// <summary>
         /// All edges of the graph represented as curve geometry.
         /// </summary>
-        [JsonIgnore(Condition = JsonIgnoreCondition.Always)]
+        [JsonIgnore]
         public List<Edge> Edges { get; set; }
 
         /// <summary>
         /// Grasshopper tree representation of the indices list.
         /// </summary>
-        [JsonIgnore(Condition = JsonIgnoreCondition.Always)]
+        [JsonIgnore]
         public GH_Structure<GH_Number> IndicesTree { get; set; }
 
         /// <summary>
         /// Grasshopper tree representation of the adjacency list.
         /// </summary>
-        [JsonIgnore(Condition = JsonIgnoreCondition.Always)]
+        [JsonIgnore]
         public GH_Structure<GH_Number> AdjacencyTree { get; set; }
 
         /// <summary>
@@ -192,7 +192,10 @@ namespace Ariadne.Graphs
 
     internal class Node : GH_Point
     {
+        [JsonIgnore]
         public bool Anchor { get; set; }
+
+        [JsonIgnore]
         public List<Node> Neighbors { get; set; }
 
         /// <summary>
@@ -221,8 +224,13 @@ namespace Ariadne.Graphs
 
     internal class Edge : GH_Curve
     {
+        [JsonIgnore]
         public Node Start { get; set; }
+
+        [JsonIgnore]
         public Node End { get; set; }
+
+        [JsonIgnore]
         public double Q { get; set; }
 
         public Edge()
