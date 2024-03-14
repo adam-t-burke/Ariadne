@@ -157,7 +157,7 @@ namespace Ariadne.Utilities
         {
             get
             {
-                BoundingBox bb = new BoundingBox(network.Network.Graph.Nodes.Select(node => node.Position));
+                BoundingBox bb = new BoundingBox(network.Network.Graph.Nodes.Select(node => node.Value));
                 for (int i = 0; i < externalforces.Length; i++) bb.Union(externalforces[i].BoundingBox);
                 for (int i = 0; i < reactionforces.Length; i++) bb.Union(reactionforces[i].BoundingBox);
 
@@ -266,7 +266,7 @@ namespace Ariadne.Utilities
                 {
                     int index = N[i];
 
-                    Point3d p = nodes[index].Position;
+                    Point3d p = nodes[index].Value;
 
                     loadvectors.Add(new Line(p, loads[0] / loads[0].Length * scale));
                 }
@@ -280,7 +280,7 @@ namespace Ariadne.Utilities
                 for (int i = 0; i < N.Count; i++)
                 {
                     int index = N[i];
-                    Point3d p = nodes[index].Position;
+                    Point3d p = nodes[index].Value;
                     Vector3d l = loads[i];
 
                     if (l.Length < 0.1)

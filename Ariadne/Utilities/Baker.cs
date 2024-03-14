@@ -227,7 +227,7 @@ namespace Ariadne.Utilities
         private void GetBB()
         {
             fulloffset = new Vector3d();
-            bb = new BoundingBox(network.Network.Graph.Nodes.Select(node => node.Position));
+            bb = new BoundingBox(network.Network.Graph.Nodes.Select(node => node.Value));
 
 
             var pbl = bb.Corner(true, true, true);

@@ -97,7 +97,7 @@ namespace Ariadne.Graphs
                 // analyze starting point
                 if (!startFound)
                 {
-                    Node nodeStart = new() { Position = start };
+                    Node nodeStart = new() { Value = start };
                     Nodes.Add(nodeStart);
                     edge.Start = nodeStart;
                 }
@@ -114,7 +114,7 @@ namespace Ariadne.Graphs
                 // analyze end point
                 if (!endFound)
                 {
-                    Node nodeEnd = new() { Position = end};
+                    Node nodeEnd = new() { Value = end };
                     Nodes.Add(nodeEnd);
                     edge.End = nodeEnd;
                 }
@@ -192,7 +192,6 @@ namespace Ariadne.Graphs
 
     internal class Node : GH_Point
     {
-        public Point3d Position { get; set; }
         public bool Anchor { get; set; }
         public List<Node> Neighbors { get; set; }
 
@@ -201,21 +200,18 @@ namespace Ariadne.Graphs
         /// </summary>
         public Node()
         {
-            Position = new();
             Anchor = false;
             Neighbors = new List<Node>();
         }
 
         public Node(Node other)
         {
-            Position = other.Position;
             Anchor = other.Anchor;
             Neighbors = other.Neighbors;
         }
 
-        public Node(Point3d position, bool anchor, List<Node> neighbors)
+        public Node(bool anchor, List<Node> neighbors)
         {
-            Position = position;
             Anchor = anchor;
             Neighbors = neighbors;
         }

@@ -36,7 +36,7 @@ namespace Ariadne.Utilities
         protected override void RegisterInputParams(GH_InputParamManager pManager)
         {
             IGH_Param param = new Grasshopper.Kernel.Parameters.Param_Guid();
-            pManager.AddBooleanParameter("Update curves?", "Update", "Update the drawn curves to new positions", GH_ParamAccess.item, false);
+            pManager.AddBooleanParameter("Update curves?", "Update", "Update the drawn curves to new Values", GH_ParamAccess.item, false);
             pManager.AddGenericParameter("Target Network", "Network", "Target network to update curves to", GH_ParamAccess.item);
             pManager.AddParameter(param, "Edge GUIDs", "GUIDs", "GUIDs of input network edges", GH_ParamAccess.list);
         }

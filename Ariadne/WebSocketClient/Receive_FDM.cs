@@ -50,7 +50,7 @@ namespace Ariadne.WebSocketClient
             pManager.AddNumberParameter("Force Densities", "Q", "Final force density values", GH_ParamAccess.list);
             pManager.AddNumberParameter("Loss", "Loss", "Optimization final loss value", GH_ParamAccess.item);
             pManager.AddNumberParameter("Loss trace", "Loss trace", "Optimization loss over time.", GH_ParamAccess.list);
-            pManager.AddPointParameter("Node trace", "Node trace ", "Node positions over time.", GH_ParamAccess.tree);
+            pManager.AddPointParameter("Node trace", "Node trace ", "Node Values over time.", GH_ParamAccess.tree);
         }
 
         /// <summary>

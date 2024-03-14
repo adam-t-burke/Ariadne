@@ -19,7 +19,7 @@ namespace Ariadne.Objectives
         /// </summary>
         public ObjectiveTarget()
           : base("Target Geometry", "TargetGeo",
-              "Minimize the deviation from starting nodal positions",
+              "Minimize the deviation from starting nodal Values",
               "Ariadne", "ObjectiveFunctions")
         {
         }
@@ -66,7 +66,7 @@ namespace Ariadne.Objectives
 
             if (network.Valid && nodes.Count > 0)
             {
-                List<Point3d> points = nodes.Select(node => node.Position).ToList();
+                List<Point3d> points = nodes.Select(node => node.Value).ToList();
 
                 List<int> indices = new List<int>(); 
                 foreach(Node node in nodes)
@@ -80,7 +80,7 @@ namespace Ariadne.Objectives
             }
             else if (network.Valid)
             {
-                OBJTarget obj = new OBJTarget(weight, network.Free.Select(node => node.Position).ToList());
+                OBJTarget obj = new OBJTarget(weight, network.Free.Select(node => node.Value).ToList());
                 DA.SetData(0, obj);
             }
             else

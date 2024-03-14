@@ -39,7 +39,7 @@ namespace Ariadne.Optimization
             pManager.AddIntegerParameter("Maximum Iterations", "MaxIter", "Maximum number of iterations", GH_ParamAccess.item, 400);
             pManager.AddIntegerParameter("Update Frequency", "Frequency", "Frequency of return reports", GH_ParamAccess.item, 20);
             pManager.AddBooleanParameter("Show Iterations", "ShowIter", "Show intermittent solutions", GH_ParamAccess.item, false);
-            pManager.AddBooleanParameter("Trace Optimization Geometry", "Node Trace", "Trace node positions through optimization", GH_ParamAccess.item, false);
+            pManager.AddBooleanParameter("Trace Optimization Geometry", "Node Trace", "Trace node Values through optimization", GH_ParamAccess.item, false);
 
             pManager[0].Optional = true;
         }

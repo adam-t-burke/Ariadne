@@ -157,7 +157,7 @@ namespace Ariadne.GH_Design.Experimental
 
             foreach (Node node in network.Free)
             {
-                inputPoints.Add(new Point3d(node.Position));
+                inputPoints.Add(new Point3d(node.Value));
             }
         }
 

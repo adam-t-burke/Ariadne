@@ -35,7 +35,7 @@ namespace Ariadne.Utilities
 
             Parallel.ForEach(nodes, (node, state) =>
                 {
-                    bool closeEnough = node.Position.EpsilonEquals(point, tolerance);
+                    bool closeEnough = node.Value.EpsilonEquals(point, tolerance);
                     if (closeEnough)
                     {
                         match = true;

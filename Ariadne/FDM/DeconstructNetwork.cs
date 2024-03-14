@@ -62,7 +62,7 @@ namespace Ariadne.FDM
             IEnumerable<int> freeIndices = Enumerable.Range(0, network.Graph.Nn - network.Anchors.Count);
             IEnumerable<int> fixedIndices = Enumerable.Range(network.Graph.Nn - network.Anchors.Count, network.Graph.Nn);
 
-            DA.SetDataList(0, network.Graph.Nodes.Select(node => node.Position));
+            DA.SetDataList(0, network.Graph.Nodes.Select(node => node.Value));
             DA.SetDataList(1, network.Graph.Edges.Select(edge => edge.Curve));
             DA.SetDataTree(2, network.Graph.IndicesTree);
             DA.SetDataTree(3, network.Graph.AdjacencyTree);
