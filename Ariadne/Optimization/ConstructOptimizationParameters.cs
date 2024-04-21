@@ -91,11 +91,7 @@ namespace Ariadne.Optimization
             }
 
             OBJParameters objparams = new OBJParameters(lb, ub, abstol, reltol, objs, show, freq, maxiter, trace);
-            DA.SetData(0, objparams);
-         
-
-
-            
+            DA.SetData(0, objparams);  
         }
 
         /// <summary>

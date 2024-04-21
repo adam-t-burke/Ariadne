@@ -72,8 +72,8 @@ namespace Ariadne.FDM
 
 
 
-            DA.SetDataList(0, network.Graph.Nodes.Select(node => node.Value));
-            DA.SetDataList(1, network.Graph.Edges.Select(edge => edge.Value));
+            DA.SetDataList(0, network.Graph.Nodes);
+            DA.SetDataList(1, network.Graph.Edges);
             DA.SetDataTree(2, network.Graph.IndicesTree);
             DA.SetDataTree(3, network.Graph.AdjacencyTree);
             DA.SetDataList(4, network.FreeNodes);

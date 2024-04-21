@@ -5,6 +5,7 @@ using Grasshopper.Kernel;
 using Rhino.Geometry;
 using Ariadne.Objectives;
 using System.Drawing;
+using Ariadne.Graphs;
 
 namespace Ariadne.Objectives
 {
@@ -25,8 +26,8 @@ namespace Ariadne.Objectives
         /// </summary>
         protected override void RegisterInputParams(GH_Component.GH_InputParamManager pManager)
         {
-            pManager.AddIntegerParameter("Edge Indices", "Edge Indices", "Edge Indices", GH_ParamAccess.list);   
-            pManager.AddNumberParameter("Minimum Force", "Force", "Target minimum force", GH_ParamAccess.item, 1.0);
+            pManager.AddGenericParameter("Edges", "Edges", "Edges for minimum force objective", GH_ParamAccess.list);   
+            pManager.AddNumberParameter("Minimum Force", "Force", "Target minimum force", GH_ParamAccess.list, 1.0);
             pManager.AddNumberParameter("Weight", "W", "Weight of objective", GH_ParamAccess.item, 1.0);
 
             pManager[0].Optional = true;
@@ -46,12 +47,12 @@ namespace Ariadne.Objectives
         /// <param name="DA">The DA object is used to retrieve from inputs and store in outputs.</param>
         protected override void SolveInstance(IGH_DataAccess DA)
         {
-            List<int> edges = new List<int>();
+            List<Edge> edges = new();
             List<double> force = new List<double> { 1.0 };
             double weight = 1.0;
 
             DA.GetDataList(0, edges);
-            if (!DA.GetData(1, ref force)) { return; }
+            if (!DA.GetDataList(1, force)) { return; }
             if (!DA.GetData(2, ref weight)) { return; }
 
 

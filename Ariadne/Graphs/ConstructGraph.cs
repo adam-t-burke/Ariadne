@@ -1,5 +1,7 @@
 ﻿using Grasshopper;
 using Grasshopper.Kernel;
+using Grasshopper.Kernel.Data;
+using Grasshopper.Kernel.Types;
 using Rhino.Geometry;
 using Rhino.Collections;
 using System;
@@ -50,7 +52,7 @@ namespace Ariadne.Graphs
         protected override void SolveInstance(IGH_DataAccess DA)
         {
             //initialize
-            List<Curve> edges = new List<Curve>();
+            List<GH_Curve> edges = new();
             double tol = 1.0;
 
             //assign

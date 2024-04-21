@@ -1,18 +1,24 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 	
   <PropertyGroup>
-    <TargetFrameworks>net7.0;</TargetFrameworks>
+    <TargetFrameworks>net7.0</TargetFrameworks>
     <Version>1.0</Version>
     <Title>Ariadne</Title>
     <Description>Description of Ariadne</Description>
     <TargetExt>.gha</TargetExt>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>	
   </PropertyGroup>
   
   <ItemGroup>
-    <PackageReference Include="Grasshopper" Version="8.0.23164.14305-wip" IncludeAssets="compile;build" />
-    <PackageReference Include="System.Drawing.Common" Version="8.0.3" IncludeAssets="compile;build" />
-    <PackageReference Include="System.Resources.Extensions" Version="8.0.0" />
-    <PackageReference Include="System.Text.Json" Version="8.0.3" />
+    <PackageReference Include="Grasshopper" Version="8.6.24101.5001" IncludeAssets="compile;build" />
+    <PackageReference Include="System.Drawing.Common" Version="8.0.4" IncludeAssets="compile;build" />
+    <PackageReference Include="System.Resources.Extensions" Version="8.0.0">
+      <IncludeAssets>compile;build</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="System.Text.Encodings.Web" Version="8.0.0" />
+    <PackageReference Include="System.Text.Json" Version="8.0.3">
+      <IncludeAssets>compile;build</IncludeAssets>
+    </PackageReference>
   </ItemGroup>
   
   <ItemGroup>

@@ -58,7 +58,7 @@ namespace Ariadne.Graphs
         /// </summary>
         /// <param name="_InputCurves"></param>
         /// <param name="_Tolerance"></param>
-        public Graph(List<Curve> _InputCurves, double _Tolerance)
+        public Graph(List<GH_Curve> _InputCurves, double _Tolerance)
         {
             ConstructGraph(_InputCurves, _Tolerance);
         }
@@ -69,9 +69,11 @@ namespace Ariadne.Graphs
         /// <param name="other"></param>
         public Graph(Graph other)
         {
-            List<Curve> curves = other.Edges.Select(edge => edge.Value).ToList();
             Tolerance = other.Tolerance;
-            ConstructGraph(curves, Tolerance);
+            Nodes = other.Nodes;
+            Edges = other.Edges;
+            IndicesTree = other.IndicesTree;
+            AdjacencyTree = other.AdjacencyTree;
         }
 
         /// <summary>
@@ -79,17 +81,23 @@ namespace Ariadne.Graphs
         /// </summary>
         /// <param name="edges"></param>
         /// 
-        private void ConstructGraph(List<Curve> curves, double tol)
+        private void ConstructGraph(List<GH_Curve> curves, double tol)
         {
             Nodes = new List<Node>();
             Edges = new List<Edge>();
 
-            foreach (Curve curve in curves)
+            foreach (GH_Curve curve in curves)
             {
-                Point3d start = curve.PointAtStart;
-                Point3d end = curve.PointAtEnd;
+                Point3d start = curve.Value.PointAtStart;
+                Point3d end = curve.Value.PointAtEnd;
 
-                Edge edge = new() { Value = curve };
+                Edge edge = new() {
+                    Value = curve.Value};
+
+                if (curve.IsReferencedGeometry)
+                {
+                    edge.ReferenceID = curve.ReferenceID;
+                }
                 
                 // check if start and end points are within tolerance of existing nodes
                 (bool startFound, int istart) = WithinTolerance(Nodes, start, tol);                
@@ -205,6 +213,7 @@ namespace Ariadne.Graphs
         {
             Anchor = false;
             Neighbors = new List<Node>();
+            Value = new Point3d();
         }
 
         public Node(Node other)
@@ -240,12 +249,12 @@ namespace Ariadne.Graphs
             Q = 0;
         }
 
-        public Edge(Node start, Node end, double q, Curve curve)
+        public Edge(Node start, Node end, double q, GH_Curve curve)
         {
             Start = start;
             End = end;
             Q = q;
-            Value = curve;
+            Value = curve.Value;
         }
 
         public Edge(Edge other)
@@ -255,5 +264,6 @@ namespace Ariadne.Graphs
             Q = other.Q;
             Value = other.Value;
         }
+        
     }
 }

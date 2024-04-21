@@ -1,17 +1,19 @@
 using Grasshopper;
 using Grasshopper.Kernel;
+using Grasshopper.Kernel.Data;
+using Grasshopper.Kernel.Types;
 using Rhino.Geometry;
 using Rhino.Collections;
 using System;
 using System.Drawing;
 using System.Collections.Generic;
 using Ariadne.Utilities;
-using Grasshopper.Kernel.Data;
 
 namespace Ariadne.FDM
 {
     public class ConstructNetwork : GH_Component
     {
+        FDM_Network oldNet;
         /// <summary>
         /// Each implementation of GH_Component must provide a public 
         /// constructor without any arguments.
@@ -52,8 +54,18 @@ namespace Ariadne.FDM
         /// to store data in output parameters.</param>
         protected override void SolveInstance(IGH_DataAccess DA)
         {
+            DA.DisableGapLogic();
+
+            if (oldNet != null)
+            {
+                if(oldNet.IsUpdating)
+                {
+                    return;
+                }
+            }
+            
             //initialize
-            List<Curve> edges = new List<Curve>();
+            List<GH_Curve> edges = new List<GH_Curve>();
             double e_tol = 0.001;
             List<Point3d> anchors = new List<Point3d>();
             double a_tol = 0.001;
@@ -66,7 +78,7 @@ namespace Ariadne.FDM
             if (!DA.GetData(3, ref a_tol)) return;
 
             //create network from graph
-            FDM_Network network = new FDM_Network(edges, e_tol, anchors, a_tol);
+            FDM_Network network = new(edges, e_tol, anchors, a_tol);
 
             //Check sufficent anchor definitions
             if (!network.AnchorCheck())
@@ -82,6 +94,8 @@ namespace Ariadne.FDM
                 return;
             }
 
+
+            oldNet = network;
             //assign
             DA.SetData(0, network);
 

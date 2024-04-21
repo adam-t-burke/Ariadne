@@ -5,6 +5,8 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Grasshopper.Kernel.Data;
+using Grasshopper.Kernel.Types;
 using Rhino.Collections;
 using Rhino.Geometry;
 using Ariadne.Graphs;
@@ -59,6 +61,8 @@ namespace Ariadne.FDM
         [JsonIgnore]
         public bool Valid { get; set; }
 
+        public bool IsUpdating { get; set; }
+
         /// <summary>
         /// Empty constructor
         /// </summary>
@@ -69,6 +73,11 @@ namespace Ariadne.FDM
             Fixed = new List<Node>();
             FixedNodes = new List<int>();
             FreeNodes = new List<int>();
+            Graph = new Graph();
+            Anchors = new List<Point3d>();
+            ATol = 0.01;
+            ETol = 0.01;
+            IsUpdating = false;
         }
 
         /// <summary>
@@ -78,7 +87,7 @@ namespace Ariadne.FDM
         /// <param name="_ETol"></param>
         /// <param name="_Anchors"></param>
         /// <param name="_ATol"></param>
-        public FDM_Network(List<Curve> _Edges, double _ETol, List<Point3d> _Anchors, double _ATol)
+        public FDM_Network(List<GH_Curve> _Edges, double _ETol, List<Point3d> _Anchors, double _ATol)
         {
             //Set fields
             Graph = new Graph(_Edges, _ETol);
@@ -91,6 +100,8 @@ namespace Ariadne.FDM
             //Identify fixed and free nodes
             FixedFree();
             ValidCheck();
+
+            IsUpdating = false;
         }
 
         /// <summary>
@@ -114,6 +125,8 @@ namespace Ariadne.FDM
             //Identify fixed and free nodes
             FixedFree();
             ValidCheck();
+
+            IsUpdating = false;
         }
 
         /// <summary>
@@ -132,6 +145,8 @@ namespace Ariadne.FDM
 
             FixedFree();
             ValidCheck();
+
+            IsUpdating = false;
         }
 
         /// <summary>

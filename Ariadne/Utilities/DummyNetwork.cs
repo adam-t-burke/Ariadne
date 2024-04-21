@@ -2,9 +2,10 @@
 using System.Collections.Generic;
 
 using Grasshopper.Kernel;
+using Grasshopper.Kernel.Data;
+using Grasshopper.Kernel.Types;
 using Rhino.Geometry;
 using Ariadne.FDM;
-using Grasshopper.Kernel.Data;
 using System.Drawing;
 
 namespace Ariadne.Utilities
@@ -50,16 +51,16 @@ namespace Ariadne.Utilities
                 new Point3d(1, 1, 0)
             };
 
-            List<Curve> edges = new List<Curve>
+            List<GH_Curve> edges = new List<GH_Curve>
             {
-                new LineCurve(new Point3d(0, 0, 0), new Point3d(0.25, 0.25, 0)),
-                new LineCurve(new Point3d(0.25, 0.75, 0), new Point3d(0, 1, 0)),
-                new LineCurve(new Point3d(0.75, 0.75, 0), new Point3d(1, 1, 0)),
-                new LineCurve(new Point3d(0.75, 0.25, 0), new Point3d(1, 0, 0)),
-                new LineCurve(new Point3d(0.25, 0.25, 0), new Point3d(0.25, 0.75, 0)),
-                new LineCurve(new Point3d(0.25, 0.75, 0), new Point3d(0.75, 0.75, 0)),
-                new LineCurve(new Point3d(0.75, 0.75, 0), new Point3d(0.75, 0.25, 0)),
-                new LineCurve(new Point3d(0.75, 0.25, 0), new Point3d(0.25, 0.25, 0))
+                new GH_Curve(new LineCurve(new Point3d(0, 0, 0), new Point3d(0.25, 0.25, 0))),
+                new GH_Curve (new LineCurve(new Point3d(0.25, 0.75, 0), new Point3d(0, 1, 0))),
+                new GH_Curve (new LineCurve(new Point3d(0.75, 0.75, 0), new Point3d(1, 1, 0))),
+                new GH_Curve (new LineCurve(new Point3d(0.75, 0.25, 0), new Point3d(1, 0, 0))),
+                new GH_Curve (new LineCurve(new Point3d(0.25, 0.25, 0), new Point3d(0.25, 0.75, 0))),
+                new GH_Curve (new LineCurve(new Point3d(0.25, 0.75, 0), new Point3d(0.75, 0.75, 0))),
+                new GH_Curve (new LineCurve(new Point3d(0.75, 0.75, 0), new Point3d(0.75, 0.25, 0))),
+                new GH_Curve (new LineCurve(new Point3d(0.75, 0.25, 0), new Point3d(0.25, 0.25, 0)))
             };
 
             double etol = 0.01;

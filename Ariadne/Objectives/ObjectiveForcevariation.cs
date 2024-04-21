@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 
 using Grasshopper.Kernel;
+using Ariadne.Graphs;
 using Rhino.Geometry;
 using Ariadne.Objectives;
 using Ariadne.FDM;
@@ -26,9 +27,10 @@ namespace Ariadne.Objectives
         /// </summary>
         protected override void RegisterInputParams(GH_InputParamManager pManager)
         {
-            pManager.AddIntegerParameter("Edge Indices", "Edges", "Indices of edges to equalized forces in.", GH_ParamAccess.list);
+            pManager.AddGenericParameter("Edges", "Edges", "Minimize the difference between forces in a set of edges.", GH_ParamAccess.list);
             pManager.AddNumberParameter("Weight", "W", "Weight of objective", GH_ParamAccess.item, 1.0);
 
+            //Apply to all edges by default
             pManager[0].Optional = true;
         }
 
@@ -46,7 +48,7 @@ namespace Ariadne.Objectives
         /// <param name="DA">The DA object is used to retrieve from inputs and store in outputs.</param>
         protected override void SolveInstance(IGH_DataAccess DA)
         {
-            List<int> indices = new List<int>();
+            List<Edge> indices = new();
             double weight = 1.0;
 
             DA.GetDataList(0, indices);

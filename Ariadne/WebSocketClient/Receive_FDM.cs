@@ -14,6 +14,8 @@ using Grasshopper.Kernel.Data;
 using Grasshopper.Kernel.Types;
 using System.Runtime.CompilerServices;
 using Ariadne.Graphs;
+using System.Linq;
+using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace Ariadne.WebSocketClient
 {
@@ -51,6 +53,7 @@ namespace Ariadne.WebSocketClient
             pManager.AddNumberParameter("Loss", "Loss", "Optimization final loss value", GH_ParamAccess.item);
             pManager.AddNumberParameter("Loss trace", "Loss trace", "Optimization loss over time.", GH_ParamAccess.list);
             pManager.AddPointParameter("Node trace", "Node trace ", "Node Values over time.", GH_ParamAccess.tree);
+            pManager.AddGenericParameter("Updated Network", "Network", "New Network with updated values", GH_ParamAccess.item);
         }
 
         /// <summary>
@@ -60,37 +63,72 @@ namespace Ariadne.WebSocketClient
         protected override void SolveInstance(IGH_DataAccess DA)
         {
             string _response = "";
-            FDM_Network network = new FDM_Network();
-            List<Point3d> nodes = new List<Point3d>();
-            List<Curve> edges = new List<Curve>();
-           
+            FDM_Network oldNetwork = new();
+            Graph newGraph = new();           
 
             if (!DA.GetData(0, ref _response)) return;
-            if (!DA.GetData(1, ref network)) return;
+            if (!DA.GetData(1, ref oldNetwork)) return;
+
+            newGraph.Tolerance = oldNetwork.Graph.Tolerance;
+            newGraph.Nodes = new();
+            newGraph.Edges = new();
+            newGraph.IndicesTree = oldNetwork.Graph.IndicesTree;
+            newGraph.AdjacencyTree = oldNetwork.Graph.AdjacencyTree;
             
             FDM_Response response = JsonSerializer.Deserialize<FDM_Response>(_response);
 
-            if (response.Q.Count != network.Graph.Ne)
+            if (response.Q.Count != oldNetwork.Graph.Ne)
             {
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "Number of edges in network does not match number of force densities in response. It is safe to ignore this warning if you just changed the topology of your network");
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Remark, "Number of edges in network does not match number of force densities in response. It is safe to ignore this warning if you just changed the topology of your network");
                 return;
             }
 
-            for (int i = 0; i < network.Graph.Nn; i++)
+            if (oldNetwork.Graph.Nn != response.X.Count)
             {
-                nodes.Add(new Point3d(response.X[i], response.Y[i], response.Z[i]));
-            }
-            // get nodes
-
-
-
-            foreach (Edge edge in network.Graph.Edges)
-            {
-                edges.Add(new LineCurve(nodes[network.Graph.Nodes.IndexOf(edge.Start)], nodes[network.Graph.Nodes.IndexOf(edge.End)]));
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Remark, "Number of nodes in network does not match number of nodes in response. It is safe to ignore this warning if you just changed the topology of your network");
+                return;
             }
 
-            DA.SetDataList(0, nodes);
-            DA.SetDataList(1, edges);
+            for (int i = 0; i < oldNetwork.Graph.Nn; i++)
+            {
+                Node node = new()
+                {
+                    Anchor = oldNetwork.Graph.Nodes[i].Anchor,
+                    Neighbors = oldNetwork.Graph.Nodes[i].Neighbors,
+                    Value = new Point3d(response.X[i], response.Y[i], response.Z[i])
+                }; 
+                
+                newGraph.Nodes.Add(node);
+            }
+
+            for (int i = 0; i < oldNetwork.Graph.Ne; i++)
+            {
+                Edge edge = new()
+                {
+                    Start = newGraph.Nodes[oldNetwork.Graph.Nodes.IndexOf(oldNetwork.Graph.Edges[i].Start)],
+                    End = newGraph.Nodes[oldNetwork.Graph.Nodes.IndexOf(oldNetwork.Graph.Edges[i].End)],
+                    Q = response.Q[i]
+                };
+                edge.Value = new LineCurve(edge.Start.Value, edge.End.Value);
+                edge.ReferenceID = oldNetwork.Graph.Edges[i].ReferenceID;
+
+                newGraph.Edges.Add(edge);                
+            }
+
+            FDM_Network newNetwork = new() {  };
+            newNetwork.Graph = newGraph;
+            newNetwork.Valid = true;
+            newNetwork.Free = oldNetwork.FreeNodes.Select(x => newGraph.Nodes[x]).ToList();
+            newNetwork.Fixed = oldNetwork.FixedNodes.Select(x => newGraph.Nodes[x]).ToList();
+            newNetwork.Anchors = newNetwork.Fixed.Select(x => x.Value).ToList();
+            newNetwork.ATol = oldNetwork.ATol;
+            newNetwork.ETol = oldNetwork.ETol;
+
+
+
+
+            DA.SetDataList(0, newNetwork.Graph.Nodes);
+            DA.SetDataList(1, newNetwork.Graph.Edges);
             DA.SetData(2, response.Iter);
             DA.SetDataList(3, response.Q);
             DA.SetData(4, response.Loss);
@@ -99,6 +137,7 @@ namespace Ariadne.WebSocketClient
             {
                 DA.SetDataTree(6, response.NodeTraceToTree());
             }
+            DA.SetData(7, newNetwork);
 
 
         }
@@ -127,9 +166,9 @@ namespace Ariadne.WebSocketClient
                 {
                     for (int i = 0; i < X.Count; i++)
                     {
-                        Point3d pt = new Point3d(iter[0][i], iter[1][i], iter[2][i]);
-                        GH_Point gh_Pt = new GH_Point(pt);
-                        Trace.Append(gh_Pt, new GH_Path(counter));
+                        Point3d pt = new(iter[0][i], iter[1][i], iter[2][i]);
+                        GH_Point gh_Pt = new(pt);
+                        Trace.Append(gh_Pt, new(counter));
                     }
                     counter++;
                 }

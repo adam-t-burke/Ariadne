@@ -29,11 +29,10 @@ namespace Ariadne.Objectives
         /// </summary>
         protected override void RegisterInputParams(GH_InputParamManager pManager)
         {
-            pManager.AddGenericParameter("Network", "Network","Network to select target nodes from", GH_ParamAccess.item);
-            pManager.AddIntegerParameter("Nodes", "Nodes", "Nodes to target", GH_ParamAccess.list);
+            pManager.AddGenericParameter("Nodes", "Nodes", "Nodes to target", GH_ParamAccess.list);
             pManager.AddNumberParameter("Weight", "Weight", "Weight of this objective function", GH_ParamAccess.item, 1.0);
 
-            pManager[1].Optional = true;
+            pManager[0].Optional = true;
         }
 
         /// <summary>
@@ -50,42 +49,23 @@ namespace Ariadne.Objectives
         /// <param name="DA">The DA object is used to retrieve from inputs and store in outputs.</param>
         protected override void SolveInstance(IGH_DataAccess DA)
         {
-            FDM_Network network = new FDM_Network();
-            List<Node> nodes = new List<Node>();
+            List<Node> nodes = new();
             double weight = 1.0;
 
-            if (!DA.GetData(0, ref network))
-            {
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Network input required for specifying target nodes.");
-                return;
-            }
                 
-            DA.GetDataList(1, nodes);
-            if (!DA.GetData(2, ref weight)) return;
+            DA.GetDataList(0, nodes);
+            if (!DA.GetData(1, ref weight)) return;
 
 
-            if (network.Valid && nodes.Count > 0)
-            {
-                List<Point3d> points = nodes.Select(node => node.Value).ToList();
-
-                List<int> indices = new List<int>(); 
-                foreach(Node node in nodes)
-                {
-                    int index = network.Graph.Nodes.IndexOf(node);
-                    indices.Add(index);
-                }
-                    
-                OBJTarget obj = new OBJTarget(weight, indices, points);
+            if (nodes.Count > 0)
+            {                    
+                OBJTarget obj = new OBJTarget(weight, nodes);
                 DA.SetData(0, obj);
             }
-            else if (network.Valid)
+            else 
             {
-                OBJTarget obj = new OBJTarget(weight, network.Free.Select(node => node.Value).ToList());
+                OBJTarget obj = new OBJTarget(weight);
                 DA.SetData(0, obj);
-            }
-            else
-            {
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Network invalid.");
             }
         }
 
