@@ -35,7 +35,7 @@ namespace Ariadne.Utilities
 
             Parallel.ForEach(nodes, (node, state) =>
                 {
-                    bool closeEnough = node.Position.EpsilonEquals(point, tolerance);
+                    bool closeEnough = node.Value.EpsilonEquals(point, tolerance);
                     if (closeEnough)
                     {
                         match = true;
@@ -65,7 +65,7 @@ namespace Ariadne.Utilities
             List<double> lengths = new List<double>();
             foreach (Edge edge in edges)
             {
-                lengths.Add(edge.Curve.GetLength());
+                lengths.Add(edge.Value.GetLength());
             }
             return lengths;
         }

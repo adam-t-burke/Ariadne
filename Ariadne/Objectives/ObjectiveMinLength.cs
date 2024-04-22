@@ -5,6 +5,7 @@ using Grasshopper.Kernel;
 using Rhino.Geometry;
 using Ariadne.Objectives;
 using System.Drawing;
+using Ariadne.Graphs;
 
 namespace Ariadne.Objectives
 {
@@ -25,8 +26,10 @@ namespace Ariadne.Objectives
         /// </summary>
         protected override void RegisterInputParams(GH_Component.GH_InputParamManager pManager)
         {
+            pManager.AddGenericParameter("Edges", "Edges", "Edges with minimum length objective", GH_ParamAccess.list);
+            pManager.AddNumberParameter("Minimum Length", "Length", "Target minimum length", GH_ParamAccess.list, 1.0);
             pManager.AddNumberParameter("Weight", "W", "Weight of objective", GH_ParamAccess.item, 1.0);
-            pManager.AddNumberParameter("Minimum Length", "Length", "Target minimum length", GH_ParamAccess.item, 1.0);
+
         }
 
         /// <summary>
@@ -43,15 +46,36 @@ namespace Ariadne.Objectives
         /// <param name="DA">The DA object is used to retrieve from inputs and store in outputs.</param>
         protected override void SolveInstance(IGH_DataAccess DA)
         {
+            List<Edge> edges = new();
+            List<double> length = new();
             double weight = 1.0;
-            double length = 1.0;
 
-            DA.GetData(0, ref weight);
-            DA.GetData(1, ref length);
+            DA.GetDataList(0, edges);
+            if (!DA.GetDataList(1, length)) { return; }
+            if (!DA.GetData(2, ref weight)) { return; }
 
-            OBJMinlength obj = new OBJMinlength(length, weight);
 
-            DA.SetData(0, obj);
+            if (edges.Count > 1)
+            {
+                OBJMinlength obj = new OBJMinlength(weight, length, edges);
+                if (obj.IsValid)
+                {
+                    DA.SetData(0, obj);
+                }
+            }
+            else
+            {
+                OBJMinlength obj = new OBJMinlength(weight, length);
+                if (obj.IsValid)
+                {
+                    DA.SetData(0, obj);
+                }
+                else
+                {
+                    AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Objective creation failed.");
+                    return;
+                }
+            }
 
         }
 

@@ -8,6 +8,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Windows.Markup;
 using Ariadne.FDM;
+using Ariadne.Graphs;
 using Rhino.Geometry;
 using Ariadne.Utilities;
 
@@ -21,15 +22,12 @@ namespace Ariadne.Objectives
     {
         public string OBJID { get; set; }
 
-        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public double Weight { get; set; }
 
-        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public List<int> Indices { get; set; }
 
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public List<double[]> Points { get; set; }
-
 
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public List<double> Values { get; set; }
@@ -40,9 +38,55 @@ namespace Ariadne.Objectives
         public OBJ() { }
     }
 
-    internal class OBJNull : OBJ
+    internal class OBJEdges : OBJ
     {
-        
+        [JsonIgnore(Condition = JsonIgnoreCondition.Always)]
+        public List<Edge> Edges { get; set; }
+        public void SetIndices(FDM_Network network, List<Edge> edges)
+        {
+            if (Indices is null)
+            {
+                Indices = new();
+                foreach (Edge edge in edges)
+                {
+                    Indices.Add(network.Graph.Edges.IndexOf(edge));
+                }
+            }
+            else {
+                
+            }
+        }
+    }
+
+    internal class OBJNodes : OBJ
+    {
+        [JsonIgnore(Condition = JsonIgnoreCondition.Always)]
+        public List<Node> Nodes { get; set; }
+        public void SetIndices(FDM_Network network, List<Node> nodes)
+        {
+            if (Indices is null)
+            {
+                Indices = new();
+                foreach (Node node in nodes)
+                {
+                    Indices.Add(network.Graph.Nodes.IndexOf(node));
+                }
+                
+            }
+            else
+            {
+                if (Points is null)
+                {
+                    Points = UtilityFunctions.PointsToArray(network.Free.Select(x => x.Value).ToList());
+                }
+            }
+         
+
+        }
+    }
+
+    internal class OBJNull : OBJ
+    {        
         public OBJNull()
         {
             OBJID = "None";
@@ -51,7 +95,7 @@ namespace Ariadne.Objectives
         }
     }
 
-    internal class OBJTarget : OBJ
+    internal class OBJTarget : OBJNodes
     {
         /// <summary>
         /// Empty construtor
@@ -65,14 +109,13 @@ namespace Ariadne.Objectives
         /// Constructor for targeting a geometry that uses all free nodes in the network as targets.
         /// </summary> 
         /// <param name="_weight">Weight of objective function</param>
-        /// <param name="_points">List of points to apply to</param>
 
-        public OBJTarget(double _weight, List<Point3d> _points)
+        public OBJTarget(double _weight)
         {
             OBJID = "Target";
             Weight = _weight;
             Indices = new List<int>() { -1 };
-            Points = UtilityFunctions.PointsToArray(_points);
+            Points = null;
             IsValid = true;
         }
 
@@ -82,24 +125,18 @@ namespace Ariadne.Objectives
         /// <param name="_weight"></param>
         /// <param name="_nodes"></param>
         /// <param name="_points"></param>
-        public OBJTarget(double _weight, List<int> _nodes, List<Point3d> _points)
+        public OBJTarget(double _weight, List<Node> _nodes)
         {
             OBJID = "Target";
             Weight = _weight;
-            Indices = _nodes;
-            Points = UtilityFunctions.PointsToArray(_points);
-            if (_nodes.Count == _points.Count)
-            {
-                IsValid = true;
-            }
-            else
-            {
-                IsValid = false;
-            }
+            Nodes = _nodes;
+            Indices = null;
+            Points = UtilityFunctions.PointsToArray(_nodes.Select(x => x.Value).ToList());
+            IsValid = true;
         }
     }
 
-    internal class OBJlengthvariation : OBJ
+    internal class OBJlengthvariation : OBJEdges
     {
         /// <summary>
         /// Empty construtor
@@ -126,17 +163,18 @@ namespace Ariadne.Objectives
         /// </summary>
         /// <param name="_weight"></param>
         /// <param name="_edges"></param>
-        public OBJlengthvariation(double _weight, List<int> _edges)
+        public OBJlengthvariation(double _weight, List<Edge> _edges)
         {
             OBJID = "LengthVar";
             Weight = _weight;
-            Indices = _edges;
+            Edges = _edges;
+            Indices = null;
             IsValid = true;
         }
 
     }
 
-    internal class OBJforcevariation : OBJ
+    internal class OBJforcevariation : OBJEdges
     {
         /// <summary>
         /// Empty construtor
@@ -163,17 +201,18 @@ namespace Ariadne.Objectives
         /// </summary>
         /// <param name="_weight"></param>
         /// <param name="_edges"></param>
-        public OBJforcevariation(double _weight, List<int> _edges)
+        public OBJforcevariation(double _weight, List<Edge> _edges)
         {
             OBJID = "ForceVar";
             Weight = _weight;
-            Indices = _edges;
+            Edges = _edges;
+            Indices = null;
             IsValid = true;
         }
 
     }
 
-    internal class OBJPerformance : OBJ
+    internal class OBJPerformance : OBJEdges
     {
         public OBJPerformance()
         {
@@ -183,11 +222,12 @@ namespace Ariadne.Objectives
         {
             OBJID = "Performance";
             Weight = _weight;
+            Indices = new List<int>() { -1 };
             IsValid = true;
         }
     }
 
-    internal class OBJMinlength : OBJ
+    internal class OBJMinlength : OBJEdges
     {
         /// <summary>
         /// Empty Constructor
@@ -202,11 +242,11 @@ namespace Ariadne.Objectives
         /// </summary>
         /// <param name="_weight"></param>
         /// <param name="_value"></param>
-        public OBJMinlength(double _weight, double _value)
+        public OBJMinlength(double _weight, List<double> _value)
         {
             OBJID = "MinLength";
             Weight = _weight;
-            Values = new List<double>() { _value };
+            Values = _value;
             Indices = new List<int>() { -1 };
             IsValid = true;
         }
@@ -217,37 +257,48 @@ namespace Ariadne.Objectives
         /// <param name="_weight"></param>
         /// <param name="_value"></param>
         /// <param name="_edges"></param>
-        public OBJMinlength(double _weight, double _value, List<int> _edges)
+        public OBJMinlength(double _weight, List<double> _value, List<Edge> _edges)
         {
             OBJID = "MinLength";
             Weight = _weight;
-            Values = new List<double>() { _value };
-            Indices = _edges;
-            IsValid = true;
-        }
 
-        /// <summary>
-        /// Minimum length objective function from a list of values and list of edges to apply to.
-        /// </summary>
-        /// 
-        public OBJMinlength(double _weight, List<double> _values, List<int> _edges)
-        {
-            OBJID = "MinLength";
-            Weight = _weight;
-            Values = _values;
-            Indices = _edges;
-            if (_values.Count == _edges.Count)
+            if (_edges.Count == 1 && _value.Count == 1)
             {
+                Values = _value;
+                Edges = _edges;
+                Indices = null;
                 IsValid = true;
             }
+            else if (_value.Count == 1 && _edges.Count > 1)
+            {
+                Values = Enumerable.Repeat(_value[0], _edges.Count).ToList();
+                Edges = _edges;
+                Indices = null;
+                IsValid = true;
+            }
+            else if (_edges.Count > 1 && _value.Count > 1)
+            {
+                if (_edges.Count == _value.Count)
+                {
+                    Values = _value;
+                    Edges = _edges;
+                    Indices = null;
+                    IsValid = true;
+                }
+                else
+                {
+                    throw new Exception($"Number of values must match number of edges. Current count of values is {_value.Count}");
+                }
+            }     
+            
             else
             {
-                IsValid = false;
+                throw new Exception("Invalid objective function.");
             }
         }
     }
 
-    internal class OBJMaxlength : OBJ
+    internal class OBJMaxlength : OBJEdges
     {
         /// <summary>
         /// Empty constructor
@@ -262,11 +313,11 @@ namespace Ariadne.Objectives
         /// </summary>
         /// <param name="_weight"></param>
         /// <param name="_value"></param>
-        public OBJMaxlength(double _weight, double _value)
+        public OBJMaxlength(double _weight, List<double> _value)
         {
             OBJID = "MaxLength";
             Weight = _weight;
-            Values = new List<double>() { _value };
+            Values = _value;
             Indices = new List<int>() { -1 };
             IsValid = true;
         }
@@ -277,12 +328,13 @@ namespace Ariadne.Objectives
         /// <param name="_weight"></param>
         /// <param name="_value"></param>
         /// <param name="_edges"></param>
-        public OBJMaxlength(double _weight, double _value, List<int> _edges)
+        public OBJMaxlength(double _weight, double _value, List<Edge> _edges)
         {
             OBJID = "MaxLength";
             Weight = _weight;
             Values = new List<double>() { _value };
-            Indices = _edges;
+            Edges = _edges;
+            Indices = null;
             IsValid = true;
         }
 
@@ -290,12 +342,13 @@ namespace Ariadne.Objectives
         /// Maximum length objective function from a list of values and list of edges to apply to.
         /// </summary>
         /// 
-        public OBJMaxlength(double _weight, List<double> _value, List<int> _edges)
+        public OBJMaxlength(double _weight, List<double> _value, List<Edge> _edges)
         {
             OBJID = "MaxLength";
             Weight = _weight;
             Values = _value;
-            Indices = _edges;
+            Edges = _edges;
+            Indices = null;
             if (_value.Count == _edges.Count)
             {
                 IsValid = true;
@@ -307,7 +360,7 @@ namespace Ariadne.Objectives
         }
     }
 
-    internal class OBJMinforce : OBJ
+    internal class OBJMinforce : OBJEdges
     {
         /// <summary>
         /// Empty constructor
@@ -327,7 +380,7 @@ namespace Ariadne.Objectives
             OBJID = "MinForce";
             Weight = _weight;
             Values = _values;
-            Indices.Add(-1);
+            Indices = new List<int>() { -1 };
             IsValid = true;
         }
 
@@ -337,12 +390,13 @@ namespace Ariadne.Objectives
         /// <param name="_weight"></param>
         /// <param name="_value"></param>
         /// <param name="_edges"></param>
-        public OBJMinforce(double _weight, double _value, List<int> _edges)
+        public OBJMinforce(double _weight, double _value, List<Edge> _edges)
         {
             OBJID = "MinForce";
             Weight = _weight;
             Values = new List<double>() { _value };
-            Indices = _edges;
+            Edges = _edges;
+            Indices = null;
             IsValid = true;
         }
 
@@ -352,12 +406,13 @@ namespace Ariadne.Objectives
         /// <param name="_weight"></param>
         /// <param name="_values"></param>
         /// <param name="_edges"></param>
-        public OBJMinforce(double _weight, List<double> _values, List<int> _edges)
+        public OBJMinforce(double _weight, List<double> _values, List<Edge> _edges)
         {
             OBJID = "MinForce";
             Weight = _weight;
             Values = _values;
-            Indices = _edges;
+            Edges = _edges;
+            Indices = null;
             if (_values.Count == _edges.Count)
             {
                 IsValid = true;
@@ -369,7 +424,7 @@ namespace Ariadne.Objectives
         }
     }
 
-    internal class OBJMaxforce : OBJ
+    internal class OBJMaxforce : OBJEdges
     {
         /// <summary>
         /// Empty constructor
@@ -399,7 +454,7 @@ namespace Ariadne.Objectives
         /// <param name="_weight"></param>
         /// <param name="_value"></param>
         /// <param name="_edges"></param>
-        public OBJMaxforce(double _weight, double _value, List<int> _edges)
+        public OBJMaxforce(double _weight, double _value)
         {
             OBJID = "MaxForce";
             Weight = _weight;
@@ -414,12 +469,13 @@ namespace Ariadne.Objectives
         /// <param name="_weight"></param>
         /// <param name="_values"></param>
         /// <param name="_edges"></param>
-        public OBJMaxforce(double _weight, List<double> _values, List<int> _edges)
+        public OBJMaxforce(double _weight, List<double> _values, List<Edge> _edges)
         {
             OBJID = "MaxForce";
             Weight = _weight;
             Values = _values;
-            Indices = _edges;
+            Edges = _edges;
+            Indices = null;
             if (_values.Count == _edges.Count)
             {
                 IsValid = true;
@@ -431,7 +487,7 @@ namespace Ariadne.Objectives
         }
     }
 
-    internal class OBJTargetLength : OBJ
+    internal class OBJTargetLength : OBJEdges
     {
         /// <summary>
         /// Empty constructor
@@ -461,12 +517,13 @@ namespace Ariadne.Objectives
         /// <param name="_weight"></param>
         /// <param name="_value"></param>
         /// <param name="_edges"></param>
-        public OBJTargetLength(double _weight, double _value, List<int> _edges)
+        public OBJTargetLength(double _weight, double _value, List<Edge> _edges)
         {
             OBJID = "TargetLen";
             Weight = _weight;
             Values = new List<double>() { _value };
-            Indices = _edges;
+            Edges = _edges;
+            Indices = null;
             IsValid = true;
         }
 
@@ -476,12 +533,13 @@ namespace Ariadne.Objectives
         /// <param name="_weight"></param>
         /// <param name="_values"></param>
         /// <param name="_edges"></param>
-        public OBJTargetLength(double _weight, List<double> _values, List<int> _edges)
+        public OBJTargetLength(double _weight, List<double> _values, List<Edge> _edges)
         {
             OBJID = "TargetLen";
             Weight = _weight;
             Values = _values;
-            Indices = _edges;
+            Edges = _edges;
+            Indices = null;
             if (_values.Count == _edges.Count)
             {
                 IsValid = true;

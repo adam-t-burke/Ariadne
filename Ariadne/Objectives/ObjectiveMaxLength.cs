@@ -5,6 +5,7 @@ using Grasshopper.Kernel;
 using Rhino.Geometry;
 using Ariadne.Objectives;
 using System.Drawing;
+using Ariadne.Graphs;
 
 namespace Ariadne.Objectives
 {
@@ -25,8 +26,12 @@ namespace Ariadne.Objectives
         /// </summary>
         protected override void RegisterInputParams(GH_Component.GH_InputParamManager pManager)
         {
+            pManager.AddGenericParameter("Edges", "Edges", "Edges with maximum length objective", GH_ParamAccess.list);
+            pManager.AddNumberParameter("Maximum Length", "Length", "Target maximum length", GH_ParamAccess.list, 1000.0);
             pManager.AddNumberParameter("Weight", "W", "Weight of objective", GH_ParamAccess.item, 1.0);
-            pManager.AddNumberParameter("Maximum Length", "Length", "Target maximum length", GH_ParamAccess.item, 1000.0);
+
+            pManager[0].Optional = true;
+            
         }
 
         /// <summary>
@@ -43,15 +48,49 @@ namespace Ariadne.Objectives
         /// <param name="DA">The DA object is used to retrieve from inputs and store in outputs.</param>
         protected override void SolveInstance(IGH_DataAccess DA)
         {
+            List<Edge> edges = new();
+            List<double> length = new List<double> { 1.0 };
             double weight = 1.0;
-            double length = 1.0;
 
-            DA.GetData(0, ref weight);
-            DA.GetData(1, ref length);
+            DA.GetDataList(0, edges);
+            if (!DA.GetDataList(1, length)) { return; }
+            if (!DA.GetData(2, ref weight)) { return; }
 
-            OBJMaxlength obj = new OBJMaxlength(length, weight);
 
-            DA.SetData(0, obj);
+            if (edges.Count > 0 && length.Count == 1)
+            {
+                OBJMaxlength obj = new OBJMaxlength(weight, length, edges);
+                if (obj.IsValid)
+                {
+                    DA.SetData(0, obj);
+                }
+            }
+            else if (edges.Count > 0 && length.Count > 1)
+            {
+                OBJMaxlength obj = new OBJMaxlength(weight, length, edges);
+                if (obj.IsValid)
+                {
+                    DA.SetData(0, obj);
+                }
+                else
+                {
+                    AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Objective creation failed. Check to ensure number of forces supplied matches the number of edge indices.");
+                    return;
+                }
+            }
+            else
+            {
+                OBJMaxlength obj = new OBJMaxlength(weight, length);
+                if (obj.IsValid)
+                {
+                    DA.SetData(0, obj);
+                }
+                else
+                {
+                    AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Objective creation failed.");
+                    return;
+                }
+            }
 
         }
 

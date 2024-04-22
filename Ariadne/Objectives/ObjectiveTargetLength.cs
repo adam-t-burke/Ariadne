@@ -5,6 +5,7 @@ using Grasshopper.Kernel;
 using Rhino.Geometry;
 using Ariadne.FDM;
 using System.Drawing;
+using Ariadne.Graphs;
 
 namespace Ariadne.Objectives
 {
@@ -25,7 +26,7 @@ namespace Ariadne.Objectives
         /// </summary>
         protected override void RegisterInputParams(GH_Component.GH_InputParamManager pManager)
         {
-            pManager.AddIntegerParameter("Edge Indices", "Edge Indices", "Indices of edges to equalized forces in.", GH_ParamAccess.list);
+            pManager.AddGenericParameter("Edges", "Edges", "Edges for target length objective.", GH_ParamAccess.list);
             pManager.AddNumberParameter("Target Length", "Length(s)", "Target length for each edge", GH_ParamAccess.list, 1.0);
             pManager.AddNumberParameter("Weight", "Weight", "Weight of objective", GH_ParamAccess.item, 1.0);
             
@@ -49,20 +50,20 @@ namespace Ariadne.Objectives
         {
             double weight = 1.0;
             List<double> targetLengths = new List<double>();
-            List<int> edgeIndices = new List<int>();
+            List<Edge> edges = new();
 
-            DA.GetDataList(0, edgeIndices);
+            DA.GetDataList(0, edges);
             DA.GetDataList(1, targetLengths);
             DA.GetData(2, ref weight);
             
-            if (edgeIndices.Count == 0 && targetLengths.Count > 1)
+            if (edges.Count == 0 && targetLengths.Count > 1)
             {
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Number of target lengths must be 1 when no edge indices are provided.");
                 return;
             }
-            else if(edgeIndices.Count > 0)
+            else if(edges.Count > 0)
             {
-                OBJTargetLength obj = new OBJTargetLength(weight, targetLengths, edgeIndices);
+                OBJTargetLength obj = new OBJTargetLength(weight, targetLengths, edges);
                 if (obj.IsValid)
                 {
                     DA.SetData(0, obj);

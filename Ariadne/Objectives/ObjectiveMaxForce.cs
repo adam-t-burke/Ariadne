@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using Grasshopper.Kernel;
 using Rhino.Geometry;
+using Ariadne.Graphs;
 
 namespace Ariadne.Objectives
 {
@@ -23,7 +24,7 @@ namespace Ariadne.Objectives
         /// </summary>
         protected override void RegisterInputParams(GH_Component.GH_InputParamManager pManager)
         {
-            pManager.AddIntegerParameter("Edge Indices", "Edge Indices", "Edge Indices", GH_ParamAccess.list);
+            pManager.AddGenericParameter("Edges", "Edges", "Edges with a maximum force objective.", GH_ParamAccess.list);
             pManager.AddNumberParameter("Maximum Force", "Force", "Target maximum force", GH_ParamAccess.list, 10000.0);
             pManager.AddNumberParameter("Weight", "W", "Weight of objective", GH_ParamAccess.item, 1.0);
 
@@ -44,18 +45,18 @@ namespace Ariadne.Objectives
         /// <param name="DA">The DA object is used to retrieve from inputs and store in outputs.</param>
         protected override void SolveInstance(IGH_DataAccess DA)
         {
-            List<int> edges = new List<int>();
+            List<Edge> edges = new();
             List<double> force = new List<double> { 1.0 };
             double weight = 1.0;
 
             DA.GetDataList(0, edges);
-            if (!DA.GetData(1, ref force)) { return; }
+            if (!DA.GetDataList(1, force)) { return; }
             if (!DA.GetData(2, ref weight)) { return; }
 
 
             if (edges.Count > 0 && force.Count == 1)
             {
-                OBJMaxforce obj = new OBJMaxforce(weight, force[0], edges);
+                OBJMaxforce obj = new OBJMaxforce(weight, force, edges);
                 if (obj.IsValid)
                 {
                     DA.SetData(0, obj);

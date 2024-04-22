@@ -1,14 +1,17 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Xml.Serialization;
 using Ariadne.Utilities;
 using Eto.Forms;
 using Grasshopper.Kernel;
+using System.Threading.Tasks;
 using Grasshopper.Kernel.Data;
 using Rhino.Collections;
 using Rhino.Geometry;
 using System.Linq;
 using System.Drawing;
+using Ariadne.Graphs;
 
 namespace Ariadne.FDM
 {
@@ -59,16 +62,23 @@ namespace Ariadne.FDM
             network.Graph.EdgeIndicesToTree();
             network.Graph.AdjacencyListToTree();
 
-            IEnumerable<int> freeIndices = Enumerable.Range(0, network.Graph.Nn - network.Anchors.Count);
-            IEnumerable<int> fixedIndices = Enumerable.Range(network.Graph.Nn - network.Anchors.Count, network.Graph.Nn);
+            //IEnumerable<int> freeIndices = Enumerable.Range(0, network.Graph.Nn - network.Anchors.Count);
+            //IEnumerable<int> fixedIndices = Enumerable.Range(network.Graph.Nn - network.Anchors.Count, network.Anchors.Count);
 
-            DA.SetDataList(0, network.Graph.Nodes.Select(node => node.Position));
-            DA.SetDataList(1, network.Graph.Edges.Select(edge => edge.Curve));
+            //List<int> freeIndices = network.Graph.Nodes.Select(node => network.Graph.Nodes.IndexOf(node)).Where(index => network.Graph.Nodes[index].Anchor == false).ToList();
+            //List<int> fixedIndices = network.Graph.Nodes.Select(node => network.Graph.Nodes.IndexOf(node)).Where(index => network.Graph.Nodes[index].Anchor == true).ToList();
+
+
+
+
+
+            DA.SetDataList(0, network.Graph.Nodes);
+            DA.SetDataList(1, network.Graph.Edges);
             DA.SetDataTree(2, network.Graph.IndicesTree);
             DA.SetDataTree(3, network.Graph.AdjacencyTree);
-            DA.SetDataList(4, freeIndices);
+            DA.SetDataList(4, network.FreeNodes);
             DA.SetDataList(5, network.Free);
-            DA.SetDataList(6, fixedIndices);
+            DA.SetDataList(6, network.FixedNodes);
             DA.SetDataList(7, network.Fixed);
         }
 

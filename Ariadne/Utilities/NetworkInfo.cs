@@ -67,8 +67,8 @@ namespace Ariadne.Utilities
             //List<Vector3d> reactions = Solver.Reactions(fdmNetwork);
             List<double> lengths = UtilityFunctions.GetLengths(fdmNetwork.Network.Graph.Edges);
 
-            List<Point3d> startPt = fdmNetwork.Network.Graph.Edges.Select(st => st.Start.Position).ToList();
-            List<Point3d> endPt = fdmNetwork.Network.Graph.Edges.Select(end => end.End.Position).ToList();
+            List<Point3d> startPt = fdmNetwork.Network.Graph.Edges.Select(st => st.Start.Value).ToList();
+            List<Point3d> endPt = fdmNetwork.Network.Graph.Edges.Select(end => end.End.Value).ToList();
 
             DA.SetDataList(0, fdmNetwork.Network.Graph.Nodes);
             DA.SetDataList(1, fdmNetwork.Network.Graph.Edges);

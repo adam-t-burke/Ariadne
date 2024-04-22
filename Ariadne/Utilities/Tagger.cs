@@ -78,7 +78,7 @@ namespace Ariadne.Utilities
 
             foreach (Edge edge in network.Network.Graph.Edges)
             {
-                Curve curve = edge.Curve;
+                Curve curve = edge.Value;
                 points.Add(curve.PointAtNormalizedLength(0.5));
             }
         }
@@ -89,7 +89,7 @@ namespace Ariadne.Utilities
 
             for (int i = 0; i < network.Network.Graph.Ne; i++)
             {
-                Curve curve = network.Network.Graph.Edges[i].Curve;
+                Curve curve = network.Network.Graph.Edges[i].Value;
                 string length = string.Format("{0:0.0}", curve.GetLength());
                 string density = string.Format("{0:0.0}", network.Q[i]);
                 string force = string.Format("{0:0.00}", forces[i]);
