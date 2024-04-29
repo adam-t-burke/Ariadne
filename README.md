@@ -1,1 +1,5 @@
 # Ariadne
+
+Ariadne is the front-end counterpart to [Theseus](github.com/fibrous-tendencies/Theseus) and is used for the directed form-finding of tensile network structures.
+
+The easiest way to install Ariadne is to search for it in the package manager inside of Rhino, however it can also be built from the source available here.
