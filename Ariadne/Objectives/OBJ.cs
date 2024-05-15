@@ -20,7 +20,7 @@ namespace Ariadne.Objectives
     /// </summary>
     internal abstract class OBJ
     {
-        public string OBJID { get; set; }
+        public int OBJID { get; set; }
 
         public double Weight { get; set; }
 
@@ -89,7 +89,7 @@ namespace Ariadne.Objectives
     {        
         public OBJNull()
         {
-            OBJID = "None";
+            OBJID = -1;
             Weight = 0;
             IsValid = false;
         }
@@ -112,7 +112,7 @@ namespace Ariadne.Objectives
 
         public OBJTarget(double _weight)
         {
-            OBJID = "Target";
+            OBJID = 1;
             Weight = _weight;
             Indices = new List<int>() { -1 };
             Points = null;
@@ -127,7 +127,7 @@ namespace Ariadne.Objectives
         /// <param name="_points"></param>
         public OBJTarget(double _weight, List<Node> _nodes)
         {
-            OBJID = "Target";
+            OBJID = 1;
             Weight = _weight;
             Nodes = _nodes;
             Indices = null;
@@ -152,7 +152,7 @@ namespace Ariadne.Objectives
         /// <param name="_weight"></param>
         public OBJlengthvariation(double _weight)
         {
-            OBJID = "LengthVar";
+            OBJID = 2;
             Weight = _weight;
             Indices = new List<int> { -1 };
             IsValid = true;
@@ -165,7 +165,7 @@ namespace Ariadne.Objectives
         /// <param name="_edges"></param>
         public OBJlengthvariation(double _weight, List<Edge> _edges)
         {
-            OBJID = "LengthVar";
+            OBJID = 2;
             Weight = _weight;
             Edges = _edges;
             Indices = null;
@@ -190,7 +190,7 @@ namespace Ariadne.Objectives
         /// <param name="_weight"></param>
         public OBJforcevariation(double _weight)
         {
-            OBJID = "ForceVar";
+            OBJID = 3;
             Weight = _weight;
             Indices = new List<int>() { -1 };
             IsValid = true;
@@ -203,7 +203,7 @@ namespace Ariadne.Objectives
         /// <param name="_edges"></param>
         public OBJforcevariation(double _weight, List<Edge> _edges)
         {
-            OBJID = "ForceVar";
+            OBJID = 3;
             Weight = _weight;
             Edges = _edges;
             Indices = null;
@@ -220,7 +220,7 @@ namespace Ariadne.Objectives
         }
         public OBJPerformance(double _weight)
         {
-            OBJID = "Performance";
+            OBJID = 4;
             Weight = _weight;
             Indices = new List<int>() { -1 };
             IsValid = true;
@@ -244,7 +244,7 @@ namespace Ariadne.Objectives
         /// <param name="_value"></param>
         public OBJMinlength(double _weight, List<double> _value)
         {
-            OBJID = "MinLength";
+            OBJID = 5;
             Weight = _weight;
             Values = _value;
             Indices = new List<int>() { -1 };
@@ -259,7 +259,7 @@ namespace Ariadne.Objectives
         /// <param name="_edges"></param>
         public OBJMinlength(double _weight, List<double> _value, List<Edge> _edges)
         {
-            OBJID = "MinLength";
+            OBJID = 5;
             Weight = _weight;
 
             if (_edges.Count == 1 && _value.Count == 1)
@@ -315,7 +315,7 @@ namespace Ariadne.Objectives
         /// <param name="_value"></param>
         public OBJMaxlength(double _weight, List<double> _value)
         {
-            OBJID = "MaxLength";
+            OBJID = 6;
             Weight = _weight;
             Values = _value;
             Indices = new List<int>() { -1 };
@@ -330,7 +330,7 @@ namespace Ariadne.Objectives
         /// <param name="_edges"></param>
         public OBJMaxlength(double _weight, double _value, List<Edge> _edges)
         {
-            OBJID = "MaxLength";
+            OBJID = 6;
             Weight = _weight;
             Values = new List<double>() { _value };
             Edges = _edges;
@@ -344,7 +344,7 @@ namespace Ariadne.Objectives
         /// 
         public OBJMaxlength(double _weight, List<double> _value, List<Edge> _edges)
         {
-            OBJID = "MaxLength";
+            OBJID = 6;
             Weight = _weight;
             Values = _value;
             Edges = _edges;
@@ -377,7 +377,7 @@ namespace Ariadne.Objectives
         /// <param name="_values"></param>
         public OBJMinforce(double _weight, List<double> _values)
         {
-            OBJID = "MinForce";
+            OBJID = 7;
             Weight = _weight;
             Values = _values;
             Indices = new List<int>() { -1 };
@@ -392,7 +392,7 @@ namespace Ariadne.Objectives
         /// <param name="_edges"></param>
         public OBJMinforce(double _weight, double _value, List<Edge> _edges)
         {
-            OBJID = "MinForce";
+            OBJID = 7;
             Weight = _weight;
             Values = new List<double>() { _value };
             Edges = _edges;
@@ -408,7 +408,7 @@ namespace Ariadne.Objectives
         /// <param name="_edges"></param>
         public OBJMinforce(double _weight, List<double> _values, List<Edge> _edges)
         {
-            OBJID = "MinForce";
+            OBJID = 7;
             Weight = _weight;
             Values = _values;
             Edges = _edges;
@@ -441,7 +441,7 @@ namespace Ariadne.Objectives
         /// <param name="_values"></param>
         public OBJMaxforce(double _weight, List<double> _values)
         {
-            OBJID = "MaxForce";
+            OBJID = 8;
             Weight = _weight;
             Values = _values;
             Indices = new List<int>() { -1 };
@@ -456,7 +456,7 @@ namespace Ariadne.Objectives
         /// <param name="_edges"></param>
         public OBJMaxforce(double _weight, double _value)
         {
-            OBJID = "MaxForce";
+            OBJID = 8;
             Weight = _weight;
             Values = new List<double>() { _value };
             Indices = new List<int>() { -1 };
@@ -471,7 +471,7 @@ namespace Ariadne.Objectives
         /// <param name="_edges"></param>
         public OBJMaxforce(double _weight, List<double> _values, List<Edge> _edges)
         {
-            OBJID = "MaxForce";
+            OBJID = 8;
             Weight = _weight;
             Values = _values;
             Edges = _edges;
@@ -504,7 +504,7 @@ namespace Ariadne.Objectives
         /// <param name="_values"></param>
         public OBJTargetLength(double _weight, List<double> _values)
         {
-            OBJID = "TargetLen";
+            OBJID = 9;
             Weight = _weight;
             Values = _values;
             Indices = new List<int>() { -1 };
@@ -519,7 +519,7 @@ namespace Ariadne.Objectives
         /// <param name="_edges"></param>
         public OBJTargetLength(double _weight, double _value, List<Edge> _edges)
         {
-            OBJID = "TargetLen";
+            OBJID = 9;
             Weight = _weight;
             Values = new List<double>() { _value };
             Edges = _edges;
@@ -535,7 +535,7 @@ namespace Ariadne.Objectives
         /// <param name="_edges"></param>
         public OBJTargetLength(double _weight, List<double> _values, List<Edge> _edges)
         {
-            OBJID = "TargetLen";
+            OBJID = 9;
             Weight = _weight;
             Values = _values;
             Edges = _edges;

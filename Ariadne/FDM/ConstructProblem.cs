@@ -37,6 +37,7 @@ namespace Ariadne.FDM
             pManager.AddIntegerParameter("Nodes to apply loads to", "Load Nodes", "Indices of nodes to apply loads to", GH_ParamAccess.list);
             pManager.AddGenericParameter("Optimization Parameters", "Params", "Parameters and objectives for optimization.", GH_ParamAccess.item);
             pManager.AddGenericParameter("Variable Anchors", "VarAnchors", "Variable anchors for optimization", GH_ParamAccess.list);
+            pManager.AddBooleanParameter("Cancel Form-Finding", "Cancel", "Cancel the form-finding process", GH_ParamAccess.item, false);
     
             pManager[3].Optional = true;
             pManager[4].Optional = true;
@@ -49,7 +50,7 @@ namespace Ariadne.FDM
         protected override void RegisterOutputParams(GH_OutputParamManager pManager)
         {
             pManager.AddGenericParameter("FDM Problem", "FDM", "All of the elements required for form-finding using the Force Density Method", GH_ParamAccess.item);
-            pManager.AddGenericParameter("Message", "Message", "Message to send to the server", GH_ParamAccess.item);
+            pManager.AddTextParameter("Message", "Message", "Message to send to the server", GH_ParamAccess.item);
         }
 
         /// <summary>
@@ -66,6 +67,7 @@ namespace Ariadne.FDM
             OBJParameters Optimization = null;
             FDM_Problem problem;
             List<Anchor> anchors = new List<Anchor>();
+            bool cancel = false;
 
             //assign
             if (!DA.GetData(0, ref Network)) return;
@@ -74,6 +76,13 @@ namespace Ariadne.FDM
             DA.GetDataList(3, LoadNodes);
             DA.GetData(4, ref Optimization);
             DA.GetDataList(5, anchors);
+            DA.GetData(6, ref cancel);
+
+            if (cancel)
+            {
+                DA.SetData(1, "cancel");
+                return;
+            }
 
 
             if (P.Count > 1)

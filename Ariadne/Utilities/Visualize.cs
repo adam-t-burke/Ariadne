@@ -98,7 +98,7 @@ namespace Ariadne.Utilities
         {
             ClearData();
             //Initialize
-            FDM_Problem network = new FDM_Problem();
+            FDM_Network network = new();
             List<Vector3d> loads = new List<Vector3d>();
             double scale = 1.0;
             c0 = pink; // min colour (light gray)
@@ -124,19 +124,19 @@ namespace Ariadne.Utilities
             DA.GetData(11, ref creact);
             DA.GetData(12, ref react);
 
-            List<int> freeIndices = Enumerable.Range(0, network.Network.Graph.Nn - network.Network.Free.Count).ToList();
-            List<int> fixedIndices = Enumerable.Range(network.Network.Graph.Nn - network.Network.Free.Count, network.Network.Graph.Nn).ToList();
+            List<int> freeIndices = network.FreeNodes;
+            List<int> fixedIndices = network.FixedNodes;
 
             //Lines and forces
-            externalforces = LoadMaker(network.Network.Graph.Nodes, freeIndices , loads, scale);
+            externalforces = LoadMaker(network.Graph.Nodes, freeIndices , loads, scale);
             //edges = network.Network.Graph.Edges.Select(edge => edge.Curve);
             //reactionforces = ReactionMaker(Solver.Reactions(network), network.Points, network.Network.F, scale);
 
             //element-wise values
             if (prop == 0)
             {
-                List<double> length = UtilityFunctions.GetLengths(network.Network.Graph.Edges);
-                property = UtilityFunctions.GetForces(length, network.Q);
+                List<double> length = UtilityFunctions.GetLengths(network.Graph.Edges);
+                property = UtilityFunctions.GetForces(length, network.Graph.Edges);
                 GradientMaker(property);
                 //var propabs = property.Select(x => Math.Abs(x)).ToList();
 
@@ -144,7 +144,7 @@ namespace Ariadne.Utilities
             }
             else if (prop == 1)
             {
-                property = network.Q;
+                property = network.Graph.Edges.Select(x => x.Q).ToList();
                 GradientMaker(property);
 
                 //var propabs = property.Select(x => Math.Abs(x)).ToList();

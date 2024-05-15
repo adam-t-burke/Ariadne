@@ -113,6 +113,16 @@ namespace Ariadne.Properties {
         /// <summary>
         ///   Looks up a localized resource of type System.Drawing.Bitmap.
         /// </summary>
+        internal static System.Drawing.Bitmap CreateAnchor {
+            get {
+                object obj = ResourceManager.GetObject("CreateAnchor", resourceCulture);
+                return ((System.Drawing.Bitmap)(obj));
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized resource of type System.Drawing.Bitmap.
+        /// </summary>
         internal static System.Drawing.Bitmap CreateGraph {
             get {
                 object obj = ResourceManager.GetObject("CreateGraph", resourceCulture);
@@ -313,9 +323,19 @@ namespace Ariadne.Properties {
         /// <summary>
         ///   Looks up a localized resource of type System.Drawing.Bitmap.
         /// </summary>
-        internal static System.Drawing.Bitmap send {
+        internal static System.Drawing.Bitmap ReceiveFDM {
             get {
-                object obj = ResourceManager.GetObject("send", resourceCulture);
+                object obj = ResourceManager.GetObject("ReceiveFDM", resourceCulture);
+                return ((System.Drawing.Bitmap)(obj));
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized resource of type System.Drawing.Bitmap.
+        /// </summary>
+        internal static System.Drawing.Bitmap Send {
+            get {
+                object obj = ResourceManager.GetObject("Send", resourceCulture);
                 return ((System.Drawing.Bitmap)(obj));
             }
         }
@@ -333,9 +353,9 @@ namespace Ariadne.Properties {
         /// <summary>
         ///   Looks up a localized resource of type System.Drawing.Bitmap.
         /// </summary>
-        internal static System.Drawing.Bitmap start {
+        internal static System.Drawing.Bitmap Start {
             get {
-                object obj = ResourceManager.GetObject("start", resourceCulture);
+                object obj = ResourceManager.GetObject("Start", resourceCulture);
                 return ((System.Drawing.Bitmap)(obj));
             }
         }

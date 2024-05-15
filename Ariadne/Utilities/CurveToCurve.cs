@@ -53,8 +53,8 @@ namespace Ariadne.Utilities
         /// <param name="DA">The DA object is used to retrieve from inputs and store in outputs.</param>
         protected override void SolveInstance(IGH_DataAccess DA)
         {
-            FDM_Problem fdm1 = new FDM_Problem();
-            FDM_Problem fdm2 = new FDM_Problem();
+            FDM_Network fdm1 = new();
+            FDM_Network fdm2 = new();
             col = System.Drawing.Color.SlateGray;
             thickness = 2;
             show = true;
@@ -62,7 +62,7 @@ namespace Ariadne.Utilities
             if (!DA.GetData(0, ref fdm1)) return;
             if (!DA.GetData(1, ref fdm2)) return;
 
-            if (fdm1.Network.Graph.Ne != fdm2.Network.Graph.Ne) AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Input and output networks must have same number of elements");
+            if (fdm1.Graph.Ne != fdm2.Graph.Ne) AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Input and output networks must have same number of elements");
 
             lines = GetLines(fdm1, fdm2);
 
@@ -71,7 +71,7 @@ namespace Ariadne.Utilities
             DA.GetData(4, ref show);
             DA.GetData(5, ref index);
 
-            if (index >= fdm1.Network.Graph.Ne)
+            if (index >= fdm1.Graph.Ne)
             {
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Index greater than total number of elements");
             }
@@ -95,14 +95,14 @@ namespace Ariadne.Utilities
 
         }
 
-        private Line[] GetLines(FDM_Problem n1, FDM_Problem n2)
+        private Line[] GetLines(FDM_Network n1, FDM_Network n2)
         {
-            Line[] ls = new Line[n1.Network.Graph.Edges.Count];
+            Line[] ls = new Line[n1.Graph.Edges.Count];
 
-            for (int i = 0; i < n1.Network.Graph.Edges.Count; i++)
+            for (int i = 0; i < n1.Graph.Edges.Count; i++)
             {
-                Curve c1 = n1.Network.Graph.Edges[i].Value;
-                Curve c2 = n2.Network.Graph.Edges[i].Value;
+                Curve c1 = n1.Graph.Edges[i].Value;
+                Curve c2 = n2.Graph.Edges[i].Value;
 
                 ls[i] = new Line(c1.PointAtNormalizedLength(0.5), c2.PointAtNormalizedLength(0.5));
             }

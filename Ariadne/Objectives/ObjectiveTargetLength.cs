@@ -55,6 +55,16 @@ namespace Ariadne.Objectives
             DA.GetDataList(0, edges);
             DA.GetDataList(1, targetLengths);
             DA.GetData(2, ref weight);
+
+            if (targetLengths.Count == 1 && edges.Count >= 1)
+            {
+                List<double> temp_target = new List<double>();
+                for (int i = 0; i < edges.Count; i++)
+                {
+                    temp_target.Add(targetLengths[0]);
+                }
+                targetLengths = temp_target;
+            }
             
             if (edges.Count == 0 && targetLengths.Count > 1)
             {

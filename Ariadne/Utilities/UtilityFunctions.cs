@@ -70,12 +70,12 @@ namespace Ariadne.Utilities
             return lengths;
         }
 
-        public static List<double> GetForces(List<double> lengths, List<double> forceDensities)
+        public static List<double> GetForces(List<double> lengths, List<Edge> forceDensities)
         {
-            List<double> forces = new List<double>();
+            List<double> forces = new();
             for (int i = 0; i < lengths.Count; i++)
             {
-                forces.Add(lengths[i] * forceDensities[i]);
+                forces.Add(lengths[i] * forceDensities[i].Q);
             }
             return forces;
         }
@@ -91,6 +91,30 @@ namespace Ariadne.Utilities
                 xyz.Add(_XYZ);
             }
             return xyz;
+        }
+
+        public static List<Vector3d> GetReactions(List<double> forces, FDM_Network network)
+        {
+            List<Vector3d> reactions = new();
+            foreach(Node anchor in network.Fixed)
+            {
+                Vector3d reaction = new(0,0,0);
+                foreach(Node neighbor in anchor.Neighbors)
+                {
+                    foreach(Edge edge in network.Graph.Edges)
+                    {
+                        if (edge.Start == anchor && edge.End == neighbor || edge.Start == neighbor && edge.End == anchor)
+                        {
+                            double force = forces[network.Graph.Edges.IndexOf(edge)];
+                            Vector3d direction = anchor.Value - neighbor.Value;
+                            direction.Unitize();
+                            reaction += direction * force;
+                        }
+                    }
+                }
+                reactions.Add(reaction);
+            }
+            return reactions;
         }
 
 

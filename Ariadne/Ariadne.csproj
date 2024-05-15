@@ -11,12 +11,12 @@
   
   <ItemGroup>
     <PackageReference Include="Grasshopper" Version="8.6.24101.5001" IncludeAssets="compile;build" />
-    <PackageReference Include="System.Drawing.Common" Version="8.0.4" IncludeAssets="compile;build" />
-    <PackageReference Include="System.Resources.Extensions" Version="8.0.0">
+    <PackageReference Include="System.Drawing.Common" Version="7.0.0" IncludeAssets="compile;build" />
+    <PackageReference Include="System.Resources.Extensions" Version="7.0.0">
       <IncludeAssets>compile;build</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="System.Text.Encodings.Web" Version="8.0.0" />
-    <PackageReference Include="System.Text.Json" Version="8.0.3">
+    <PackageReference Include="System.Text.Encodings.Web" Version="7.0.0" />
+    <PackageReference Include="System.Text.Json" Version="7.0.4">
       <IncludeAssets>compile;build</IncludeAssets>
     </PackageReference>
   </ItemGroup>

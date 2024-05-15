@@ -133,6 +133,9 @@
   <data name="Create" type="System.Resources.ResXFileRef, System.Windows.Forms">
     <value>..\Resources\Create.png;System.Drawing.Bitmap, System.Drawing, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a</value>
   </data>
+  <data name="CreateAnchor" type="System.Resources.ResXFileRef, System.Windows.Forms">
+    <value>..\Resources\CreateAnchor.png;System.Drawing.Bitmap, System.Drawing, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a</value>
+  </data>
   <data name="CreateGraph" type="System.Resources.ResXFileRef, System.Windows.Forms">
     <value>..\Resources\CreateGraph.png;System.Drawing.Bitmap, System.Drawing, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a</value>
   </data>
@@ -193,13 +196,16 @@
   <data name="Receive" type="System.Resources.ResXFileRef, System.Windows.Forms">
     <value>..\Resources\Receive.png;System.Drawing.Bitmap, System.Drawing, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a</value>
   </data>
-  <data name="send" type="System.Resources.ResXFileRef, System.Windows.Forms">
+  <data name="ReceiveFDM" type="System.Resources.ResXFileRef, System.Windows.Forms">
+    <value>..\Resources\ReceiveFDM.png;System.Drawing.Bitmap, System.Drawing, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a</value>
+  </data>
+  <data name="Send" type="System.Resources.ResXFileRef, System.Windows.Forms">
     <value>..\Resources\send.png;System.Drawing.Bitmap, System.Drawing, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a</value>
   </data>
   <data name="Serialize" type="System.Resources.ResXFileRef, System.Windows.Forms">
     <value>..\Resources\Serialize.png;System.Drawing.Bitmap, System.Drawing, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a</value>
   </data>
-  <data name="start" type="System.Resources.ResXFileRef, System.Windows.Forms">
+  <data name="Start" type="System.Resources.ResXFileRef, System.Windows.Forms">
     <value>..\Resources\start.png;System.Drawing.Bitmap, System.Drawing, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a</value>
   </data>
   <data name="SurfP" type="System.Resources.ResXFileRef, System.Windows.Forms">

@@ -136,7 +136,11 @@ namespace Ariadne.GH_Design.Experimental
             GetPoints();
 
             //generate surface
-            surf = NurbsSurface.CreateFromPoints(points, u, v, 3, 3);
+            if (points.Count > 0)
+            {
+                surf = NurbsSurface.CreateFromPoints(points, u, v, 3, 3);
+            }
+            
 
             //interpolate values
             GetValues();
@@ -180,23 +184,6 @@ namespace Ariadne.GH_Design.Experimental
                 //    tag,
                 //    false,
                 //    scale);
-            }
-        }
-
-
-        public override BoundingBox ClippingBox
-        {
-            get
-            {
-                BoundingBox b = new BoundingBox();
-                b.Union(bb);
-
-                var points1 = new Point3dList(offsetPoints);
-                b.Union(points1.BoundingBox);
-
-                b.Union(offsetSurf.GetBoundingBox(true));
-
-                return b;
             }
         }
 

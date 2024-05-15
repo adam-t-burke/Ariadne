@@ -45,8 +45,8 @@ namespace Ariadne.Utilities
             pManager.AddIntegerParameter("NumberNodes", "Nn", "Number of nodes", GH_ParamAccess.item);
             pManager.AddIntegerParameter("FreeIndices", "iN", "Indices of free points", GH_ParamAccess.list);
             pManager.AddIntegerParameter("FixedIndices", "iF", "Indices of fixed points", GH_ParamAccess.list);
-            //pManager.AddNumberParameter("MemberForces", "Force", "Internal forces assuming L = stressed length", GH_ParamAccess.list);
-            //pManager.AddVectorParameter("Reaction Forces", "Reactions", "Force vectors acting at anchor points", GH_ParamAccess.list);
+            pManager.AddNumberParameter("MemberForces", "Force", "Internal forces assuming L = stressed length", GH_ParamAccess.list);
+            pManager.AddVectorParameter("Reaction Forces", "Reactions", "Force vectors acting at anchor points", GH_ParamAccess.list);
 
             pManager.HideParameter(0);
             pManager.HideParameter(1);
@@ -60,29 +60,29 @@ namespace Ariadne.Utilities
         /// <param name="DA">The DA object is used to retrieve from inputs and store in outputs.</param>
         protected override void SolveInstance(IGH_DataAccess DA)
         {
-            FDM_Problem fdmNetwork = new FDM_Problem();
+            FDM_Network fdmNetwork = new();
             if (!DA.GetData(0, ref fdmNetwork)) return;
 
-            //List<double> forces = Solver.Forces(fdmNetwork);
-            //List<Vector3d> reactions = Solver.Reactions(fdmNetwork);
-            List<double> lengths = UtilityFunctions.GetLengths(fdmNetwork.Network.Graph.Edges);
+            List<double> lengths = fdmNetwork.Graph.Edges.Select(x => x.Value.GetLength()).ToList();
+            List<double> forces = UtilityFunctions.GetForces(lengths, fdmNetwork.Graph.Edges);
+            List<Vector3d> reactions = UtilityFunctions.GetReactions(forces, fdmNetwork);
 
-            List<Point3d> startPt = fdmNetwork.Network.Graph.Edges.Select(st => st.Start.Value).ToList();
-            List<Point3d> endPt = fdmNetwork.Network.Graph.Edges.Select(end => end.End.Value).ToList();
+            List<int> startPt = fdmNetwork.Graph.Edges.Select(x => fdmNetwork.Graph.Nodes.IndexOf(x.Start)).ToList();
+            List<int> endPt = fdmNetwork.Graph.Edges.Select(x => fdmNetwork.Graph.Nodes.IndexOf(x.End)).ToList();
 
-            DA.SetDataList(0, fdmNetwork.Network.Graph.Nodes);
-            DA.SetDataList(1, fdmNetwork.Network.Graph.Edges);
+            DA.SetDataList(0, fdmNetwork.Graph.Nodes);
+            DA.SetDataList(1, fdmNetwork.Graph.Edges);
             DA.SetDataList(2, lengths);
             DA.SetDataList(3, startPt);
             DA.SetDataList(4, endPt);
-            DA.SetDataList(5, fdmNetwork.Network.Anchors);
-            DA.SetDataList(6, fdmNetwork.Q);
-            DA.SetData(7, fdmNetwork.Network.Graph.Ne);
-            DA.SetData(8, fdmNetwork.Network.Graph.Nn);
-            DA.SetDataList(9, fdmNetwork.Network.Free);
-            DA.SetDataList(10, fdmNetwork.Network.Fixed);
-            //DA.SetDataList(11, forces);
-            //DA.SetDataList(12, reactions);
+            DA.SetDataList(5, fdmNetwork.Anchors);
+            DA.SetDataList(6, fdmNetwork.Graph.Edges.Select(x => x.Q).ToList());
+            DA.SetData(7, fdmNetwork.Graph.Ne);
+            DA.SetData(8, fdmNetwork.Graph.Nn);
+            DA.SetDataList(9, fdmNetwork.FreeNodes);
+            DA.SetDataList(10, fdmNetwork.FixedNodes);
+            DA.SetDataList(11, forces);
+            DA.SetDataList(12, reactions);
 
         }
 

@@ -24,12 +24,12 @@ namespace Ariadne.Utilities
         System.Drawing.Color c1;
         GH_Gradient grad;
         int prop;
-        FDM_Problem network;
+        FDM_Network network;
         string layer;
         int layeridx;
+        BoundingBox bb;
 
         RhinoDoc doc;
-        BoundingBox bb;
         Vector3d offset;
         Vector3d fulloffset;
 
@@ -57,7 +57,7 @@ namespace Ariadne.Utilities
         protected override void RegisterInputParams(GH_InputParamManager pManager)
         {
             pManager.AddGenericParameter("Network", "Network", "Network to bake", GH_ParamAccess.item);
-            pManager.AddTextParameter("BakeLayer", "Layer", "Bake target layer", GH_ParamAccess.item, "Layer 05");
+            pManager.AddTextParameter("BakeLayer", "Layer", "Bake target layer", GH_ParamAccess.item, "Default");
             pManager.AddColourParameter("ColourMin", "Cmin", "Colour for minimum value", GH_ParamAccess.item, pink);
             pManager.AddColourParameter("ColourMed", "Cmed", "Colour for neutral value", GH_ParamAccess.item, lightgray);
             pManager.AddColourParameter("ColourMax", "Cmax", "Colour for maximum value",
@@ -90,8 +90,8 @@ namespace Ariadne.Utilities
         /// <param name="DA">The DA object is used to retrieve from inputs and store in outputs.</param>
         protected override void SolveInstance(IGH_DataAccess DA)
         {
-            network = new FDM_Problem();
-            layer = "Layer 05";
+            network = new();
+            layer = "Default";
             prop = 0;
             bool bake = false;
             offset = new Vector3d();
@@ -119,25 +119,26 @@ namespace Ariadne.Utilities
                 Bake();
             }
 
-            DA.SetDataList(0, network.Network.Graph.Edges);
-            DA.SetDataList(1, network.Network.Anchors);
+            DA.SetDataList(0, network.Graph.Edges);
+            DA.SetDataList(1, network.Anchors);
         }
 
         public void Bake()
         {
-            for (int i = 0; i < network.Network.Graph.Edges.Count; i++)
+            for (int i = 0; i < network.Graph.Edges.Count; i++)
             {
-                var curve = network.Network.Graph.Edges[i].Value;
+                Curve curve = network.Graph.Edges[i].Value;
+                Curve newCurve = curve.DuplicateCurve();
 
-                curve.Translate(fulloffset);
+                newCurve.Translate(fulloffset);
 
-                doc.Objects.AddCurve((Curve)curve, attribs[i]);
+                doc.Objects.AddCurve(newCurve, attribs[i]);
 
             }
 
             var attribute = new ObjectAttributes() { LayerIndex = layeridx };            
 
-            foreach (Point3d anchor in network.Network.Anchors)
+            foreach (Point3d anchor in network.Anchors)
             {
                 var newanchor = new Point3d(anchor) + fulloffset;
 
@@ -166,13 +167,13 @@ namespace Ariadne.Utilities
             //element-wise values
             if (prop == 0)
             {
-                List<double> lengths = UtilityFunctions.GetLengths(network.Network.Graph.Edges);
-                property = UtilityFunctions.GetForces(lengths, network.Q);
+                List<double> lengths = network.Graph.Edges.Select(x => x.Value.GetLength()).ToList();
+                property = UtilityFunctions.GetForces(lengths, network.Graph.Edges);
                 GradientMaker(property);
             }
             else if (prop == 1)
             {
-                property = network.Q;
+                property = network.Graph.Edges.Select(x => x.Q).ToList();
                 GradientMaker(property);
             }
 
@@ -227,7 +228,7 @@ namespace Ariadne.Utilities
         private void GetBB()
         {
             fulloffset = new Vector3d();
-            bb = new BoundingBox(network.Network.Graph.Nodes.Select(node => node.Value));
+            bb = new BoundingBox(network.Graph.Nodes.Select(node => node.Value));
 
 
             var pbl = bb.Corner(true, true, true);

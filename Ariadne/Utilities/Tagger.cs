@@ -7,12 +7,13 @@ using Rhino.Collections;
 using Ariadne.FDM;
 using Ariadne.Graphs;
 using System.Drawing;
+using System.Linq;
 
 namespace Ariadne.Utilities
 {
     public class Tagger : GH_Component
     {
-        FDM_Problem network;
+        FDM_Network network;
         List<string> tags;
         List<Point3d> points;
         bool show;
@@ -53,7 +54,7 @@ namespace Ariadne.Utilities
         /// <param name="DA">The DA object is used to retrieve from inputs and store in outputs.</param>
         protected override void SolveInstance(IGH_DataAccess DA)
         {
-            network = new FDM_Problem();
+            network = new();
             show = true;
             size = 2;
             col = System.Drawing.Color.Black;
@@ -63,8 +64,8 @@ namespace Ariadne.Utilities
             DA.GetData(2, ref size);
             DA.GetData(3, ref col);
 
-            List<double> lengths = UtilityFunctions.GetLengths(network.Network.Graph.Edges);
-            List<double> forces = UtilityFunctions.GetForces(lengths, network.Q);
+            List<double> lengths = UtilityFunctions.GetLengths(network.Graph.Edges);
+            List<double> forces = UtilityFunctions.GetForces(lengths, network.Graph.Edges);
 
             GetPoints(network);
             GetText(network, forces);
@@ -72,26 +73,26 @@ namespace Ariadne.Utilities
 
         }
 
-        private void GetPoints(FDM_Problem network)
+        private void GetPoints(FDM_Network network)
         {
             points = new List<Point3d>();
 
-            foreach (Edge edge in network.Network.Graph.Edges)
+            foreach (Edge edge in network.Graph.Edges)
             {
                 Curve curve = edge.Value;
                 points.Add(curve.PointAtNormalizedLength(0.5));
             }
         }
 
-        private void GetText(FDM_Problem network, List<double> forces)
+        private void GetText(FDM_Network network, List<double> forces)
         {
             tags = new List<string>();
 
-            for (int i = 0; i < network.Network.Graph.Ne; i++)
+            for (int i = 0; i < network.Graph.Ne; i++)
             {
-                Curve curve = network.Network.Graph.Edges[i].Value;
+                Curve curve = network.Graph.Edges[i].Value;
                 string length = string.Format("{0:0.0}", curve.GetLength());
-                string density = string.Format("{0:0.0}", network.Q[i]);
+                string density = string.Format("{0:0.0}", network.Graph.Edges[i].Q);
                 string force = string.Format("{0:0.00}", forces[i]);
 
                 string info = $@"L = {length}
@@ -102,14 +103,6 @@ namespace Ariadne.Utilities
             }
         }
 
-        public override BoundingBox ClippingBox
-        {
-            get
-            {
-                Point3dList pts = new Point3dList(points);
-                return pts.BoundingBox;
-            }
-        }
 
         public override void DrawViewportWires(IGH_PreviewArgs args)
         {

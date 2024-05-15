@@ -167,55 +167,6 @@ namespace Ariadne.GH_Design.Experimental
 
         //}
 
-        public override void DrawViewportWires(IGH_PreviewArgs args)
-        {
-            base.DrawViewportWires(args);
-            Plane plane;
-            args.Viewport.GetFrustumFarPlane(out plane);
-
-            
-
-            if (show)
-            {
-                args.Display.DrawPoints(offsetPoints, Rhino.Display.PointStyle.Circle, 3, System.Drawing.Color.MediumOrchid);
-                args.Display.DrawSurface(offsetSurf, System.Drawing.Color.MediumOrchid, 6);
-
-                //var mat = new DisplayMaterial(System.Drawing.Color.MediumOrchid, 0.5);
-                //args.Display.DrawBrepShaded(offsetSurf.ToBrep(), mat);
-
-
-                for (int i = 0; i < names.Count; i++)
-                {
-                    string text = names[i];
-                    Point3d point = offsetPoints[i];
-                    plane.Origin = point;
-
-                    Rhino.Display.Text3d drawText = new Rhino.Display.Text3d(text, plane, scale);
-                    args.Display.Draw3dText(drawText, System.Drawing.Color.Black);
-                    drawText.Dispose();
-                }
-
-                //Point2d tag = new Point2d(5, 70);
-                //args.Display.Draw2dText("FORCE MAGNITUDE CONTROL SURFACE",
-                //    System.Drawing.Color.MediumOrchid,
-                //    tag,
-                //    false,
-                //    scale);
-            }
-        }
-
-        public override BoundingBox ClippingBox
-        {
-            get
-            {
-                BoundingBox b = new BoundingBox(offsetPoints);
-                b.Union(bb);
-
-                b.Union(offsetSurf.GetBoundingBox(true));
-
-                return b;
-            }
-        }
 
         private void GetOffsets(Vector3d offset)
         {

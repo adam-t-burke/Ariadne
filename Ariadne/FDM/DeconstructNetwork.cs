@@ -21,7 +21,7 @@ namespace Ariadne.FDM
         /// Initializes a new instance of the DeconstructFDMNetwork class.
         /// </summary>
         public DeconstructNetwork()
-          : base("Deconstruct FDM Network", "FDM Network Info",
+          : base("Deconstruct FDM Network", "Deconstruct Network",
               "Deconstructed attributes of a FDM Network",
               "Ariadne", "Design")
         {
@@ -32,7 +32,7 @@ namespace Ariadne.FDM
         /// </summary>
         protected override void RegisterInputParams(GH_InputParamManager pManager)
         {
-            pManager.AddGenericParameter("FDM Network", "FDM Network", "FDM Network to deconstruct", GH_ParamAccess.item);
+            pManager.AddGenericParameter("FDM Network", "Network", "FDM Network to deconstruct", GH_ParamAccess.item);
         }
 
         /// <summary>

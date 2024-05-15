@@ -94,11 +94,18 @@ namespace Ariadne.WebSocketClient
                 Node node = new()
                 {
                     Anchor = oldNetwork.Graph.Nodes[i].Anchor,
-                    Neighbors = oldNetwork.Graph.Nodes[i].Neighbors,
                     Value = new Point3d(response.X[i], response.Y[i], response.Z[i])
                 }; 
                 
                 newGraph.Nodes.Add(node);
+            }
+
+            for (int i = 0; i < oldNetwork.Graph.Nn; i++)
+            {
+                foreach(Node neighbor in oldNetwork.Graph.Nodes[i].Neighbors)
+                {
+                    newGraph.Nodes[i].Neighbors.Add(newGraph.Nodes[oldNetwork.Graph.Nodes.IndexOf(neighbor)]);
+                }
             }
 
             for (int i = 0; i < oldNetwork.Graph.Ne; i++)
@@ -118,6 +125,8 @@ namespace Ariadne.WebSocketClient
             FDM_Network newNetwork = new() {  };
             newNetwork.Graph = newGraph;
             newNetwork.Valid = true;
+            newNetwork.FreeNodes = oldNetwork.FreeNodes;
+            newNetwork.FixedNodes = oldNetwork.FixedNodes;
             newNetwork.Free = oldNetwork.FreeNodes.Select(x => newGraph.Nodes[x]).ToList();
             newNetwork.Fixed = oldNetwork.FixedNodes.Select(x => newGraph.Nodes[x]).ToList();
             newNetwork.Anchors = newNetwork.Fixed.Select(x => x.Value).ToList();
@@ -187,7 +196,7 @@ namespace Ariadne.WebSocketClient
             get
             {
                 //You can add image files to your project resources and access them like this:
-                return Properties.Resources.Receive;
+                return Properties.Resources.ReceiveFDM;
             }
         }
 

@@ -156,8 +156,7 @@ namespace Ariadne.FDM
         {
             List<Node> nodes = Graph.Nodes;
 
-
-            Parallel.ForEach(Anchors, (anchor, state) =>
+            foreach(Point3d anchor in Anchors)
             {
                 (bool anchorFound, int ianchor) = UtilityFunctions.WithinTolerance(nodes, anchor, ATol);
                 if (anchorFound)
@@ -165,7 +164,7 @@ namespace Ariadne.FDM
                     nodes[ianchor].Anchor = true;
                     Fixed.Add(nodes[ianchor]);
                 }
-            });
+            }
 
             Free = nodes.Except(Fixed).ToList();
 
