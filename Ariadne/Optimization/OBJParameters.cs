@@ -16,8 +16,8 @@ namespace Ariadne.Optimization
     /// </summary>
     internal class OBJParameters
     {
-        public double LowerBound { get; set; }
-        public double UpperBound { get; set; }
+        public List<double> LowerBound { get; set; }
+        public List<double> UpperBound { get; set; }
         public double AbsTol { get; set; }
         public double RelTol { get; set; }
         public List<OBJ> Objectives { get; set; }
@@ -32,7 +32,7 @@ namespace Ariadne.Optimization
 
         }
 
-        public OBJParameters(double lb, double ub, double abstol, double reltol, List<OBJ> objs, bool showiter, int updatefreq, int maxiters, bool nodeTrace)
+        public OBJParameters(List<double> lb, List<double> ub, double abstol, double reltol, List<OBJ> objs, bool showiter, int updatefreq, int maxiters, bool nodeTrace)
         {
             LowerBound = lb;
             UpperBound = ub;
@@ -45,20 +45,5 @@ namespace Ariadne.Optimization
             NodeTrace = nodeTrace;
         }
 
-        public OBJParameters(double lb, double ub, double abstol, double reltol, OBJ objs, bool showiter, int updatefreq, int maxiters, bool nodeTrace)
-        {
-            LowerBound = lb;
-            UpperBound = ub;
-            AbsTol = abstol;
-            RelTol = reltol;
-            ShowIterations = showiter;
-            UpdateFrequency = updatefreq;
-
-            List<OBJ> objectiveList = new List<OBJ> { objs };
-            Objectives = objectiveList;
-
-            MaxIterations = maxiters;
-            NodeTrace = nodeTrace;
-        }
     }
 }

@@ -322,21 +322,6 @@ namespace Ariadne.Objectives
             IsValid = true;
         }
 
-        /// <summary>
-        /// Maximum length objective function from a single value and list of edges to apply to.
-        /// </summary>
-        /// <param name="_weight"></param>
-        /// <param name="_value"></param>
-        /// <param name="_edges"></param>
-        public OBJMaxlength(double _weight, double _value, List<Edge> _edges)
-        {
-            OBJID = 6;
-            Weight = _weight;
-            Values = new List<double>() { _value };
-            Edges = _edges;
-            Indices = null;
-            IsValid = true;
-        }
 
         /// <summary>
         /// Maximum length objective function from a list of values and list of edges to apply to.
@@ -346,16 +331,39 @@ namespace Ariadne.Objectives
         {
             OBJID = 6;
             Weight = _weight;
-            Values = _value;
-            Edges = _edges;
-            Indices = null;
-            if (_value.Count == _edges.Count)
+
+            if (_edges.Count == 1 && _value.Count == 1)
             {
+                Values = _value;
+                Edges = _edges;
+                Indices = null;
                 IsValid = true;
             }
+            else if (_value.Count == 1 && _edges.Count > 1)
+            {
+                Values = Enumerable.Repeat(_value[0], _edges.Count).ToList();
+                Edges = _edges;
+                Indices = null;
+                IsValid = true;
+            }
+            else if (_edges.Count > 1 && _value.Count > 1)
+            {
+                if (_edges.Count == _value.Count)
+                {
+                    Values = _value;
+                    Edges = _edges;
+                    Indices = null;
+                    IsValid = true;
+                }
+                else
+                {
+                    throw new Exception($"Number of values must match number of edges. Current count of values is {_value.Count}");
+                }
+            }
+
             else
             {
-                IsValid = false;
+                throw new Exception("Invalid objective function.");
             }
         }
     }
@@ -385,41 +393,48 @@ namespace Ariadne.Objectives
         }
 
         /// <summary>
-        /// Minimum force objective function from a single value and list of edges to apply to.
-        /// </summary>
-        /// <param name="_weight"></param>
-        /// <param name="_value"></param>
-        /// <param name="_edges"></param>
-        public OBJMinforce(double _weight, double _value, List<Edge> _edges)
-        {
-            OBJID = 7;
-            Weight = _weight;
-            Values = new List<double>() { _value };
-            Edges = _edges;
-            Indices = null;
-            IsValid = true;
-        }
-
-        /// <summary>
         /// Minimum force objective function from a list of values and list of edges to apply to.
         /// </summary>
         /// <param name="_weight"></param>
         /// <param name="_values"></param>
         /// <param name="_edges"></param>
-        public OBJMinforce(double _weight, List<double> _values, List<Edge> _edges)
+        public OBJMinforce(double _weight, List<double> _value, List<Edge> _edges)
         {
             OBJID = 7;
             Weight = _weight;
-            Values = _values;
-            Edges = _edges;
-            Indices = null;
-            if (_values.Count == _edges.Count)
+
+            if (_edges.Count == 1 && _value.Count == 1)
             {
+                Values = _value;
+                Edges = _edges;
+                Indices = null;
                 IsValid = true;
             }
+            else if (_value.Count == 1 && _edges.Count > 1)
+            {
+                Values = Enumerable.Repeat(_value[0], _edges.Count).ToList();
+                Edges = _edges;
+                Indices = null;
+                IsValid = true;
+            }
+            else if (_edges.Count > 1 && _value.Count > 1)
+            {
+                if (_edges.Count == _value.Count)
+                {
+                    Values = _value;
+                    Edges = _edges;
+                    Indices = null;
+                    IsValid = true;
+                }
+                else
+                {
+                    throw new Exception($"Number of values must match number of edges. Current count of values is {_value.Count}");
+                }
+            }
+
             else
             {
-                IsValid = false;
+                throw new Exception("Invalid objective function.");
             }
         }
     }
@@ -449,42 +464,92 @@ namespace Ariadne.Objectives
         }
 
         /// <summary>
-        /// Minimum force objective function from a single value and list of edges to apply to.
-        /// </summary>
-        /// <param name="_weight"></param>
-        /// <param name="_value"></param>
-        /// <param name="_edges"></param>
-        public OBJMaxforce(double _weight, double _value)
-        {
-            OBJID = 8;
-            Weight = _weight;
-            Values = new List<double>() { _value };
-            Indices = new List<int>() { -1 };
-            IsValid = true;
-        }
-
-        /// <summary>
         /// Minimum force objective function from a list of values and list of edges to apply to.
         /// </summary>
         /// <param name="_weight"></param>
         /// <param name="_values"></param>
         /// <param name="_edges"></param>
-        public OBJMaxforce(double _weight, List<double> _values, List<Edge> _edges)
+        public OBJMaxforce(double _weight, List<double> _value, List<Edge> _edges)
         {
             OBJID = 8;
             Weight = _weight;
-            Values = _values;
-            Edges = _edges;
-            Indices = null;
-            if (_values.Count == _edges.Count)
+
+            if (_edges.Count == 1 && _value.Count == 1)
             {
+                Values = _value;
+                Edges = _edges;
+                Indices = null;
                 IsValid = true;
             }
+            else if (_value.Count == 1 && _edges.Count > 1)
+            {
+                Values = Enumerable.Repeat(_value[0], _edges.Count).ToList();
+                Edges = _edges;
+                Indices = null;
+                IsValid = true;
+            }
+            else if (_edges.Count > 1 && _value.Count > 1)
+            {
+                if (_edges.Count == _value.Count)
+                {
+                    Values = _value;
+                    Edges = _edges;
+                    Indices = null;
+                    IsValid = true;
+                }
+                else
+                {
+                    throw new Exception($"Number of values must match number of edges. Current count of values is {_value.Count}");
+                }
+            }
+
             else
             {
-                IsValid = false;
+                throw new Exception("Invalid objective function.");
             }
         }
+    }
+
+    internal class OBJPointSet : OBJNodes
+    {
+        /// <summary>
+        /// Empty construtor
+        /// </summary>
+        public OBJPointSet()
+        {
+            IsValid = false;
+        }
+
+        /// <summary>
+        /// Constructor for targeting a geometry that uses all free nodes in the network as targets.
+        /// </summary> 
+        /// <param name="_weight">Weight of objective function</param>
+
+        public OBJPointSet(double _weight)
+        {
+            OBJID = 11;
+            Weight = _weight;
+            Indices = new List<int>() { -1 };
+            Points = null;
+            IsValid = true;
+        }
+
+        /// <summary>
+        /// Constructor for targeting a geometry that uses a subset of nodes in the network as targets.
+        /// </summary>
+        /// <param name="_weight"></param>
+        /// <param name="_nodes"></param>
+        /// <param name="_points"></param>
+        public OBJPointSet(double _weight, List<Node> _nodes)
+        {
+            OBJID = 11;
+            Weight = _weight;
+            Nodes = _nodes;
+            Indices = null;
+            Points = UtilityFunctions.PointsToArray(_nodes.Select(x => x.Value).ToList());
+            IsValid = true;
+        }
+
     }
 
     internal class OBJTargetLength : OBJEdges

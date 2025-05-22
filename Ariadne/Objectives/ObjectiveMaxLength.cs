@@ -49,7 +49,7 @@ namespace Ariadne.Objectives
         protected override void SolveInstance(IGH_DataAccess DA)
         {
             List<Edge> edges = new();
-            List<double> length = new List<double> { 1.0 };
+            List<double> length = new();
             double weight = 1.0;
 
             DA.GetDataList(0, edges);
@@ -57,25 +57,12 @@ namespace Ariadne.Objectives
             if (!DA.GetData(2, ref weight)) { return; }
 
 
-            if (edges.Count > 0 && length.Count == 1)
+            if (edges.Count > 1)
             {
                 OBJMaxlength obj = new OBJMaxlength(weight, length, edges);
                 if (obj.IsValid)
                 {
                     DA.SetData(0, obj);
-                }
-            }
-            else if (edges.Count > 0 && length.Count > 1)
-            {
-                OBJMaxlength obj = new OBJMaxlength(weight, length, edges);
-                if (obj.IsValid)
-                {
-                    DA.SetData(0, obj);
-                }
-                else
-                {
-                    AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Objective creation failed. Check to ensure number of forces supplied matches the number of edge indices.");
-                    return;
                 }
             }
             else
