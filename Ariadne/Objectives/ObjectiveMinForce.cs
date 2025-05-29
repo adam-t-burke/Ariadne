@@ -30,7 +30,7 @@ namespace Ariadne.Objectives
             pManager.AddNumberParameter("Minimum Force", "Force", "Target minimum force", GH_ParamAccess.list, 1.0);
             pManager.AddNumberParameter("Weight", "W", "Weight of objective", GH_ParamAccess.item, 1.0);
 
-            pManager[0].Optional = true;
+            //pManager[0].Optional = true;
         }
 
         /// <summary>
@@ -48,7 +48,7 @@ namespace Ariadne.Objectives
         protected override void SolveInstance(IGH_DataAccess DA)
         {
             List<Edge> edges = new();
-            List<double> force = new List<double> { 1.0 };
+            List<double> force = new();
             double weight = 1.0;
 
             DA.GetDataList(0, edges);
@@ -56,25 +56,12 @@ namespace Ariadne.Objectives
             if (!DA.GetData(2, ref weight)) { return; }
 
 
-            if (edges.Count > 0 && force.Count == 1)
-            {
-                OBJMinforce obj = new OBJMinforce(weight, force[0], edges);
-                if (obj.IsValid)
-                {
-                    DA.SetData(0, obj);
-                }
-            }
-            else if (edges.Count > 0 && force.Count > 1)
+            if (edges.Count > 1)
             {
                 OBJMinforce obj = new OBJMinforce(weight, force, edges);
                 if (obj.IsValid)
                 {
                     DA.SetData(0, obj);
-                }
-                else
-                {
-                    AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Objective creation failed. Check to ensure number of forces supplied matches the number of edge indices.");
-                    return;
                 }
             }
             else

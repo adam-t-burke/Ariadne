@@ -32,8 +32,8 @@ namespace Ariadne.Optimization
         protected override void RegisterInputParams(GH_InputParamManager pManager)
         {
             pManager.AddGenericParameter("Objective Functions", "Obj", "Objective function(s) to minimize.", GH_ParamAccess.list);
-            pManager.AddNumberParameter("Lower Bound", "LB", "Lower bound of force densities", GH_ParamAccess.item, 1.0);
-            pManager.AddNumberParameter("Upper Bound", "UB", "Upper bound of force densities", GH_ParamAccess.item, 100.0);
+            pManager.AddNumberParameter("Lower Bound", "LB", "Lower bound of force densities", GH_ParamAccess.list, 1.0);
+            pManager.AddNumberParameter("Upper Bound", "UB", "Upper bound of force densities", GH_ParamAccess.list, 100.0);
             pManager.AddNumberParameter("Absolute Tolerance", "AbsTol", "Absolute stopping tolerance", GH_ParamAccess.item, 1e-6);
             pManager.AddNumberParameter("Relative Tolerance", "RelTol", "Relative stopping tolerance", GH_ParamAccess.item, 1e-6);
             pManager.AddIntegerParameter("Maximum Iterations", "MaxIter", "Maximum number of iterations", GH_ParamAccess.item, 400);
@@ -58,8 +58,8 @@ namespace Ariadne.Optimization
         /// <param name="DA">The DA object is used to retrieve from inputs and store in outputs.</param>
         protected override void SolveInstance(IGH_DataAccess DA)
         {
-            double lb = 1e-2;
-            double ub = 1e-0;
+            List<double> lb = new List<double>();
+            List<double> ub = new List<double>();
             double abstol = 1e-4;
             double reltol = 1e-4;
             int maxiter = 400;
@@ -70,8 +70,8 @@ namespace Ariadne.Optimization
             List<OBJ> objs = new List<OBJ>();
 
             DA.GetDataList(0, objs);
-            DA.GetData(1, ref lb);
-            DA.GetData(2, ref ub);
+            DA.GetDataList(1, lb);
+            DA.GetDataList(2, ub);
             DA.GetData(3, ref abstol);
             DA.GetData(4, ref reltol);
             DA.GetData(5, ref maxiter);

@@ -5,7 +5,7 @@ authors:
   given-names: "Adam"
   orcid: "https://orcid.org/0000-0001-9498-834"
 title: "Ariadne"
-version: 1.0.0
+version: 1.0.1
 doi: 10.5281/zenodo.1234
-date-released: 2024-04-28
+date-released: 2025-05-24
 url: "https://github.com/fibrous-tendencies/Ariadne"
