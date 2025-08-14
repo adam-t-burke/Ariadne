@@ -121,12 +121,24 @@ namespace Ariadne.Utilities
 
         private void Update()
         {
-            foreach(Edge edge in newNet.Graph.Edges)
+            // Suspend viewport redraws for all views
+            doc.Views.RedrawEnabled = false;
+
+            try
             {
-                Curve curve = edge.Value;
-                Guid guid = edge.ReferenceID;
-                doc.Objects.Replace(guid, curve);
-            };            
+                foreach (Edge edge in newNet.Graph.Edges)
+                {
+                    Curve curve = edge.Value;
+                    Guid guid = edge.ReferenceID;
+                    doc.Objects.Replace(guid, curve);
+                }
+            }
+            finally
+            {
+                // Re-enable redraws and force a redraw
+                doc.Views.RedrawEnabled = true;
+                doc.Views.Redraw();
+            }
         }
 
 

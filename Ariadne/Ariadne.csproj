@@ -1,22 +1,22 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 	
   <PropertyGroup>
-    <TargetFrameworks>net7.0</TargetFrameworks>
-    <Version>1.0</Version>
+    <TargetFrameworks>net8.0</TargetFrameworks>
+    <Version>1.0.1</Version>
     <Title>Ariadne</Title>
-    <Description>Description of Ariadne</Description>
+    <Description>Ariadne is the front-end counterpart to the inverse form finding tool Theseus.</Description>
     <TargetExt>.gha</TargetExt>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>	
   </PropertyGroup>
   
   <ItemGroup>
-    <PackageReference Include="Grasshopper" Version="8.14.24345.15001" />
-    <PackageReference Include="System.Drawing.Common" Version="9.0.0" IncludeAssets="compile;build" />
-    <PackageReference Include="System.Resources.Extensions" Version="9.0.0">
+    <PackageReference Include="Grasshopper" Version="8.21.25188.17001" />
+    <PackageReference Include="System.Drawing.Common" Version="9.0.8" IncludeAssets="compile;build" />
+    <PackageReference Include="System.Resources.Extensions" Version="9.0.8">
       <IncludeAssets>compile;build</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="System.Text.Encodings.Web" Version="9.0.0" />
-    <PackageReference Include="System.Text.Json" Version="9.0.0" />
+    <PackageReference Include="System.Text.Encodings.Web" Version="9.0.8" />
+    <PackageReference Include="System.Text.Json" Version="9.0.8" />
   </ItemGroup>
   
   <ItemGroup>
