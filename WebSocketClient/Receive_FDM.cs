@@ -15,6 +15,8 @@ using Grasshopper.Kernel.Types;
 using System.Runtime.CompilerServices;
 using Ariadne.Graphs;
 using System.Linq;
+using System.Threading.Tasks;
+using System.Collections.Concurrent;
 using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace Ariadne.WebSocketClient
@@ -89,49 +91,92 @@ namespace Ariadne.WebSocketClient
                 return;
             }
 
+            // Create node index mapping for O(1) lookups (eliminates expensive IndexOf calls)
+            var nodeIndexMap = new Dictionary<Node, int>(oldNetwork.Graph.Nn);
             for (int i = 0; i < oldNetwork.Graph.Nn; i++)
+            {
+                nodeIndexMap[oldNetwork.Graph.Nodes[i]] = i;
+            }
+
+            // Phase 1: Parallel node creation with pre-allocated capacity
+            newGraph.Nodes = new List<Node>(oldNetwork.Graph.Nn);
+            for (int i = 0; i < oldNetwork.Graph.Nn; i++)
+            {
+                newGraph.Nodes.Add(null); // Pre-allocate space
+            }
+
+            Parallel.For(0, oldNetwork.Graph.Nn, i =>
             {
                 Node node = new()
                 {
                     Anchor = oldNetwork.Graph.Nodes[i].Anchor,
                     Value = new Point3d(response.X[i], response.Y[i], response.Z[i])
-                }; 
-                
-                newGraph.Nodes.Add(node);
-            }
+                };
+                newGraph.Nodes[i] = node;
+            });
 
-            for (int i = 0; i < oldNetwork.Graph.Nn; i++)
+            // Phase 2: Parallel neighbor reconstruction using index mapping
+            Parallel.For(0, oldNetwork.Graph.Nn, i =>
             {
-                foreach(Node neighbor in oldNetwork.Graph.Nodes[i].Neighbors)
+                var neighbors = new List<Node>(oldNetwork.Graph.Nodes[i].Neighbors.Count);
+                foreach (Node neighbor in oldNetwork.Graph.Nodes[i].Neighbors)
                 {
-                    newGraph.Nodes[i].Neighbors.Add(newGraph.Nodes[oldNetwork.Graph.Nodes.IndexOf(neighbor)]);
+                    int neighborIndex = nodeIndexMap[neighbor];
+                    neighbors.Add(newGraph.Nodes[neighborIndex]);
                 }
-            }
+                newGraph.Nodes[i].Neighbors = neighbors;
+            });
 
+            // Phase 3: Parallel edge creation using index mapping
+            newGraph.Edges = new List<Edge>(oldNetwork.Graph.Ne);
             for (int i = 0; i < oldNetwork.Graph.Ne; i++)
             {
-                Edge edge = new()
-                {
-                    Start = newGraph.Nodes[oldNetwork.Graph.Nodes.IndexOf(oldNetwork.Graph.Edges[i].Start)],
-                    End = newGraph.Nodes[oldNetwork.Graph.Nodes.IndexOf(oldNetwork.Graph.Edges[i].End)],
-                    Q = response.Q[i]
-                };
-                edge.Value = new LineCurve(edge.Start.Value, edge.End.Value);
-                edge.ReferenceID = oldNetwork.Graph.Edges[i].ReferenceID;
-
-                newGraph.Edges.Add(edge);                
+                newGraph.Edges.Add(null); // Pre-allocate space
             }
 
-            FDM_Network newNetwork = new() {  };
-            newNetwork.Graph = newGraph;
-            newNetwork.Valid = true;
-            newNetwork.FreeNodes = oldNetwork.FreeNodes;
-            newNetwork.FixedNodes = oldNetwork.FixedNodes;
-            newNetwork.Free = oldNetwork.FreeNodes.Select(x => newGraph.Nodes[x]).ToList();
-            newNetwork.Fixed = oldNetwork.FixedNodes.Select(x => newGraph.Nodes[x]).ToList();
-            newNetwork.Anchors = newNetwork.Fixed.Select(x => x.Value).ToList();
-            newNetwork.ATol = oldNetwork.ATol;
-            newNetwork.ETol = oldNetwork.ETol;
+            Parallel.For(0, oldNetwork.Graph.Ne, i =>
+            {
+                int startIndex = nodeIndexMap[oldNetwork.Graph.Edges[i].Start];
+                int endIndex = nodeIndexMap[oldNetwork.Graph.Edges[i].End];
+
+                Edge edge = new()
+                {
+                    Start = newGraph.Nodes[startIndex],
+                    End = newGraph.Nodes[endIndex],
+                    Q = response.Q[i],
+                    ReferenceID = oldNetwork.Graph.Edges[i].ReferenceID
+                };
+                edge.Value = new LineCurve(edge.Start.Value, edge.End.Value);
+
+                newGraph.Edges[i] = edge;
+            });
+
+            // Optimized FDM_Network construction with pre-allocated collections
+            FDM_Network newNetwork = new() 
+            {
+                Graph = newGraph,
+                Valid = true,
+                FreeNodes = oldNetwork.FreeNodes,
+                FixedNodes = oldNetwork.FixedNodes,
+                ATol = oldNetwork.ATol,
+                ETol = oldNetwork.ETol
+            };
+
+            // Replace LINQ with direct array allocation for better performance
+            newNetwork.Free = new List<Node>(oldNetwork.FreeNodes.Count);
+            for (int i = 0; i < oldNetwork.FreeNodes.Count; i++)
+            {
+                newNetwork.Free.Add(newGraph.Nodes[oldNetwork.FreeNodes[i]]);
+            }
+
+            newNetwork.Fixed = new List<Node>(oldNetwork.FixedNodes.Count);
+            newNetwork.Anchors = new List<Point3d>(oldNetwork.FixedNodes.Count);
+            for (int i = 0; i < oldNetwork.FixedNodes.Count; i++)
+            {
+                var fixedNode = newGraph.Nodes[oldNetwork.FixedNodes[i]];
+                newNetwork.Fixed.Add(fixedNode);
+                newNetwork.Anchors.Add(fixedNode.Value);
+            }
 
 
 
@@ -168,22 +213,48 @@ namespace Ariadne.WebSocketClient
             /// <returns></returns>
             public GH_Structure<GH_Point> NodeTraceToTree()
             {
-                int counter = 0;
+                // Early exit for empty traces
+                if (NodeTrace == null || NodeTrace.Count == 0 || X == null || X.Count == 0)
+                    return new GH_Structure<GH_Point>();
+
                 GH_Structure<GH_Point> Trace = new GH_Structure<GH_Point>();
 
-                foreach (List<List<double>> iter in NodeTrace)
+                var iterations = NodeTrace.Count;
+                var pointsPerIteration = X.Count;
+                
+                // Pre-allocate arrays to avoid ConcurrentBag overhead
+                var allPoints = new GH_Point[iterations][];
+                
+                // Parallel processing with pre-allocated arrays
+                Parallel.For(0, iterations, iter =>
                 {
-                    for (int i = 0; i < X.Count; i++)
+                    var iterData = NodeTrace[iter];
+                    var xData = iterData[0];
+                    var yData = iterData[1]; 
+                    var zData = iterData[2];
+                    
+                    // Pre-allocate array for this iteration
+                    allPoints[iter] = new GH_Point[pointsPerIteration];
+                    
+                    // Process points for this iteration in parallel
+                    Parallel.For(0, pointsPerIteration, i =>
                     {
-                        Point3d pt = new(iter[0][i], iter[1][i], iter[2][i]);
-                        GH_Point gh_Pt = new(pt);
-                        Trace.Append(gh_Pt, new(counter));
+                        Point3d pt = new(xData[i], yData[i], zData[i]);
+                        allPoints[iter][i] = new GH_Point(pt);
+                    });
+                });
+
+                // Sequential append to maintain tree structure integrity (much faster than grouping)
+                for (int iter = 0; iter < iterations; iter++)
+                {
+                    var path = new GH_Path(iter);
+                    for (int i = 0; i < pointsPerIteration; i++)
+                    {
+                        Trace.Append(allPoints[iter][i], path);
                     }
-                    counter++;
                 }
 
                 return Trace;
-
             }
         }
 
