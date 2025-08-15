@@ -9,6 +9,8 @@ using System.Text.Json.Serialization;
 using System.Diagnostics.Eventing.Reader;
 using Grasshopper.Kernel.Parameters;
 using System.Drawing;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace Ariadne.FDM
 {
@@ -57,6 +59,9 @@ namespace Ariadne.FDM
         /// This is the method that actually does the work.
         /// </summary>
         /// <param name="DA">The DA object is used to retrieve from inputs and store in outputs.</param>
+        private string lastInputHash = null;
+        private FDM_Problem lastProblem = null;
+
         protected override void SolveInstance(IGH_DataAccess DA)
         {
             //Initialize
@@ -98,6 +103,15 @@ namespace Ariadne.FDM
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Variable Anchors can only be used with optimization. Only a FDM direct solve will be done.");
             }
 
+            string inputHash = ComputeHash(Network, Q, P, LoadNodes, Optimization, anchors);
+
+            if (inputHash == lastInputHash && lastProblem != null)
+            {
+                DA.SetData(0, lastProblem);
+                DA.SetData(1, "cached");
+                return;
+            }
+
             if (Optimization != null && LoadNodes.Count > 0 && anchors.Count > 0)
             {
                 problem = new FDM_Problem(Network, Q, P, Optimization, LoadNodes, anchors);
@@ -131,9 +145,83 @@ namespace Ariadne.FDM
 
             string message = JsonSerializer.Serialize<FDM_Problem>(problem, options);
 
+            lastInputHash = inputHash;
+            lastProblem = problem;
             DA.SetData(0, problem);
             DA.SetData(1, message);
         }
+
+        private string ComputeHash(
+    FDM_Network network,
+    List<double> Q,
+    List<Vector3d> P,
+    List<int> LoadNodes,
+    OBJParameters Optimization,
+    List<Anchor> anchors)
+{
+    var sb = new StringBuilder();
+
+    // Network topology: node and edge count, plus node positions
+    if (network?.Graph?.Nodes != null)
+    {
+        sb.Append("N:").Append(network.Graph.Nodes.Count);
+        foreach (var node in network.Graph.Nodes)
+        {
+            var pt = node.Value;
+            sb.AppendFormat("({0:F6},{1:F6},{2:F6})", pt.X, pt.Y, pt.Z);
+        }
+    }
+    if (network?.Graph?.Edges != null)
+    {
+        sb.Append("E:").Append(network.Graph.Edges.Count);
+        foreach (var edge in network.Graph.Edges)
+        {
+            sb.AppendFormat("({0},{1})", edge.Start.Index, edge.End.Index);
+        }
+    }
+
+    // Force densities
+    sb.Append("Q:").Append(Q.Count);
+    foreach (var q in Q)
+        sb.AppendFormat("{0:F6}", q);
+
+    // Loads
+    sb.Append("P:").Append(P.Count);
+    foreach (var v in P)
+        sb.AppendFormat("({0:F6},{1:F6},{2:F6})", v.X, v.Y, v.Z);
+
+    // Load nodes
+    sb.Append("LN:").Append(LoadNodes.Count);
+    foreach (var idx in LoadNodes)
+        sb.Append(idx);
+
+    // Optimization parameters (basic fields)
+    if (Optimization != null)
+    {
+        sb.Append("Opt:");
+        if (Optimization.LowerBound != null)
+            foreach (var lb in Optimization.LowerBound) sb.AppendFormat("{0:F6}", lb);
+        if (Optimization.UpperBound != null)
+            foreach (var ub in Optimization.UpperBound) sb.AppendFormat("{0:F6}", ub);
+        sb.AppendFormat("{0:F6}{1:F6}", Optimization.AbsTol, Optimization.RelTol);
+        sb.Append(Optimization.MaxIterations);
+        sb.Append(Optimization.UpdateFrequency);
+        sb.Append(Optimization.ShowIterations);
+        sb.Append(Optimization.NodeTrace);
+        if (Optimization.Objectives != null)
+            sb.Append("ObjCount:").Append(Optimization.Objectives.Count);
+    }
+
+    // Anchors
+    sb.Append("A:").Append(anchors.Count);
+    foreach (var a in anchors)
+        sb.AppendFormat("({0},{1:F6},{2:F6},{3:F6})", a.NodeIndex, a.InitialX, a.InitialY, a.InitialZ);
+
+    // Compute SHA256 hash for stability
+    using var sha = SHA256.Create();
+    var hashBytes = sha.ComputeHash(Encoding.UTF8.GetBytes(sb.ToString()));
+    return Convert.ToHexString(hashBytes);
+}
 
 
 

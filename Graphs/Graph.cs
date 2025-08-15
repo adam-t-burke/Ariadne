@@ -199,17 +199,19 @@ namespace Ariadne.Graphs
         #endregion
 
         #region Parallel Fast Construction
+        // Optimized parallel construction with region-based locking to prevent duplicates
         private void ConstructGraphParallelFast(List<GH_Curve> curves, double tol)
         {
             double cell = tol;
             double tol2 = tol * tol;
 
-            Nodes = new List<Node>();   // will populate after parallel phase
+            Nodes = new List<Node>();
             Edges = new List<Edge>(curves.Count);
 
-            // Shared concurrent state
-            var nodesById = new ConcurrentDictionary<int, Node>(); // id -> node
-            var cellBuckets = new ConcurrentDictionary<(long, long, long), ConcurrentBag<int>>(); // thread-safe buckets
+            // Region-based locking: lock groups of adjacent cells to reduce contention
+            var regionLocks = new ConcurrentDictionary<(long, long, long), object>();
+            var nodesById = new ConcurrentDictionary<int, Node>();
+            var cellBuckets = new ConcurrentDictionary<(long, long, long), List<int>>();
             int nextId = 0;
 
             static (long, long, long) Key(Point3d p, double c) =>
@@ -217,19 +219,22 @@ namespace Ariadne.Graphs
                  (long)Math.Floor(p.Y / c),
                  (long)Math.Floor(p.Z / c));
 
+            static (long, long, long) RegionKey((long, long, long) cellKey) =>
+                (cellKey.Item1 >> 2, cellKey.Item2 >> 2, cellKey.Item3 >> 2); // 4x4x4 cell regions
+
             static IEnumerable<(long, long, long)> NeighborKeys((long, long, long) k)
             {
                 for (long dx = -1; dx <= 1; dx++)
                     for (long dy = -1; dy <= 1; dy++)
-                    for (long dz = -1; dz <= 1; dz++)
-                        yield return (k.Item1 + dx, k.Item2 + dy, k.Item3 + dz);
+                        for (long dz = -1; dz <= 1; dz++)
+                            yield return (k.Item1 + dx, k.Item2 + dy, k.Item3 + dz);
             }
 
             int GetOrCreate(Point3d p)
             {
                 if (Tolerance <= 0)
                 {
-                    // Exact only
+                    // Exact matching fallback
                     foreach (var kv in nodesById)
                     {
                         if (kv.Value.Value.DistanceToSquared(p) <= 0) return kv.Key;
@@ -239,44 +244,44 @@ namespace Ariadne.Graphs
                     return id;
                 }
 
-                var key = Key(p, cell);
-                int found = -1;
+                var cellKey = Key(p, cell);
+                var regionKey = RegionKey(cellKey);
+                var regionLock = regionLocks.GetOrAdd(regionKey, _ => new object());
 
-                // Search existing
-                foreach (var nk in NeighborKeys(key))
+                lock (regionLock)
                 {
-                    if (!cellBuckets.TryGetValue(nk, out var neighborBucket)) continue;
-                    foreach (var nid in neighborBucket)
+                    // Search for existing node within tolerance
+                    foreach (var nk in NeighborKeys(cellKey))
                     {
-                        if (!nodesById.TryGetValue(nid, out var node)) continue;
-                        double dx = node.Value.X - p.X;
-                        double dy = node.Value.Y - p.Y;
-                        double dz = node.Value.Z - p.Z;
-                        if (dx * dx + dy * dy + dz * dz <= tol2)
+                        if (!cellBuckets.TryGetValue(nk, out var bucket)) continue;
+                        foreach (var nid in bucket)
                         {
-                            found = nid;
-                            break;
+                            if (!nodesById.TryGetValue(nid, out var node)) continue;
+                            double dx = node.Value.X - p.X;
+                            double dy = node.Value.Y - p.Y;
+                            double dz = node.Value.Z - p.Z;
+                            if (dx * dx + dy * dy + dz * dz <= tol2)
+                                return nid;
                         }
                     }
-                    if (found >= 0) break;
+
+                    // Create new node
+                    int newId = Interlocked.Increment(ref nextId) - 1;
+                    var newNode = new Node { Value = p };
+                    nodesById[newId] = newNode;
+
+                    var cellBucket = cellBuckets.GetOrAdd(cellKey, _ => new List<int>());
+                    cellBucket.Add(newId);
+
+                    return newId;
                 }
-                if (found >= 0) return found;
-
-                int newId = Interlocked.Increment(ref nextId) - 1;
-                var newNode = new Node { Value = p };
-                nodesById[newId] = newNode;
-
-                var bucket = cellBuckets.GetOrAdd(key, _ => new ConcurrentBag<int>());
-                bucket.Add(newId);
-
-                return newId;
             }
 
             int edgeCount = curves.Count;
             int[] startIds = new int[edgeCount];
             int[] endIds = new int[edgeCount];
 
-            // Parallel endpoint welding
+            // Parallel endpoint processing with region locking
             Parallel.For(0, edgeCount, i =>
             {
                 var c = curves[i];
@@ -288,7 +293,7 @@ namespace Ariadne.Graphs
                 endIds[i] = v;
             });
 
-            // Build ordered Node list (fast mode: creation order yields non-deterministic but stable per run)
+            // Build final node list
             int nodeCount = nextId;
             var nodeArray = new Node[nodeCount];
             foreach (var kv in nodesById)
@@ -296,7 +301,7 @@ namespace Ariadne.Graphs
 
             Nodes = nodeArray.ToList();
 
-            // Sequential edge creation and neighbor linking (preserve original semantics)
+            // Sequential edge creation and neighbor linking
             for (int i = 0; i < edgeCount; i++)
             {
                 var ghCurve = curves[i];
