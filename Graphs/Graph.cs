@@ -199,6 +199,9 @@ namespace Ariadne.Graphs
         #endregion
 
         #region Parallel Fast Construction
+        // Two-phase approach: 
+        // Phase 1: Parallel node creation (allows duplicates for speed)
+        // Phase 2: Sequential merge pass to eliminate duplicates
         private void ConstructGraphParallelFast(List<GH_Curve> curves, double tol)
         {
             double cell = tol;
@@ -314,6 +317,149 @@ namespace Ariadne.Graphs
 
                 Edges.Add(edge);
             }
+
+            // Phase 2: Merge duplicate nodes created during parallel processing
+            MergeDuplicateNodes(tol);
+        }
+        #endregion
+
+        #region Duplicate Node Merge Pass
+        private void MergeDuplicateNodes(double tol)
+        {
+            if (Nodes.Count == 0) return;
+            
+            double cell = tol;
+            double tol2 = tol * tol;
+            
+            // Spatial hash for fast neighbor lookup
+            Dictionary<(long, long, long), List<int>> cells = new();
+            
+            static (long, long, long) Key(Point3d p, double c) =>
+                ((long)Math.Floor(p.X / c),
+                 (long)Math.Floor(p.Y / c),
+                 (long)Math.Floor(p.Z / c));
+
+            static IEnumerable<(long, long, long)> NeighborKeys((long, long, long) k)
+            {
+                for (long dx = -1; dx <= 1; dx++)
+                    for (long dy = -1; dy <= 1; dy++)
+                        for (long dz = -1; dz <= 1; dz++)
+                            yield return (k.Item1 + dx, k.Item2 + dy, k.Item3 + dz);
+            }
+
+            // Map from old node index to new merged node index
+            int[] nodeMapping = new int[Nodes.Count];
+            List<Node> mergedNodes = new List<Node>();
+            
+            for (int i = 0; i < Nodes.Count; i++)
+            {
+                Point3d p = Nodes[i].Value;
+                var key = Key(p, cell);
+                int mergeTarget = -1;
+                
+                // Search for existing node within tolerance
+                if (tol > 0)
+                {
+                    foreach (var nk in NeighborKeys(key))
+                    {
+                        if (!cells.TryGetValue(nk, out var list)) continue;
+                        foreach (var candidateIdx in list)
+                        {
+                            Point3d candidate = mergedNodes[candidateIdx].Value;
+                            double dx = candidate.X - p.X;
+                            double dy = candidate.Y - p.Y;
+                            double dz = candidate.Z - p.Z;
+                            if (dx * dx + dy * dy + dz * dz <= tol2)
+                            {
+                                mergeTarget = candidateIdx;
+                                break;
+                            }
+                        }
+                        if (mergeTarget >= 0) break;
+                    }
+                }
+                
+                if (mergeTarget >= 0)
+                {
+                    // Map to existing node
+                    nodeMapping[i] = mergeTarget;
+                    // Merge neighbors (avoid duplicates)
+                    var targetNode = mergedNodes[mergeTarget];
+                    foreach (var neighbor in Nodes[i].Neighbors)
+                    {
+                        if (!targetNode.Neighbors.Contains(neighbor))
+                            targetNode.Neighbors.Add(neighbor);
+                    }
+                    // Preserve anchor status
+                    if (Nodes[i].Anchor)
+                        targetNode.Anchor = true;
+                }
+                else
+                {
+                    // Create new merged node
+                    var newNode = new Node(Nodes[i]);
+                    newNode.Neighbors = new List<Node>(Nodes[i].Neighbors);
+                    mergedNodes.Add(newNode);
+                    int newIdx = mergedNodes.Count - 1;
+                    nodeMapping[i] = newIdx;
+                    
+                    // Add to spatial hash
+                    if (!cells.TryGetValue(key, out var bucket))
+                    {
+                        bucket = new List<int>();
+                        cells[key] = bucket;
+                    }
+                    bucket.Add(newIdx);
+                }
+            }
+            
+            // Update all edge references to use merged nodes
+            foreach (var edge in Edges)
+            {
+                int startIdx = -1, endIdx = -1;
+                for (int i = 0; i < Nodes.Count; i++)
+                {
+                    if (ReferenceEquals(edge.Start, Nodes[i]))
+                        startIdx = i;
+                    if (ReferenceEquals(edge.End, Nodes[i]))
+                        endIdx = i;
+                }
+                
+                if (startIdx >= 0 && endIdx >= 0)
+                {
+                    edge.Start = mergedNodes[nodeMapping[startIdx]];
+                    edge.End = mergedNodes[nodeMapping[endIdx]];
+                }
+            }
+            
+            // Update neighbor references in merged nodes
+            for (int i = 0; i < mergedNodes.Count; i++)
+            {
+                var node = mergedNodes[i];
+                var updatedNeighbors = new List<Node>();
+                foreach (var neighbor in node.Neighbors)
+                {
+                    int oldIdx = -1;
+                    for (int j = 0; j < Nodes.Count; j++)
+                    {
+                        if (ReferenceEquals(neighbor, Nodes[j]))
+                        {
+                            oldIdx = j;
+                            break;
+                        }
+                    }
+                    if (oldIdx >= 0)
+                    {
+                        var mergedNeighbor = mergedNodes[nodeMapping[oldIdx]];
+                        if (!updatedNeighbors.Contains(mergedNeighbor))
+                            updatedNeighbors.Add(mergedNeighbor);
+                    }
+                }
+                node.Neighbors = updatedNeighbors;
+            }
+            
+            // Replace node list with merged nodes
+            Nodes = mergedNodes;
         }
         #endregion
 
