@@ -103,14 +103,14 @@ namespace Ariadne.FDM
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Variable Anchors can only be used with optimization. Only a FDM direct solve will be done.");
             }
 
-            string inputHash = ComputeHash(Network, Q, P, LoadNodes, Optimization, anchors);
+            // string inputHash = ComputeHash(Network, Q, P, LoadNodes, Optimization, anchors);
 
-            if (inputHash == lastInputHash && lastProblem != null)
-            {
-                DA.SetData(0, lastProblem);
-                DA.SetData(1, "cached");
-                return;
-            }
+            //if (inputHash == lastInputHash && lastProblem != null)
+            //{
+            //    DA.SetData(0, lastProblem);
+            //    DA.SetData(1, "cached");
+            //    return;
+            //}
 
             if (Optimization != null && LoadNodes.Count > 0 && anchors.Count > 0)
             {
@@ -145,8 +145,8 @@ namespace Ariadne.FDM
 
             string message = JsonSerializer.Serialize<FDM_Problem>(problem, options);
 
-            lastInputHash = inputHash;
-            lastProblem = problem;
+            //lastInputHash = inputHash;
+            //lastProblem = problem;
             DA.SetData(0, problem);
             DA.SetData(1, message);
         }
