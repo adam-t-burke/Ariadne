@@ -171,16 +171,19 @@ namespace Ariadne.FDM
             // update the order of nodes to place fixed nodes at the end
             Graph.Nodes = Free.Concat(Fixed).ToList();
 
+            // update the indices of fixed and free nodes
+            Graph.UpdateNodeIndices();
 
-            foreach(Node node in Graph.Nodes)
+
+            foreach (Node node in Graph.Nodes)
                 {
                     if (node.Anchor == false)
                     {
-                        FreeNodes.Add(Graph.Nodes.IndexOf(node));
+                        FreeNodes.Add(node.Index);
                     }
                     else
                     {
-                        FixedNodes.Add(Graph.Nodes.IndexOf(node));
+                        FixedNodes.Add(node.Index);
                     }
                 };
         }

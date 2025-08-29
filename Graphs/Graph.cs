@@ -353,6 +353,14 @@ namespace Ariadne.Graphs
 
         public int Ne => Edges.Count;
         public int Nn => Nodes.Count;
+
+        public void UpdateNodeIndices()
+        {
+            for (int i = 0; i < Nodes.Count; i++)
+            {
+                Nodes[i].Index = i;
+            }
+        }
     }
 
     internal class Node : GH_Point
