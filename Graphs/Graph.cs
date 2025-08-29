@@ -1,14 +1,15 @@
-﻿using System;
+﻿using Grasshopper.Kernel.Data;
+using Grasshopper.Kernel.Types;
+using Rhino.Geometry;
+using Rhino.Input.Custom;
+using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Collections.Concurrent;
 using System.Threading;
 using System.Threading.Tasks;
-using Rhino.Geometry;
-using Grasshopper.Kernel.Data;
-using Grasshopper.Kernel.Types;
 
 namespace Ariadne.Graphs
 {
@@ -29,11 +30,22 @@ namespace Ariadne.Graphs
         [JsonIgnore]
         public GH_Structure<GH_Number> AdjacencyTree { get; set; }
 
+        [JsonIgnore]
+        public List<(int branchIndex, int itemIndex)> EdgeInputMap { get; set; }
+
+        [JsonIgnore] 
+        public GH_Structure<Edge> OutputEdgeTree { get; set; }
+
         public Graph() { }
 
         public Graph(List<GH_Curve> _InputCurves, double _Tolerance)
         {
             ConstructGraph(_InputCurves, _Tolerance);
+        }
+
+        public Graph(GH_Structure<GH_Curve> inputTree, double tol)
+        {
+            ConstructGraphFromTree(inputTree, tol);
         }
 
         public Graph(Graph other)
@@ -322,18 +334,34 @@ namespace Ariadne.Graphs
         }
         #endregion
 
+        // Update EdgeIndicesToTree for nested structure
         public void EdgeIndicesToTree()
         {
             IndicesTree = new GH_Structure<GH_Number>();
-            int counter = 0;
-            foreach (var edge in Edges)
+
+            if (EdgeInputMap == null || EdgeInputMap.Count != Edges.Count)
             {
-                // Using pre-assigned Node indices (avoids O(N) Node lookup)
-                IndicesTree.Append(new GH_Number(edge.Start.Index), new GH_Path(counter));
-                IndicesTree.Append(new GH_Number(edge.End.Index), new GH_Path(counter));
-                counter++;
+                // Fallback to existing behavior if no mapping exists
+                int counter = 0;
+                foreach (var edge in Edges)
+                {
+                    IndicesTree.Append(new GH_Number(edge.Start.Index), new GH_Path(counter));
+                    IndicesTree.Append(new GH_Number(edge.End.Index), new GH_Path(counter));
+                    counter++;
+                }
+                return;
+            }
+
+            for (int edgeIdx = 0; edgeIdx < Edges.Count; edgeIdx++)
+            {
+                var (branchIdx, itemIdx) = EdgeInputMap[edgeIdx];
+                var path = new GH_Path(branchIdx, itemIdx);
+
+                IndicesTree.Append(new GH_Number(Edges[edgeIdx].Start.Index), path);
+                IndicesTree.Append(new GH_Number(Edges[edgeIdx].End.Index), path);
             }
         }
+
 
         public void AdjacencyListToTree()
         {
@@ -359,6 +387,53 @@ namespace Ariadne.Graphs
             for (int i = 0; i < Nodes.Count; i++)
             {
                 Nodes[i].Index = i;
+            }
+        }
+
+        private void ConstructGraphFromTree(GH_Structure<GH_Curve> inputTree, double tol)
+        {
+            // Flatten curves while preserving mapping
+            var allCurves = new List<GH_Curve>();
+            EdgeInputMap = new List<(int branchIndex, int itemIndex)>();
+            
+            for (int branchIdx = 0; branchIdx < inputTree.PathCount; branchIdx++)
+            {
+                var path = inputTree.Paths[branchIdx];
+                var branch = inputTree.get_Branch(path);
+                
+                for (int itemIdx = 0; itemIdx < branch.Count; itemIdx++)
+                {
+                    allCurves.Add((GH_Curve)branch[itemIdx]);
+                    EdgeInputMap.Add((branchIdx, itemIdx));
+                }
+            }
+            
+            // Use existing construction logic
+            ConstructGraph(allCurves, tol);
+        }
+
+        // New method to rebuild tree structure for output
+        public void BuildOutputEdgeTree()
+        {
+
+            if (EdgeInputMap == null || EdgeInputMap.Count != Edges.Count)
+            {
+                // Fallback to simple list structure if no mapping exists
+                OutputEdgeTree = new GH_Structure<Edge>();
+                for (int i = 0; i < Edges.Count; i++)
+                {
+                    OutputEdgeTree.Append(Edges[i], new GH_Path(0));
+                }
+                return;
+            }
+
+            OutputEdgeTree = new GH_Structure<Edge>();
+    
+            for (int edgeIdx = 0; edgeIdx < Edges.Count; edgeIdx++)
+            {
+                var (branchIdx, itemIdx) = EdgeInputMap[edgeIdx];
+                var path = new GH_Path(branchIdx);
+                OutputEdgeTree.Append(Edges[edgeIdx], path);
             }
         }
     }
