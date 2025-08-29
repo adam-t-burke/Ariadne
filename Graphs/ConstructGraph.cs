@@ -32,7 +32,7 @@ namespace Ariadne.Graphs
         /// </summary>
         protected override void RegisterInputParams(GH_Component.GH_InputParamManager pManager)
         {
-            pManager.AddCurveParameter("Curves", "C", "Curves to convert to graph", GH_ParamAccess.list);
+            pManager.AddCurveParameter("Curves", "C", "Curves to convert to graph", GH_ParamAccess.tree);
             pManager.AddNumberParameter("IntersectionTolerance", "tol", "Geometric tolerance for connecting geometry", GH_ParamAccess.item, 0.0001);
         }
 
@@ -42,6 +42,7 @@ namespace Ariadne.Graphs
         protected override void RegisterOutputParams(GH_Component.GH_OutputParamManager pManager)
         {
             pManager.AddGenericParameter("Graph", "Graph", "Graph representation of curve network", GH_ParamAccess.item);
+
         }
 
         /// <summary>
@@ -51,20 +52,15 @@ namespace Ariadne.Graphs
         /// to store data in output parameters.</param>
         protected override void SolveInstance(IGH_DataAccess DA)
         {
-            //initialize
-            List<GH_Curve> edges = new();
+            GH_Structure<GH_Curve> edgeTree = new();
             double tol = 1.0;
 
-            //assign
-            if (!DA.GetDataList(0, edges)) return;
+            if (!DA.GetDataTree(0, out edgeTree)) return;
             DA.GetData(1, ref tol);
 
-            //create network
-            Graph curveGraph = new Graph(edges, tol);
-
-            //assign
+            Graph curveGraph = new Graph(edgeTree, tol);
+   
             DA.SetData(0, curveGraph);
-
         }
 
         /// <summary>

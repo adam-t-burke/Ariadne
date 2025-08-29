@@ -41,7 +41,7 @@ namespace Ariadne.FDM
         protected override void RegisterOutputParams(GH_OutputParamManager pManager)
         {
             pManager.AddGenericParameter("Nodes", "Nodes", "Nodes in the FDM Network", GH_ParamAccess.list);
-            pManager.AddGenericParameter("Edges", "Edges", "Edges in the FDM Network", GH_ParamAccess.list);
+            pManager.AddGenericParameter("Edges", "Edges", "Edges in the FDM Network", GH_ParamAccess.tree);
             pManager.AddNumberParameter("Edge Indices", "Edge Indices", "Edges defined by start and end node indices", GH_ParamAccess.tree);
             pManager.AddNumberParameter("Adjacency List", "Adjacency List", "Adjacency List representation of graph", GH_ParamAccess.list);
             pManager.AddNumberParameter("Free Node Indices", "Free Indices", "Indices of free nodes", GH_ParamAccess.list);
@@ -60,20 +60,11 @@ namespace Ariadne.FDM
             if (!DA.GetData(0, ref network)) return;
 
             network.Graph.EdgeIndicesToTree();
+            network.Graph.BuildOutputEdgeTree();
             network.Graph.AdjacencyListToTree();
 
-            //IEnumerable<int> freeIndices = Enumerable.Range(0, network.Graph.Nn - network.Anchors.Count);
-            //IEnumerable<int> fixedIndices = Enumerable.Range(network.Graph.Nn - network.Anchors.Count, network.Anchors.Count);
-
-            //List<int> freeIndices = network.Graph.Nodes.Select(node => network.Graph.Nodes.IndexOf(node)).Where(index => network.Graph.Nodes[index].Anchor == false).ToList();
-            //List<int> fixedIndices = network.Graph.Nodes.Select(node => network.Graph.Nodes.IndexOf(node)).Where(index => network.Graph.Nodes[index].Anchor == true).ToList();
-
-
-
-
-
             DA.SetDataList(0, network.Graph.Nodes);
-            DA.SetDataList(1, network.Graph.Edges);
+            DA.SetDataTree(1, network.Graph.OutputEdgeTree);
             DA.SetDataTree(2, network.Graph.IndicesTree);
             DA.SetDataTree(3, network.Graph.AdjacencyTree);
             DA.SetDataList(4, network.FreeNodes);

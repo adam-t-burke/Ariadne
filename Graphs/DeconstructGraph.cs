@@ -50,10 +50,11 @@ namespace Ariadne.Graphs
             if (!DA.GetData(0, ref curveGraph)) return;
 
             curveGraph.EdgeIndicesToTree();
+            curveGraph.BuildOutputEdgeTree();
             curveGraph.AdjacencyListToTree();
 
-            DA.SetDataList(0, curveGraph.Nodes.Select(node => node.Value));
-            DA.SetDataList(1, curveGraph.Edges.Select(edge => edge.Value));
+            DA.SetDataList(0, curveGraph.Nodes);
+            DA.SetDataTree(1, curveGraph.OutputEdgeTree);
             DA.SetDataTree(2, curveGraph.IndicesTree);
             DA.SetDataTree(3, curveGraph.AdjacencyTree);
 

@@ -8,6 +8,7 @@ using System;
 using System.Drawing;
 using System.Collections.Generic;
 using Ariadne.Utilities;
+using Ariadne.Graphs;
 
 namespace Ariadne.FDM
 {
@@ -33,7 +34,7 @@ namespace Ariadne.FDM
         /// </summary>
         protected override void RegisterInputParams(GH_InputParamManager pManager)
         {
-            pManager.AddCurveParameter("Edges", "E", "Edges between nodes", GH_ParamAccess.list);
+            pManager.AddCurveParameter("Edges", "E", "Edges between nodes", GH_ParamAccess.tree);
             pManager.AddNumberParameter("Edge Tolerence", "E Tol", "Geometric tolerance for connecting edges", GH_ParamAccess.item, 0.001);
             pManager.AddPointParameter("Anchors", "A", "Anchor points", GH_ParamAccess.list);
             pManager.AddNumberParameter("Anchor Tolerance", "A Tol", "Geometric tolerance for picking anchor nodes geometry", GH_ParamAccess.item, 0.001);
@@ -65,20 +66,22 @@ namespace Ariadne.FDM
             }
             
             //initialize
-            List<GH_Curve> edges = new List<GH_Curve>();
+            GH_Structure<GH_Curve> edges = new GH_Structure<GH_Curve>();
             double e_tol = 0.001;
             List<Point3d> anchors = new List<Point3d>();
             double a_tol = 0.001;
 
 
             //assign
-            if (!DA.GetDataList(0, edges)) return;
+            if (!DA.GetDataTree(0, out edges)) return;
             if (!DA.GetData(1, ref e_tol)) return;
             if (!DA.GetDataList(2, anchors)) return;
             if (!DA.GetData(3, ref a_tol)) return;
 
-            //create network from graph
-            FDM_Network network = new(edges, e_tol, anchors, a_tol);
+            //create graph from edge tree structure
+            Graph graph = new(edges, e_tol);
+            //create network from graph and anchors
+            FDM_Network network = new(graph, anchors, a_tol);
 
             //Check sufficent anchor definitions
             if (!network.AnchorCheck())
