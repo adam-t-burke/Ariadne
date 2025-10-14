@@ -30,6 +30,9 @@ namespace Ariadne.Objectives
         public List<double[]> Points { get; set; }
 
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+        public List<double[]> Vectors { get; set; }
+
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public List<double> Values { get; set; }
 
         [JsonIgnore(Condition = JsonIgnoreCondition.Always)]
@@ -612,6 +615,38 @@ namespace Ariadne.Objectives
             else
             {
                 IsValid = false;
+            }
+        }
+    }
+
+    internal class OBJReaction : OBJNodes
+    {
+        public OBJReaction(double _weight, List<Node> _nodes, List<Vector3d> _vectors, bool _useMag)
+        {
+            Weight = _weight;
+            Nodes = _nodes;
+            Vectors = UtilityFunctions.VectorsToArray(_vectors);
+            Indices = [.. Nodes.Select(x => x.Index)];
+
+            if (!_useMag)
+            {
+                OBJID = 12;
+            }
+            else
+            {
+                OBJID = 13;
+            }
+            foreach (Node node in _nodes)
+            {
+                if (node.Anchor)
+                {
+                    IsValid = true;
+                }
+                else
+                {
+                    IsValid = false;
+                    throw new Exception("All nodes must be fixed for a reaction objective.");
+                }
             }
         }
     }
