@@ -93,6 +93,17 @@ namespace Ariadne.Utilities
             return xyz;
         }
 
+        public static List<double[]> VectorsToArray(List<Vector3d> vectors)
+        {
+            List<double[]> vecs = new List<double[]>();
+            foreach (Vector3d v in vectors)
+            {
+                double[] _XYZ = new double[] { v.X, v.Y, v.Z };
+                vecs.Add(_XYZ);
+            }
+            return vecs;
+        }
+
         public static List<Vector3d> GetReactions(List<double> forces, FDM_Network network)
         {
             List<Vector3d> reactions = new();
