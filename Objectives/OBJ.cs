@@ -139,6 +139,47 @@ namespace Ariadne.Objectives
         }
     }
 
+    internal class OBJTarget_XY : OBJNodes
+    {
+        /// <summary>
+        /// Empty construtor
+        /// </summary>
+        public OBJTarget_XY()
+        {
+            IsValid = false;
+        }
+
+        /// <summary>
+        /// Constructor for targeting a geometry that uses all free nodes in the network as targets.
+        /// </summary> 
+        /// <param name="_weight">Weight of objective function</param>
+
+        public OBJTarget_XY(double _weight)
+        {
+            OBJID = 10;
+            Weight = _weight;
+            Indices = new List<int>() { -1 };
+            Points = null;
+            IsValid = true;
+        }
+
+        /// <summary>
+        /// Constructor for targeting a geometry that uses a subset of nodes in the network as targets.
+        /// </summary>
+        /// <param name="_weight"></param>
+        /// <param name="_nodes"></param>
+        /// <param name="_points"></param>
+        public OBJTarget_XY(double _weight, List<Node> _nodes)
+        {
+            OBJID = 10;
+            Weight = _weight;
+            Nodes = _nodes;
+            Indices = null;
+            Points = UtilityFunctions.PointsToArray(_nodes.Select(x => x.Value).ToList());
+            IsValid = true;
+        }
+    }
+
     internal class OBJlengthvariation : OBJEdges
     {
         /// <summary>
