@@ -1,10 +1,9 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
 using Grasshopper.Kernel;
 using Rhino.Geometry;
 using Rhino;
-using Ariadne.Optimization;
 using Ariadne.FDM;
 using Ariadne.Graphs;
 using System.Drawing;

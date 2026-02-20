@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -14,7 +14,7 @@ using Ariadne.Utilities;
 
 namespace Ariadne.FDM
 {
-    internal class FDM_Network
+    public class FDM_Network
     {
         /// <summary>
         /// Pass along the graph
@@ -130,22 +130,21 @@ namespace Ariadne.FDM
         }
 
         /// <summary>
-        /// Construct a copy of an existing network
+        /// Construct a copy of an existing network.
+        /// Copies lists to avoid shared-mutation issues.
+        /// Does NOT re-run FixedFree since the source is already partitioned.
         /// </summary>
-        /// <param name = "other" ></ param >
         public FDM_Network(FDM_Network other)
         {
-            Graph = other.Graph;
-            Anchors = other.Anchors;
+            Graph = new Graph(other.Graph);
+            Anchors = new List<Point3d>(other.Anchors);
             ATol = other.ATol;
-            Free = other.Free;
-            Fixed = other.Fixed;
-            FixedNodes = other.FixedNodes;
-            FreeNodes = other.FreeNodes;
-
-            FixedFree();
-            ValidCheck();
-
+            ETol = other.ETol;
+            Free = new List<Node>(other.Free);
+            Fixed = new List<Node>(other.Fixed);
+            FixedNodes = new List<int>(other.FixedNodes);
+            FreeNodes = new List<int>(other.FreeNodes);
+            Valid = other.Valid;
             IsUpdating = false;
         }
 

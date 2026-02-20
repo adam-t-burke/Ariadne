@@ -1,15 +1,10 @@
-﻿using Ariadne.FDM;
+using Ariadne.FDM;
 using Rhino.Collections;
-using Rhino.Display;
 using Rhino.Geometry;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using Ariadne.Graphs;
-using System.Linq.Expressions;
-using Ed.Eto;
 
 namespace Ariadne.Utilities
 {
@@ -30,23 +25,12 @@ namespace Ariadne.Utilities
 
         public static (bool, int) WithinTolerance(List<Node> nodes, Point3d point, double tolerance)
         {
-            bool match = false;
-            int index = -1;
-
-            Parallel.ForEach(nodes, (node, state) =>
-                {
-                    bool closeEnough = node.Value.EpsilonEquals(point, tolerance);
-                    if (closeEnough)
-                    {
-                        match = true;
-                        index = nodes.IndexOf(node);
-                        state.Break();
-                    }
-                });
-
-            return (match, index);
-
-
+            for (int i = 0; i < nodes.Count; i++)
+            {
+                if (nodes[i].Value.EpsilonEquals(point, tolerance))
+                    return (true, i);
+            }
+            return (false, -1);
         }
 
         public static List<double> GetLengths(CurveList curves)

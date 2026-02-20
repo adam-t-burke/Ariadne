@@ -1,4 +1,4 @@
-﻿using Grasshopper.Kernel.Data;
+using Grasshopper.Kernel.Data;
 using Grasshopper.Kernel.Types;
 using Rhino.Geometry;
 using Rhino.Input.Custom;
@@ -13,7 +13,7 @@ using System.Threading.Tasks;
 
 namespace Ariadne.Graphs
 {
-    internal class Graph
+    public class Graph
     {
         [JsonIgnore]
         public double Tolerance { get; set; }
@@ -51,10 +51,12 @@ namespace Ariadne.Graphs
         public Graph(Graph other)
         {
             Tolerance = other.Tolerance;
-            Nodes = other.Nodes;
-            Edges = other.Edges;
+            Nodes = new List<Node>(other.Nodes);
+            Edges = new List<Edge>(other.Edges);
             IndicesTree = other.IndicesTree;
             AdjacencyTree = other.AdjacencyTree;
+            EdgeInputMap = other.EdgeInputMap != null ? new List<(int, int)>(other.EdgeInputMap) : null;
+            OutputEdgeTree = other.OutputEdgeTree;
         }
 
         // Internal construction mode (kept private per request)
@@ -438,16 +440,16 @@ namespace Ariadne.Graphs
         }
     }
 
-    internal class Node : GH_Point
+    public class Node : GH_Point
     {
-        [JsonIgnore]
+  [JsonIgnore]
         public bool Anchor { get; set; }
 
-        [JsonIgnore]
+   [JsonIgnore]
         public List<Node> Neighbors { get; set; }
 
         [JsonIgnore]
-        public int Index { get; internal set; }
+    public int Index { get; set; }
 
         public Node()
         {
@@ -469,42 +471,48 @@ namespace Ariadne.Graphs
         {
             Anchor = anchor;
             Neighbors = neighbors;
-            Index = -1;
+      Index = -1;
         }
     }
 
-    internal class Edge : GH_Curve
+    public class Edge : GH_Curve
     {
         [JsonIgnore]
-        public Node Start { get; set; }
+     public Node Start { get; set; }
 
-        [JsonIgnore]
+     [JsonIgnore]
         public Node End { get; set; }
 
         [JsonIgnore]
         public double Q { get; set; }
 
+        [JsonIgnore]
+        public new Guid ReferenceID { get; set; }
+
         public Edge()
         {
-            Start = new();
-            End = new();
-            Q = 0;
+        Start = new();
+    End = new();
+          Q = 0;
+ReferenceID = Guid.Empty;
         }
 
         public Edge(Node start, Node end, double q, GH_Curve curve)
         {
-            Start = start;
-            End = end;
+          Start = start;
+      End = end;
             Q = q;
-            Value = curve.Value;
+  Value = curve.Value;
+            ReferenceID = Guid.Empty;
         }
 
         public Edge(Edge other)
-        {
-            Start = other.Start;
-            End = other.End;
-            Q = other.Q;
-            Value = other.Value;
-        }
+ {
+   Start = other.Start;
+         End = other.End;
+      Q = other.Q;
+   Value = other.Value;
+       ReferenceID = other.ReferenceID;
+}
     }
 }

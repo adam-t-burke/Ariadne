@@ -1,15 +1,11 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Grasshopper.Kernel;
 using Rhino.Geometry;
 using Grasshopper.Kernel.Parameters;
 using Grasshopper.GUI.Gradient;
-using System.Runtime.InteropServices;
-using Grasshopper.Kernel.Types.Transforms;
-using System.Data.SqlClient;
 using Ariadne.FDM;
-using Rhino.Collections;
 using Ariadne.Graphs;
 using System.Drawing;
 
@@ -17,38 +13,29 @@ namespace Ariadne.Utilities
 {
     internal class Visualize : GH_Component
     {
-        //persistent data
-        Line[] edges;
-        List<double> property;
-        Line[] externalforces;
-        Line[] reactionforces;
-        System.Drawing.Color c0;
-        System.Drawing.Color cmed;
-        System.Drawing.Color c1;
-        GH_Gradient grad;
-        int thickness;
-        System.Drawing.Color cload;
-        System.Drawing.Color creact;
-        bool load;
-        bool react;
-        int prop;
-        bool show;
-        FDM_Problem network;
+        private FDM_Network _network;
+        private Line[] _edges;
+        private List<double> _property;
+        private Line[] _externalForces;
+        private Line[] _reactionForces;
+        private Color _c0;
+        private Color _cMed;
+        private Color _c1;
+        private GH_Gradient _grad;
+        private int _thickness;
+        private Color _cLoad;
+        private Color _cReact;
+        private bool _showLoads;
+        private bool _showReactions;
+        private int _prop;
+        private bool _show;
 
-        //default colours
-        readonly System.Drawing.Color lightgray = System.Drawing.Color.FromArgb(230, 231, 232);
-        readonly System.Drawing.Color blue = System.Drawing.Color.FromArgb(62, 168, 222);
-        readonly System.Drawing.Color pink = System.Drawing.Color.FromArgb(255, 123, 172);
-        readonly System.Drawing.Color green = System.Drawing.Color.FromArgb(71, 181, 116);
-        readonly System.Drawing.Color red = System.Drawing.Color.FromArgb(150, 235, 52, 73);
+        private static readonly Color DefaultLightGray = Color.FromArgb(230, 231, 232);
+        private static readonly Color DefaultBlue = Color.FromArgb(62, 168, 222);
+        private static readonly Color DefaultPink = Color.FromArgb(255, 123, 172);
+        private static readonly Color DefaultGreen = Color.FromArgb(71, 181, 116);
+        private static readonly Color DefaultRed = Color.FromArgb(150, 235, 52, 73);
 
-        //double minprop;
-        //double maxprop;
-
-
-        /// <summary>
-        /// Initializes a new instance of the Visualize class.
-        /// </summary>
         public Visualize()
           : base("VisualizeNetwork", "Visualize",
               "Visualize a FDM network",
@@ -56,110 +43,106 @@ namespace Ariadne.Utilities
         {
         }
 
-        /// <summary>
-        /// Registers all the input parameters for this component.
-        /// </summary>
         protected override void RegisterInputParams(GH_InputParamManager pManager)
         {
             pManager.AddBooleanParameter("Show", "Show", "Active status of component", GH_ParamAccess.item, true);
             pManager.AddGenericParameter("Network", "Network", "Network to visualize", GH_ParamAccess.item);
             pManager.AddVectorParameter("Loads", "P", "Applied loads", GH_ParamAccess.list, new Vector3d(0, 0, 0));
             pManager.AddNumberParameter("Load Scale", "Pscale", "Scale factor for length of arrows", GH_ParamAccess.item, 100);
-            pManager.AddColourParameter("ColourMin", "Cmin", "Colour for minimum value", GH_ParamAccess.item, pink);
-            pManager.AddColourParameter("ColourMed", "Cmed", "Colour for neutral value", GH_ParamAccess.item, lightgray);
-            pManager.AddColourParameter("ColourMax", "Cmax", "Colour for maximum value",
-                GH_ParamAccess.item, blue);
+            pManager.AddColourParameter("ColourMin", "Cmin", "Colour for minimum value", GH_ParamAccess.item, DefaultPink);
+            pManager.AddColourParameter("ColourMed", "Cmed", "Colour for neutral value", GH_ParamAccess.item, DefaultLightGray);
+            pManager.AddColourParameter("ColourMax", "Cmax", "Colour for maximum value", GH_ParamAccess.item, DefaultBlue);
             pManager.AddIntegerParameter("Color Property", "Property", "Property displayed by colour gradient", GH_ParamAccess.item, 0);
             pManager.AddIntegerParameter("Line Thickness", "Thickness", "Thickness of preview lines", GH_ParamAccess.item, 8);
-            pManager.AddColourParameter("Load Colour", "Cload", "Colour for applied loads", GH_ParamAccess.item, red);
+            pManager.AddColourParameter("Load Colour", "Cload", "Colour for applied loads", GH_ParamAccess.item, DefaultRed);
             pManager.AddBooleanParameter("Show Loads", "Load", "Show external loads in preview", GH_ParamAccess.item, true);
-            pManager.AddColourParameter("Reaction Colour", "Creaction", "Colour for support reactions", GH_ParamAccess.item, green);
+            pManager.AddColourParameter("Reaction Colour", "Creaction", "Colour for support reactions", GH_ParamAccess.item, DefaultGreen);
             pManager.AddBooleanParameter("Show Reactions", "Reaction", "Show anchor reactions in preview", GH_ParamAccess.item, true);
 
             Param_Integer param = pManager[7] as Param_Integer;
             param.AddNamedValue("None", -1);
             param.AddNamedValue("Force", 0);
             param.AddNamedValue("Q", 1);
-
         }
 
-        /// <summary>
-        /// Registers all the output parameters for this component.
-        /// </summary>
         protected override void RegisterOutputParams(GH_OutputParamManager pManager)
         {
         }
 
-        /// <summary>
-        /// This is the method that actually does the work.
-        /// </summary>
-        /// <param name="DA">The DA object is used to retrieve from inputs and store in outputs.</param>
         protected override void SolveInstance(IGH_DataAccess DA)
         {
             ClearData();
-            //Initialize
-            FDM_Network network = new();
-            List<Vector3d> loads = new List<Vector3d>();
-            double scale = 1.0;
-            c0 = pink; // min colour (light gray)
-            cmed = lightgray;
-            c1 = blue; // max colour (blue)
-            cload = pink; // load colour (pink)
-            load = true;
-            creact = green; // reaction colour green)
-            react = false;
 
-            //Assign
-            DA.GetData(0, ref show);
+            FDM_Network network = new();
+            List<Vector3d> loads = new();
+            double scale = 1.0;
+            _c0 = DefaultPink;
+            _cMed = DefaultLightGray;
+            _c1 = DefaultBlue;
+            _cLoad = DefaultPink;
+            _showLoads = true;
+            _cReact = DefaultGreen;
+            _showReactions = false;
+
+            DA.GetData(0, ref _show);
             if (!DA.GetData(1, ref network)) return;
             DA.GetDataList(2, loads);
             DA.GetData(3, ref scale);
-            DA.GetData(4, ref c0);
-            DA.GetData(5, ref cmed);
-            DA.GetData(6, ref c1);
-            DA.GetData(7, ref prop);
-            DA.GetData(8, ref thickness);
-            DA.GetData(9, ref cload);
-            DA.GetData(10, ref load);
-            DA.GetData(11, ref creact);
-            DA.GetData(12, ref react);
+            DA.GetData(4, ref _c0);
+            DA.GetData(5, ref _cMed);
+            DA.GetData(6, ref _c1);
+            DA.GetData(7, ref _prop);
+            DA.GetData(8, ref _thickness);
+            DA.GetData(9, ref _cLoad);
+            DA.GetData(10, ref _showLoads);
+            DA.GetData(11, ref _cReact);
+            DA.GetData(12, ref _showReactions);
 
-            List<int> freeIndices = network.FreeNodes;
-            List<int> fixedIndices = network.FixedNodes;
+            _network = network;
 
-            //Lines and forces
-            externalforces = LoadMaker(network.Graph.Nodes, freeIndices , loads, scale);
-            //edges = network.Network.Graph.Edges.Select(edge => edge.Curve);
-            //reactionforces = ReactionMaker(Solver.Reactions(network), network.Points, network.Network.F, scale);
+            _edges = EdgesToLines(network.Graph.Edges);
+            _externalForces = LoadMaker(network.Graph.Nodes, network.FreeNodes, loads, scale);
 
-            //element-wise values
-            if (prop == 0)
+            List<double> lengths = UtilityFunctions.GetLengths(network.Graph.Edges);
+            List<double> forces = UtilityFunctions.GetForces(lengths, network.Graph.Edges);
+
+            if (_showReactions)
             {
-                List<double> length = UtilityFunctions.GetLengths(network.Graph.Edges);
-                property = UtilityFunctions.GetForces(length, network.Graph.Edges);
-                GradientMaker(property);
-                //var propabs = property.Select(x => Math.Abs(x)).ToList();
-
-                //SetGradient(propabs.Max());
+                List<Vector3d> reactions = UtilityFunctions.GetReactions(forces, network);
+                List<Point3d> nodePoints = network.Graph.Nodes.Select(n => n.Value).ToList();
+                _reactionForces = ReactionMaker(reactions, nodePoints, network.FixedNodes, scale);
             }
-            else if (prop == 1)
+            else
             {
-                property = network.Graph.Edges.Select(x => x.Q).ToList();
-                GradientMaker(property);
-
-                //var propabs = property.Select(x => Math.Abs(x)).ToList();
-                //SetGradient(propabs.Max());
+                _reactionForces = Array.Empty<Line>();
             }
 
+            if (_prop == 0)
+            {
+                _property = forces;
+                GradientMaker(_property);
+            }
+            else if (_prop == 1)
+            {
+                _property = network.Graph.Edges.Select(x => x.Q).ToList();
+                GradientMaker(_property);
+            }
         }
 
         public override BoundingBox ClippingBox
         {
             get
             {
-                BoundingBox bb = new BoundingBox(network.Network.Graph.Nodes.Select(node => node.Value));
-                for (int i = 0; i < externalforces.Length; i++) bb.Union(externalforces[i].BoundingBox);
-                for (int i = 0; i < reactionforces.Length; i++) bb.Union(reactionforces[i].BoundingBox);
+                if (_network == null || _edges == null || _edges.Length == 0)
+                    return BoundingBox.Empty;
+
+                BoundingBox bb = new BoundingBox(_network.Graph.Nodes.Select(node => node.Value));
+                if (_externalForces != null)
+                    for (int i = 0; i < _externalForces.Length; i++)
+                        bb.Union(_externalForces[i].BoundingBox);
+                if (_reactionForces != null)
+                    for (int i = 0; i < _reactionForces.Length; i++)
+                        bb.Union(_reactionForces[i].BoundingBox);
 
                 return bb;
             }
@@ -169,37 +152,38 @@ namespace Ariadne.Utilities
         {
             base.DrawViewportWires(args);
 
-            if (show)
+            if (!_show || _edges == null) return;
+
+            if (_showLoads && _externalForces != null && _externalForces.Length > 0)
+                args.Display.DrawArrows(_externalForces, _cLoad);
+
+            if (_showReactions && _reactionForces != null && _reactionForces.Length > 0)
+                args.Display.DrawArrows(_reactionForces, _cReact);
+
+            if (_prop == -1)
             {
-                if (load) args.Display.DrawArrows(externalforces, cload);
-
-                if (react) args.Display.DrawArrows(reactionforces, creact);
-
-                if (prop == -1) args.Display.DrawLines(edges, c1, thickness);
-                else
+                args.Display.DrawLines(_edges, _c1, _thickness);
+            }
+            else if (_property != null && _grad != null)
+            {
+                for (int i = 0; i < _edges.Length; i++)
                 {
-                    for (int i = 0; i < edges.Length; i++)
-                    {
-                        args.Display.DrawLine(edges[i], grad.ColourAt(property[i]), thickness);
-                    }
+                    args.Display.DrawLine(_edges[i], _grad.ColourAt(_property[i]), _thickness);
                 }
             }
         }
 
-        public Line[] ToLines(CurveList curves)
+        private static Line[] EdgesToLines(List<Edge> edges)
         {
-            Line[] lines = new Line[curves.Count];
-            for (int i = 0; i < curves.Count; i++)
+            Line[] lines = new Line[edges.Count];
+            for (int i = 0; i < edges.Count; i++)
             {
-                Curve curve = curves[i];
-                Line line = new Line(curve.PointAtStart, curve.PointAtEnd);
-                lines[i] = line;
+                lines[i] = new Line(edges[i].Start.Value, edges[i].End.Value);
             }
-
             return lines;
         }
 
-        public void GradientMaker(List<double> property)
+        private void GradientMaker(List<double> property)
         {
             double minprop = property.Min();
             double maxprop = property.Max();
@@ -207,108 +191,85 @@ namespace Ariadne.Utilities
             int signmin = Math.Sign(minprop);
             int signmax = Math.Sign(maxprop);
 
-            //all data is negative
             if (signmin <= 0 && signmax <= 0)
             {
-                grad = new GH_Gradient();
-                grad.AddGrip(minprop, c0);
-                grad.AddGrip(0, cmed);
+                _grad = new GH_Gradient();
+                _grad.AddGrip(minprop, _c0);
+                _grad.AddGrip(0, _cMed);
             }
-            //negative and positive values
             else if (signmin <= 0 && signmax >= 0)
             {
-                grad = new GH_Gradient();
-                grad.AddGrip(minprop, c0);
-                grad.AddGrip(0, cmed);
-                grad.AddGrip(maxprop, c1);
+                _grad = new GH_Gradient();
+                _grad.AddGrip(minprop, _c0);
+                _grad.AddGrip(0, _cMed);
+                _grad.AddGrip(maxprop, _c1);
             }
-            //all positive
             else
             {
-                grad = new GH_Gradient();
-                grad.AddGrip(0, cmed);
-                grad.AddGrip(maxprop, c1);
+                _grad = new GH_Gradient();
+                _grad.AddGrip(0, _cMed);
+                _grad.AddGrip(maxprop, _c1);
             }
         }
 
-        public void SetGradient(double max)
+        private static Line[] ReactionMaker(List<Vector3d> anchorforces, List<Point3d> points, List<int> fixedIndices, double scale)
         {
-            grad = new GH_Gradient();
-            grad.AddGrip(-max, c0);
-            grad.AddGrip(0, cmed);
-            grad.AddGrip(max, c1);
-        }
+            if (anchorforces.Count == 0) return Array.Empty<Line>();
 
-        public Line[] ReactionMaker(List<Vector3d> anchorforces, List<Point3d> points, List<int> F, double scale)
-        {
             var mags = anchorforces.Select(p => p.Length).ToList();
             var normalizer = mags.Max();
+            if (normalizer < 1e-12) return Array.Empty<Line>();
 
-            List<Line> reactions = new List<Line>();
-
-            for (int i = 0; i < F.Count; i++)
+            List<Line> reactions = new(fixedIndices.Count);
+            for (int i = 0; i < fixedIndices.Count; i++)
             {
-                var index = F[i];
+                var index = fixedIndices[i];
                 reactions.Add(new Line(points[index], anchorforces[i] * 3 * scale / normalizer));
             }
 
             return reactions.ToArray();
         }
-        public Line[] LoadMaker(List<Node> nodes, List<int> N, List<Vector3d> loads, double scale)
-        {
-            List<Line> loadvectors = new List<Line>();
 
-            if (N.Count != loads.Count && loads.Count != 1) throw new ArgumentException("Length of force vectors must be 1 or match length of free nodes.");
+        private static Line[] LoadMaker(List<Node> nodes, List<int> N, List<Vector3d> loads, double scale)
+        {
+            List<Line> loadvectors = new();
+
+            if (N.Count != loads.Count && loads.Count != 1)
+                throw new ArgumentException("Length of force vectors must be 1 or match length of free nodes.");
 
             if (loads.Count == 1)
             {
+                double len = loads[0].Length;
+                if (len < 1e-12) return Array.Empty<Line>();
+
                 for (int i = 0; i < N.Count; i++)
                 {
-                    int index = N[i];
-
-                    Point3d p = nodes[index].Value;
-
-                    loadvectors.Add(new Line(p, loads[0] / loads[0].Length * scale));
+                    Point3d p = nodes[N[i]].Value;
+                    loadvectors.Add(new Line(p, loads[0] / len * scale));
                 }
             }
             else
             {
-                //extract magnitudes
                 var lns = loads.Select(p => p.Length).ToList();
                 var normalizer = lns.Max();
+                if (normalizer < 1e-12) return Array.Empty<Line>();
 
                 for (int i = 0; i < N.Count; i++)
                 {
-                    int index = N[i];
-                    Point3d p = nodes[index].Value;
+                    Point3d p = nodes[N[i]].Value;
                     Vector3d l = loads[i];
 
-                    if (l.Length < 0.1)
-                    {
-                        continue;
-                    }
-                    else
-                    {
-                        loadvectors.Add(new Line(p, l * scale / normalizer));
-                    }
+                    if (l.Length < 0.1) continue;
 
+                    loadvectors.Add(new Line(p, l * scale / normalizer));
                 }
             }
 
             return loadvectors.ToArray();
         }
 
-        /// <summary>
-        /// Provides an Icon for the component.
-        /// </summary>
         protected override Bitmap Icon => Properties.Resources.visualize;
 
-        /// <summary>
-        /// Gets the unique ID for this component. Do not change this ID after release.
-        /// </summary>
-        public override Guid ComponentGuid
-        {
-            get { return new Guid("5B9176B3-B940-4C2C-AFFE-BF4532FB2111"); }
-        }
+        public override Guid ComponentGuid => new Guid("5B9176B3-B940-4C2C-AFFE-BF4532FB2111");
     }
 }

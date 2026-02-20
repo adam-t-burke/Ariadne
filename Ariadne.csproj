@@ -1,13 +1,20 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 	
   <PropertyGroup>
     <TargetFrameworks>net8.0</TargetFrameworks>
     <Version>1.0.1</Version>
     <Title>Ariadne</Title>
     <Description>Ariadne is the front-end counterpart to the inverse form finding tool Theseus.</Description>
-    <TargetExt>.gha</TargetExt>
-    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>	
+<TargetExt>.gha</TargetExt>
+    <Nullable>enable</Nullable>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
+
+  <!-- Copy theseus.dll native library to output -->
+  <ItemGroup>
+    <None Include="Theseus\theseus.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
   
   <ItemGroup>
     <PackageReference Include="Grasshopper" Version="8.21.25188.17001" />
@@ -30,7 +37,7 @@
   <ItemGroup>
     <EmbeddedResource Update="Properties\Resources.resx">
       <Generator>ResXFileCodeGenerator</Generator>
-      <LastGenOutput>Resources.Designer.cs</LastGenOutput>
+    <LastGenOutput>Resources.Designer.cs</LastGenOutput>
     </EmbeddedResource>
   </ItemGroup>
 

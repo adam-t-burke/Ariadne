@@ -1,0 +1,21 @@
+[package]
+name = "theseus"
+version = "0.1.0"
+edition = "2021"
+description = "Force Density Method form-finding solver with hand-coded adjoints"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+sprs = "0.11"
+sprs-ldl = "0.10"
+ndarray = "0.16"
+argmin = "0.10"
+argmin-math = { version = "0.4", features = ["vec"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
