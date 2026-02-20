@@ -125,13 +125,14 @@ public class RigidPointSetComponent : GH_Component
 }
 
 /// <summary>
-/// Align anchor reaction force directions with target directions.
+/// Align anchor reaction force directions with target directions,
+/// optionally also matching target magnitudes.
 /// </summary>
-public class ReactionDirectionComponent : GH_Component
+public class ReactionComponent : GH_Component
 {
-    public ReactionDirectionComponent()
-        : base("Reaction Direction", "ReactDir",
-            "Align anchor reaction force directions with target directions.",
+    public ReactionComponent()
+        : base("Reaction", "Reaction",
+            "Align anchor reaction directions, optionally matching magnitudes.",
             "Ariadne", "Objectives")
     { }
 
@@ -139,72 +140,42 @@ public class ReactionDirectionComponent : GH_Component
     {
         pManager.AddGenericParameter("Anchor Nodes", "Anchors", "Anchor nodes to constrain", GH_ParamAccess.list);
         pManager.AddVectorParameter("Target Directions", "Dirs", "Target reaction directions", GH_ParamAccess.list);
+        pManager.AddBooleanParameter("Include Magnitude", "Mag?", "Also match reaction magnitudes", GH_ParamAccess.item, false);
+        pManager.AddNumberParameter("Target Magnitudes", "Mags", "Target reaction magnitudes (used when Mag? is true)", GH_ParamAccess.list);
         pManager.AddNumberParameter("Weight", "Weight", "Objective weight", GH_ParamAccess.item, 1.0);
+        pManager[3].Optional = true;
     }
 
     protected override void RegisterOutputParams(GH_OutputParamManager pManager)
     {
-        pManager.AddGenericParameter("Objective", "OBJ", "Reaction Direction Objective", GH_ParamAccess.item);
+        pManager.AddGenericParameter("Objective", "OBJ", "Reaction Objective", GH_ParamAccess.item);
     }
 
     protected override void SolveInstance(IGH_DataAccess DA)
     {
         List<Node> anchors = [];
         List<Vector3d> dirs = [];
-        double weight = 1.0;
-
-        if (!DA.GetDataList(0, anchors)) return;
-        if (!DA.GetDataList(1, dirs)) return;
-        DA.GetData(2, ref weight);
-
-        var objective = new ReactionDirectionObjective(weight, anchors, dirs);
-        DA.SetData(0, objective);
-    }
-
-    protected override Bitmap? Icon => null;
-    public override Guid ComponentGuid => new("D1E2F3A4-B5C6-7890-A1B2-C3D4E5F60789");
-}
-
-/// <summary>
-/// Align anchor reaction force directions and match target magnitudes.
-/// </summary>
-public class ReactionDirectionMagnitudeComponent : GH_Component
-{
-    public ReactionDirectionMagnitudeComponent()
-        : base("Reaction Direction + Magnitude", "ReactDirMag",
-            "Align reaction directions and match target magnitudes at anchors.",
-            "Ariadne", "Objectives")
-    { }
-
-    protected override void RegisterInputParams(GH_InputParamManager pManager)
-    {
-        pManager.AddGenericParameter("Anchor Nodes", "Anchors", "Anchor nodes to constrain", GH_ParamAccess.list);
-        pManager.AddVectorParameter("Target Directions", "Dirs", "Target reaction directions", GH_ParamAccess.list);
-        pManager.AddNumberParameter("Target Magnitudes", "Mags", "Target reaction magnitudes", GH_ParamAccess.list);
-        pManager.AddNumberParameter("Weight", "Weight", "Objective weight", GH_ParamAccess.item, 1.0);
-    }
-
-    protected override void RegisterOutputParams(GH_OutputParamManager pManager)
-    {
-        pManager.AddGenericParameter("Objective", "OBJ", "Reaction Direction + Magnitude Objective", GH_ParamAccess.item);
-    }
-
-    protected override void SolveInstance(IGH_DataAccess DA)
-    {
-        List<Node> anchors = [];
-        List<Vector3d> dirs = [];
+        bool includeMag = false;
         List<double> mags = [];
         double weight = 1.0;
 
         if (!DA.GetDataList(0, anchors)) return;
         if (!DA.GetDataList(1, dirs)) return;
-        if (!DA.GetDataList(2, mags)) return;
-        DA.GetData(3, ref weight);
+        DA.GetData(2, ref includeMag);
+        DA.GetDataList(3, mags);
+        DA.GetData(4, ref weight);
 
-        var objective = new ReactionDirectionMagnitudeObjective(weight, anchors, dirs, mags);
+        if (includeMag && mags.Count == 0)
+        {
+            AddRuntimeMessage(Grasshopper.Kernel.GH_RuntimeMessageLevel.Warning,
+                "Include Magnitude is true but no magnitudes provided; direction only will be used.");
+            includeMag = false;
+        }
+
+        var objective = new ReactionObjective(weight, anchors, dirs, includeMag, mags.Count > 0 ? mags : null);
         DA.SetData(0, objective);
     }
 
-    protected override Bitmap? Icon => null;
-    public override Guid ComponentGuid => new("E2F3A4B5-C6D7-8901-B2C3-D4E5F6078901");
+    protected override Bitmap Icon => Properties.Resources.Reactions;
+    public override Guid ComponentGuid => new("D1E2F3A4-B5C6-7890-A1B2-C3D4E5F60789");
 }
