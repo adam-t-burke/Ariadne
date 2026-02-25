@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Theseus.Interop;
@@ -30,6 +31,7 @@ public sealed class TheseusSolver : IDisposable
     private readonly int _numNodes;
     private readonly int _numEdges;
     private bool _disposed;
+    private TheseusInterop.NativeProgressCallback? _pinnedCallback;
 
     private TheseusSolver(IntPtr handle, int numNodes, int numEdges)
     {
@@ -186,12 +188,41 @@ public sealed class TheseusSolver : IDisposable
         int maxIterations = 500,
         double absTol = 1e-6,
         double relTol = 1e-6,
-        double barrierWeight = 1000.0,
+        double barrierWeight = 10.0,
         double barrierSharpness = 10.0)
     {
         ThrowIfDisposed();
         Check(TheseusInterop.theseus_set_solver_options(
             _handle, (nuint)maxIterations, absTol, relTol, barrierWeight, barrierSharpness));
+    }
+
+    // ── Progress callback ─────────────────────────────────────
+
+    /// <summary>
+    /// Register a managed callback invoked every <paramref name="frequency"/>
+    /// evaluations with (iteration, loss, xyz[numNodes*3]).
+    /// Pass null to clear.  The delegate is pinned for the lifetime of this solver.
+    /// </summary>
+    public void SetProgressCallback(Action<int, double, double[]>? callback, int frequency)
+    {
+        ThrowIfDisposed();
+        if (callback == null)
+        {
+            _pinnedCallback = null;
+            Check(TheseusInterop.theseus_set_progress_callback(_handle, null, (nuint)1));
+            return;
+        }
+
+        int nn = _numNodes;
+        _pinnedCallback = (nuint iteration, double loss, IntPtr xyzPtr, nuint numNodes) =>
+        {
+            var xyz = new double[nn * 3];
+            Marshal.Copy(xyzPtr, xyz, 0, nn * 3);
+            callback((int)iteration, loss, xyz);
+        };
+
+        Check(TheseusInterop.theseus_set_progress_callback(
+            _handle, _pinnedCallback, (nuint)Math.Max(1, frequency)));
     }
 
     // ── Solve ────────────────────────────────────────────────

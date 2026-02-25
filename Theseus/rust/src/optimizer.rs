@@ -6,9 +6,10 @@
 //! Uses `Vec<f64>` as the argmin parameter type to avoid ndarray version
 //! conflicts between our ndarray 0.16 and argmin-math's bundled ndarray.
 
+use crate::ffi::ProgressCallback;
 use crate::gradients::value_and_gradient;
 use crate::types::{FdmCache, Problem, SolverResult, OptimizationState, TheseusError};
-use argmin::core::{CostFunction, Gradient, Executor, State, TerminationReason};
+use argmin::core::{CostFunction, Gradient, Executor, State, TerminationReason, TerminationStatus};
 use argmin::solver::linesearch::MoreThuenteLineSearch;
 use argmin::solver::quasinewton::LBFGS;
 use ndarray::Array2;
@@ -40,6 +41,10 @@ struct FdmProblem<'a> {
     last_eval: RefCell<Option<(Vec<f64>, f64, Vec<f64>)>>,
     /// Loss value recorded at each unique evaluation.
     loss_trace: RefCell<Vec<f64>>,
+    /// Optional FFI callback for progress reporting.
+    progress_callback: Option<ProgressCallback>,
+    /// How often (in evaluations) to invoke the callback.
+    report_frequency: usize,
 }
 
 impl<'a> FdmProblem<'a> {
@@ -55,6 +60,11 @@ impl<'a> FdmProblem<'a> {
                 }
             }
         }
+        // Reject θ vectors containing NaN/Inf before attempting the solve
+        if theta.iter().any(|v| !v.is_finite()) {
+            return Err(argmin::core::Error::msg("theta contains NaN or Inf"));
+        }
+
         // Cache miss — run the full solve
         let mut fdm_cache = self.cache.borrow_mut();
         let mut grad = vec![0.0; theta.len()];
@@ -68,7 +78,31 @@ impl<'a> FdmProblem<'a> {
             &self.lb_idx,
             &self.ub_idx,
         ).map_err(|e| argmin::core::Error::msg(e.to_string()))?;
-        self.loss_trace.borrow_mut().push(val);
+
+        // Guard against NaN/Inf in loss or gradient
+        if !val.is_finite() || grad.iter().any(|g| !g.is_finite()) {
+            return Err(argmin::core::Error::msg(
+                "value_and_gradient produced NaN or Inf",
+            ));
+        }
+
+        let eval_count = {
+            let mut trace = self.loss_trace.borrow_mut();
+            trace.push(val);
+            trace.len()
+        };
+
+        if let Some(cb) = self.progress_callback {
+            if eval_count % self.report_frequency == 0 {
+                let nn = self.problem.topology.num_nodes;
+                let nf = &fdm_cache.nf;
+                let xyz_flat: Vec<f64> = (0..nn)
+                    .flat_map(|i| (0..3).map(move |d| nf[[i, d]]))
+                    .collect();
+                unsafe { cb(eval_count, val, xyz_flat.as_ptr(), nn); }
+            }
+        }
+
         *self.last_eval.borrow_mut() = Some((theta.to_vec(), val, grad));
         Ok(())
     }
@@ -160,8 +194,14 @@ fn finite_indices(v: &[f64]) -> Vec<usize> {
 
 /// Run L-BFGS optimisation on the FDM problem.
 ///
-/// Returns a `SolverResult` with the optimised geometry.
-pub fn optimize(problem: &Problem, state: &mut OptimizationState) -> Result<SolverResult, TheseusError> {
+/// `progress_cb` / `report_freq` control an optional FFI callback invoked
+/// every `report_freq` evaluations with the current node positions.
+pub fn optimize(
+    problem: &Problem,
+    state: &mut OptimizationState,
+    progress_cb: Option<ProgressCallback>,
+    report_freq: usize,
+) -> Result<SolverResult, TheseusError> {
     let cache = FdmCache::new(problem)?;
 
     let (lb, ub) = parameter_bounds(problem);
@@ -179,11 +219,17 @@ pub fn optimize(problem: &Problem, state: &mut OptimizationState) -> Result<Solv
         ub_idx,
         last_eval: RefCell::new(None),
         loss_trace: RefCell::new(Vec::new()),
+        progress_callback: progress_cb,
+        report_frequency: if report_freq == 0 { 1 } else { report_freq },
     };
 
-    // Configure L-BFGS
+    // Configure L-BFGS with user-specified tolerances
     let linesearch = MoreThuenteLineSearch::new();
-    let solver = LBFGS::new(linesearch, 10); // 10 correction pairs
+    let solver = LBFGS::new(linesearch, 10)
+        .with_tolerance_grad(problem.solver.absolute_tolerance)
+        .map_err(|e| TheseusError::Solver(format!("tolerance_grad: {e}")))?
+        .with_tolerance_cost(problem.solver.relative_tolerance)
+        .map_err(|e| TheseusError::Solver(format!("tolerance_cost: {e}")))?;
 
     let executor = Executor::new(fdm_problem, solver)
         .configure(|config| {
@@ -209,10 +255,16 @@ pub fn optimize(problem: &Problem, state: &mut OptimizationState) -> Result<Solv
     crate::fdm::solve_fdm(&mut final_cache, &q, problem, &anchors, 1e-12)?;
     crate::fdm::compute_geometry(&mut final_cache, problem);
 
+    let termination_status = result.state().get_termination_status();
     let converged = matches!(
-        result.state().get_termination_reason(),
-        Some(TerminationReason::SolverConverged)
+        termination_status,
+        TerminationStatus::Terminated(TerminationReason::SolverConverged)
     );
+
+    let termination_reason = match termination_status {
+        TerminationStatus::Terminated(reason) => format!("{reason}"),
+        TerminationStatus::NotTerminated => "not terminated".to_string(),
+    };
 
     state.force_densities = q.clone();
     state.variable_anchor_positions = anchors.clone();
@@ -229,5 +281,6 @@ pub fn optimize(problem: &Problem, state: &mut OptimizationState) -> Result<Solv
         loss_trace,
         iterations: state.iterations,
         converged,
+        termination_reason,
     })
 }

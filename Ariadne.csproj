@@ -13,7 +13,7 @@
 
   <!-- Copy theseus.dll native library to output -->
   <ItemGroup>
-    <None Include="Theseus\theseus.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Theseus\theseus.dll" Link="theseus.dll" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   
   <ItemGroup>

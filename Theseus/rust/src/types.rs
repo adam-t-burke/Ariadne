@@ -233,7 +233,7 @@ impl Default for SolverOptions {
             relative_tolerance: 1e-6,
             max_iterations: 500,
             report_frequency: 1,
-            barrier_weight: 1000.0,
+            barrier_weight: 10.0,
             barrier_sharpness: DEFAULT_BARRIER_SHARPNESS,
         }
     }
@@ -653,6 +653,7 @@ pub struct SolverResult {
     pub loss_trace: Vec<f64>,
     pub iterations: usize,
     pub converged: bool,
+    pub termination_reason: String,
 }
 
 // ─────────────────────────────────────────────────────────────

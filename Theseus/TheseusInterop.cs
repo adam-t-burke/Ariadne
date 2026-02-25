@@ -119,6 +119,18 @@ internal static class TheseusInterop
         nuint max_iterations, double abs_tol, double rel_tol,
         double barrier_weight, double barrier_sharpness);
 
+    // ── Progress callback ────────────────────────────────────
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void NativeProgressCallback(
+        nuint iteration, double loss, IntPtr xyz, nuint numNodes);
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_set_progress_callback(
+        IntPtr handle,
+        NativeProgressCallback? callback,
+        nuint frequency);
+
     // ── Optimisation ─────────────────────────────────────────
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]

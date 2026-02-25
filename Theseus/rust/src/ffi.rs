@@ -97,10 +97,26 @@ pub unsafe extern "C" fn theseus_last_error(buf: *mut u8, buf_len: usize) -> i32
 //  Opaque handle
 // ─────────────────────────────────────────────────────────────
 
+/// C-callable progress callback.
+///
+/// Called every `report_frequency` evaluations during optimization with:
+///   - `iteration`: evaluation count (0-based)
+///   - `loss`: current objective value
+///   - `xyz`: pointer to `num_nodes * 3` doubles (row-major node positions)
+///   - `num_nodes`: total number of nodes
+pub type ProgressCallback = unsafe extern "C" fn(
+    iteration: usize,
+    loss: f64,
+    xyz: *const f64,
+    num_nodes: usize,
+);
+
 /// Solver handle that owns the problem + state.
 pub struct TheseusHandle {
     pub problem: Problem,
     pub state: OptimizationState,
+    pub progress_callback: Option<ProgressCallback>,
+    pub report_frequency: usize,
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -224,7 +240,12 @@ unsafe fn create_inner(
 
     let state = OptimizationState::new(q_slice.to_vec(), Array2::zeros((0, 3)));
 
-    Ok(Box::into_raw(Box::new(TheseusHandle { problem, state })))
+    Ok(Box::into_raw(Box::new(TheseusHandle {
+        problem,
+        state,
+        progress_callback: None,
+        report_frequency: 1,
+    })))
 }
 
 /// Free a handle.
@@ -591,6 +612,31 @@ pub unsafe extern "C" fn theseus_set_solver_options(
 }
 
 // ─────────────────────────────────────────────────────────────
+//  Progress callback
+// ─────────────────────────────────────────────────────────────
+
+/// Register a progress callback invoked every `frequency` evaluations.
+///
+/// Pass a null function pointer to clear the callback.
+///
+/// # Safety
+/// Valid handle.  The callback pointer must remain valid for the
+/// lifetime of any subsequent `theseus_optimize` call.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_set_progress_callback(
+    handle: *mut TheseusHandle,
+    callback: Option<ProgressCallback>,
+    frequency: usize,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let h = &mut *handle;
+        h.progress_callback = callback;
+        h.report_frequency = if frequency == 0 { 1 } else { frequency };
+        Ok(())
+    }))
+}
+
+// ─────────────────────────────────────────────────────────────
 //  Run optimisation
 // ─────────────────────────────────────────────────────────────
 
@@ -614,7 +660,9 @@ pub unsafe extern "C" fn theseus_optimize(
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
         let h = &mut *handle;
-        let result = optimizer::optimize(&h.problem, &mut h.state)?;
+        let cb = h.progress_callback;
+        let freq = h.report_frequency;
+        let result = optimizer::optimize(&h.problem, &mut h.state, cb, freq)?;
 
         let nn = h.problem.topology.num_nodes;
         let ne = h.problem.topology.num_edges;

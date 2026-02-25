@@ -2,7 +2,7 @@
 //!
 //! Mirrors `src/FDM.jl` from the Julia code.
 
-use crate::types::{FdmCache, Factorization, Problem, TheseusError};
+use crate::types::{FdmCache, Factorization, FactorizationStrategy, Problem, TheseusError};
 use ndarray::Array2;
 use sprs::CsMat;
 
@@ -108,11 +108,14 @@ pub fn assemble_rhs(cache: &mut FdmCache, problem: &Problem) {
 /// On first call, performs a fresh factorization (symbolic + numeric).
 /// On subsequent calls, reuses the symbolic structure via `Factorization::update()`
 /// — only numeric values change.
+///
+/// If the preferred strategy (Cholesky) fails because the matrix is no longer
+/// SPD (e.g. q values drifted negative during optimisation), we automatically
+/// fall back to LDL and rebuild the factorization from scratch.
 pub fn factor_and_solve(cache: &mut FdmCache, perturbation: f64) -> Result<(), TheseusError> {
     // Add diagonal perturbation if requested
     if perturbation > 0.0 {
         let n = cache.a_matrix.cols();
-        // Collect diagonal nz indices first to satisfy borrow checker
         let diag_indices: Vec<usize> = (0..n).filter_map(|col| {
             let start = cache.a_matrix.indptr().raw_storage()[col];
             let end = cache.a_matrix.indptr().raw_storage()[col + 1];
@@ -124,17 +127,39 @@ pub fn factor_and_solve(cache: &mut FdmCache, perturbation: f64) -> Result<(), T
         }
     }
 
-    // Factor or re-factor using the adaptive strategy
+    // Try the current factorization, falling back to LDL on Cholesky failure.
     let a_view = cache.a_matrix.view();
+    let mut need_ldl_fallback = false;
+
     match &mut cache.factorization {
         Some(fac) => {
-            fac.update(a_view)?;
+            if let Err(_e) = fac.update(a_view) {
+                if fac.strategy() == FactorizationStrategy::Cholesky {
+                    need_ldl_fallback = true;
+                } else {
+                    return Err(_e.into());
+                }
+            }
         }
         None => {
-            cache.factorization = Some(
-                Factorization::new(a_view, cache.strategy)?
-            );
+            let a_view = cache.a_matrix.view();
+            match Factorization::new(a_view, cache.strategy) {
+                Ok(fac) => {
+                    cache.factorization = Some(fac);
+                }
+                Err(_e) if cache.strategy == FactorizationStrategy::Cholesky => {
+                    need_ldl_fallback = true;
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
+    }
+
+    if need_ldl_fallback {
+        cache.strategy = FactorizationStrategy::LDL;
+        cache.factorization = None;
+        let a_view = cache.a_matrix.view();
+        cache.factorization = Some(Factorization::new(a_view, FactorizationStrategy::LDL)?);
     }
 
     // Solve for each coordinate column

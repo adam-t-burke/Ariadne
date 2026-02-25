@@ -134,7 +134,7 @@ fn optimize_target_xyz() {
     let problem = make_arch_problem(bounds, objectives);
     let mut state = OptimizationState::new(vec![1.0; ne], Array2::zeros((0, 3)));
 
-    let result = optimizer::optimize(&problem, &mut state).unwrap();
+    let result = optimizer::optimize(&problem, &mut state, None, 1).unwrap();
 
     // Basic sanity
     assert!(result.iterations > 0, "should run at least 1 iteration");
@@ -214,7 +214,7 @@ fn optimize_combined_objectives() {
     let problem = make_arch_problem(bounds, objectives);
     let mut state = OptimizationState::new(vec![2.0; ne], Array2::zeros((0, 3)));
 
-    let result = optimizer::optimize(&problem, &mut state).unwrap();
+    let result = optimizer::optimize(&problem, &mut state, None, 1).unwrap();
 
     assert!(result.iterations > 0);
     // Check that all results are finite

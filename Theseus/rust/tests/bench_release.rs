@@ -301,7 +301,7 @@ fn bench_full_optimize_scaling() {
         let start = Instant::now();
         for _ in 0..runs {
             let mut state = OptimizationState::new(vec![1.0; ne], Array2::zeros((0, 3)));
-            let result = theseus::optimizer::optimize(&problem, &mut state).unwrap();
+            let result = theseus::optimizer::optimize(&problem, &mut state, None, 1).unwrap();
             let _ = std::hint::black_box(result);
         }
         let elapsed = start.elapsed();

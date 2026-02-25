@@ -13,8 +13,9 @@ public sealed record SolverOptions
     public int MaxIterations { get; init; } = 500;
     public double AbsTol { get; init; } = 1e-6;
     public double RelTol { get; init; } = 1e-6;
-    public double BarrierWeight { get; init; } = 1000.0;
+    public double BarrierWeight { get; init; } = 10.0;
     public double BarrierSharpness { get; init; } = 10.0;
+    public int ReportFrequency { get; init; } = 10;
 }
 
 /// <summary>

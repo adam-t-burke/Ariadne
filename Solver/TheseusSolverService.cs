@@ -17,7 +17,15 @@ public sealed class TheseusSolverService
     /// <summary>
     /// Solve an FDM network with optimization.
     /// </summary>
-    public SolveResult Solve(FDM_Network network, SolverInputs inputs, SolverOptions? options = null)
+    /// <param name="progressCallback">
+    /// Optional callback invoked every <see cref="SolverOptions.ReportFrequency"/>
+    /// evaluations with (iteration, loss, xyz[numNodes*3]).
+    /// </param>
+    public SolveResult Solve(
+        FDM_Network network,
+        SolverInputs inputs,
+        SolverOptions? options = null,
+        Action<int, double, double[]>? progressCallback = null)
     {
         ValidateInputs(network, inputs);
         options ??= new SolverOptions();
@@ -43,6 +51,9 @@ public sealed class TheseusSolverService
             relTol: options.RelTol,
             barrierWeight: options.BarrierWeight,
             barrierSharpness: options.BarrierSharpness);
+
+        if (progressCallback != null)
+            solver.SetProgressCallback(progressCallback, options.ReportFrequency);
 
         var result = solver.Optimize();
 
