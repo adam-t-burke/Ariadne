@@ -1,5 +1,7 @@
 # Ariadne
 
+**[docs: latest](https://adam-t-burke.github.io/Ariadne/)**
+
 Ariadne is a Grasshopper plugin for the **inverse design of form-found structures in Rhino 8**. It uses the **force density method** (FDM) via the Theseus solver engine for directed form-finding of tensile network structures.
 
 **Reference:** Schek, H.-J. "The force density method for form finding and computation of general networks." *Computer Methods in Applied Mechanics and Engineering*, Vol. 3, No. 1, 1974, pp. 115–134. For a mathematical introduction and an overview of optimization over force densities, see the [Theory](https://adam-t-burke.github.io/Ariadne/articles/theory.html) section in the documentation.
