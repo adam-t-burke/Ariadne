@@ -1,0 +1,77 @@
+name: Validate docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'examples/**'
+      - '**.cs'
+      - 'Ariadne.csproj'
+      - 'docfx.json'
+      - 'toc.yml'
+      - 'index.md'
+      - 'apiFilter.yml'
+      - 'README.md'
+      - 'Resources/**'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'examples/**'
+      - '**.cs'
+      - 'Ariadne.csproj'
+      - 'docfx.json'
+      - 'toc.yml'
+      - 'index.md'
+      - 'apiFilter.yml'
+      - 'README.md'
+      - 'Resources/**'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build project (Release)
+        run: dotnet build -c Release
+
+      - name: Prepare API metadata (project outputs .gha; DocFX expects .dll)
+        run: Copy-Item -Path bin\Release\net8.0\Ariadne.gha -Destination bin\Release\net8.0\Ariadne.dll
+
+      - name: Copy icon assets to docs
+        run: |
+          New-Item -ItemType Directory -Force -Path docs\assets\icons
+          if (Test-Path Resources\*.png) {
+            Copy-Item -Path Resources\*.png -Destination docs\assets\icons\
+          }
+
+      - name: Install DocFX
+        run: dotnet tool install -g docfx
+
+      - name: Build DocFX metadata and site
+        run: |
+          $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
+          docfx metadata
+          docfx build
+
+      - name: Verify docs output
+        run: |
+          if (-not (Test-Path _site\index.html)) {
+            Write-Error "DocFX did not produce _site\index.html"
+            exit 1
+          }
+          if (-not (Test-Path _site\docs\articles\theory.html)) {
+            Write-Error "DocFX did not produce docs/articles/theory.html"
+            exit 1
+          }
+          Write-Host "Docs generated successfully."
