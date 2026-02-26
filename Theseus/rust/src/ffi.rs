@@ -111,6 +111,8 @@ pub type ProgressCallback = unsafe extern "C" fn(
     loss: f64,
     xyz: *const f64,
     num_nodes: usize,
+    q: *const f64,
+    num_edges: usize,
 ) -> u8;
 
 /// Solver handle that owns the problem + state.

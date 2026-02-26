@@ -172,6 +172,13 @@ pub fn factor_and_solve(cache: &mut FdmCache, perturbation: f64) -> Result<(), T
         for i in 0..n {
             cache.x[[i, d]] = x[i];
         }
+        // Catch singular/ill-conditioned systems: solution can be NaN/Inf
+        if x.iter().any(|v| !v.is_finite()) {
+            return Err(TheseusError::Solver(
+                "FDM linear solve produced non-finite solution (singular or ill-conditioned equilibrium matrix). \
+                 Check network connectivity, supports, and initial force densities.".into(),
+            ));
+        }
     }
 
     Ok(())
@@ -215,10 +222,28 @@ pub fn solve_fdm(
     // 6. Compute derived geometry
     compute_geometry(cache, problem);
 
+    // 7. Ensure geometry is finite (catches NaN/Inf from positions or downstream)
+    for (i, &len) in cache.member_lengths.iter().enumerate() {
+        if !len.is_finite() {
+            return Err(TheseusError::Solver(format!(
+                "FDM geometry produced non-finite member length at edge {i} (node positions may be NaN/Inf; \
+                 check network topology and initial q for singularity or ill-conditioning).",
+            )));
+        }
+    }
+    for (i, &f) in cache.member_forces.iter().enumerate() {
+        if !f.is_finite() {
+            return Err(TheseusError::Solver(format!(
+                "FDM geometry produced non-finite member force at edge {i} (check network and initial q).",
+            )));
+        }
+    }
+
     Ok(())
 }
 
 /// Compute member lengths, forces, and reactions from current positions and q.
+/// Uses max(0, …) before sqrt to avoid NaN from floating-point negative squared length.
 pub fn compute_geometry(cache: &mut FdmCache, problem: &Problem) {
     let ne = problem.topology.num_edges;
 
@@ -230,7 +255,8 @@ pub fn compute_geometry(cache: &mut FdmCache, problem: &Problem) {
         let dy = cache.nf[[e, 1]] - cache.nf[[s, 1]];
         let dz = cache.nf[[e, 2]] - cache.nf[[s, 2]];
 
-        let len = (dx * dx + dy * dy + dz * dz).sqrt();
+        let len_sq = dx * dx + dy * dy + dz * dz;
+        let len = len_sq.max(0.0).sqrt();
         cache.member_lengths[i] = len;
         cache.member_forces[i] = cache.q[i] * len;
     }

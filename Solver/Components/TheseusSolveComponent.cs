@@ -2,11 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Grasshopper.Kernel;
-using Rhino;
-using Rhino.Display;
 using Rhino.Geometry;
 using Ariadne.FDM;
 using Ariadne.Graphs;
@@ -15,20 +14,41 @@ namespace Ariadne.Solver;
 
 /// <summary>
 /// Grasshopper component that solves FDM networks using the Theseus optimization engine.
-/// Uses GH_TaskCapableComponent to run optimization on a background thread.
-/// Overrides DrawViewportWires to show intermediate geometry during optimization.
+/// Uses a manual async state machine (not GH_TaskCapableComponent) so the UI thread
+/// is never blocked during long-running optimizations. Forward solves run synchronously.
+/// Intermediate optimization results are streamed as real component outputs via
+/// coalesced ExpireSolution calls, so downstream components receive live data.
 /// </summary>
-public class TheseusSolveComponent : GH_TaskCapableComponent<SolveResult>
+public class TheseusSolveComponent : GH_Component
 {
+    private enum SolverState { Idle, Running, Done }
+
+    private SolverState _state = SolverState.Idle;
+    private int _solveGeneration;
     private SolveResult? _cachedResult;
+    private SolveResult? _pendingResult;
+    private Exception? _pendingError;
     private bool _lastWasOptimization;
 
-    private CancellationTokenSource? _cts;
+    private bool _prevRunInput;
+    private int _triggerGeneration;
+    private int _consumedGeneration;
+    private int _lastInputHash;
 
-    private readonly object _previewLock = new();
-    private Point3d[]? _previewPoints;
-    private Line[]? _previewLines;
-    private string? _previewStatus;
+    private CancellationTokenSource? _cts;
+    private SynchronizationContext? _uiContext;
+
+    private readonly object _intermediateLock = new();
+    private IntermediateOutput? _intermediateOutput;
+    private volatile bool _expirePending;
+
+    private record IntermediateOutput(
+        List<Point3d> Nodes,
+        List<LineCurve> Edges,
+        List<double> Q,
+        List<double> Forces,
+        List<double> Lengths,
+        int EvalCount);
 
     public TheseusSolveComponent()
         : base("Theseus Solve", "Theseus",
@@ -60,14 +80,16 @@ public class TheseusSolveComponent : GH_TaskCapableComponent<SolveResult>
 
     protected override void SolveInstance(IGH_DataAccess DA)
     {
-        if (InPreSolve)
-        {
-            // ── Gather inputs ──────────────────────────────────────
-            FDM_Network? network = null;
-            List<double> q = [];
-            List<Vector3d> loads = [];
-            OptimizationConfig? config = null;
+        _uiContext ??= SynchronizationContext.Current;
 
+        // ── Gather inputs (always, so edge detection stays in sync) ──
+        FDM_Network? network = null;
+        List<double> q = [];
+        List<Vector3d> loads = [];
+        OptimizationConfig? config = null;
+
+        if (_state != SolverState.Done)
+        {
             if (!DA.GetData(0, ref network)) return;
             DA.GetDataList(1, q);
             DA.GetDataList(2, loads);
@@ -78,205 +100,264 @@ public class TheseusSolveComponent : GH_TaskCapableComponent<SolveResult>
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Invalid or null network");
                 return;
             }
+        }
 
-            // ── State machine ──────────────────────────────────────
-            if (config == null)
-            {
-                // No OptConfig: cancel any in-progress optimization, forward solve
-                CancelAndDisposeCts();
-                ClearPreview();
-                _lastWasOptimization = false;
-
-                var snap = new SolveSnapshot(network, q.AsReadOnly(), loads.AsReadOnly(), null);
-                TaskList.Add(Task.Run(() => RunSolve(snap, null)));
-                return;
-            }
-
-            if (!config.Run)
-            {
-                // Run = false: do nothing. Let any in-progress optimization finish.
-                // Pass 2 will pick up a completed result or output cache.
-                return;
-            }
-
-            // Config.Run = true: cancel old optimization, start new one
-            if (config.Objectives.Count == 0)
-            {
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
-                    "No objectives provided. Falling back to forward solve.");
-                CancelAndDisposeCts();
-                ClearPreview();
-                _lastWasOptimization = false;
-
-                var snap = new SolveSnapshot(network, q.AsReadOnly(), loads.AsReadOnly(), null);
-                TaskList.Add(Task.Run(() => RunSolve(snap, null)));
-                return;
-            }
-
-            // Optimization with objectives
-            CancelAndDisposeCts();
-            ClearPreview();
-            _lastWasOptimization = true;
-
-            _cts = new CancellationTokenSource();
-            var token = _cts.Token;
-
-            var edgeIndices = BuildEdgeIndexPairs(network);
-            bool streamPreview = config.StreamPreview;
-
-            Func<int, double, double[], bool> callback = (iter, loss, xyz) =>
-            {
-                if (token.IsCancellationRequested) return false;
-                if (streamPreview)
-                    OnProgress(iter, loss, xyz, edgeIndices);
-                return true;
-            };
-
-            var optSnap = new SolveSnapshot(network, q.AsReadOnly(), loads.AsReadOnly(), config);
-            TaskList.Add(Task.Run(() => RunSolve(optSnap, callback)));
+        // ── Harvest completed optimization result ────────────────
+        // Done state skips input gathering, so edge detection is deferred
+        // until the next solve where inputs are actually read.
+        if (_state == SolverState.Done)
+        {
+            HarvestResult(DA);
             return;
         }
 
-        // ── Pass 2 ─────────────────────────────────────────────────
-        SolveResult? result;
-        bool hasResult;
-        try
+        // ── Rising-edge detection ────────────────────────────────
+        bool currentRun = config?.Run == true;
+        if (currentRun && !_prevRunInput)
+            _triggerGeneration++;
+        _prevRunInput = currentRun;
+
+        // ── No config -> forward solve ───────────────────────────
+        if (config == null)
         {
-            hasResult = GetSolveResults(DA, out result);
-        }
-        catch
-        {
-            hasResult = false;
-            result = null;
+            if (_state == SolverState.Running)
+            {
+                CancelAndDisposeCts();
+                _state = SolverState.Idle;
+                Message = "";
+            }
+            _lastWasOptimization = false;
+            var snap = new SolveSnapshot(network!, q.AsReadOnly(), loads.AsReadOnly(), null);
+            var result = RunSolve(snap, null);
+            _cachedResult = result;
+            OutputResult(DA, result);
+            return;
         }
 
-        if (!hasResult)
+        // ── Optimization is in progress ──────────────────────────
+        if (_state == SolverState.Running)
+        {
+            bool newTrigger = _triggerGeneration != _consumedGeneration;
+            int inputHash = ComputeInputHash(network!, q, loads, config);
+            bool inputsChanged = inputHash != _lastInputHash;
+
+            if (newTrigger || (currentRun && inputsChanged))
+            {
+                _consumedGeneration = _triggerGeneration;
+                _lastInputHash = inputHash;
+                StartOptimization(network!, q, loads, config);
+            }
+
+            OutputIntermediateOrCached(DA);
+            return;
+        }
+
+        // ── State is Idle ────────────────────────────────────────
+
+        if (!currentRun)
         {
             if (_cachedResult != null)
                 OutputResult(DA, _cachedResult);
             return;
         }
 
-        ClearPreview();
-
-        _cachedResult = result;
-        OutputResult(DA, result!);
-
-        if (_lastWasOptimization)
+        if (config.Objectives.Count == 0)
         {
-            if (result!.Converged)
-            {
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
-                    $"Converged in {result.Iterations} iterations");
-            }
-            else
-            {
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
-                    $"Did not converge after {result.Iterations} iterations");
-            }
+            AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
+                "No objectives provided. Falling back to forward solve.");
+            _lastWasOptimization = false;
+            var snap = new SolveSnapshot(network!, q.AsReadOnly(), loads.AsReadOnly(), null);
+            var result = RunSolve(snap, null);
+            _cachedResult = result;
+            OutputResult(DA, result);
+            return;
         }
+
+        if (_triggerGeneration == _consumedGeneration)
+        {
+            int inputHash = ComputeInputHash(network!, q, loads, config);
+            if (inputHash == _lastInputHash)
+            {
+                if (_cachedResult != null)
+                    OutputResult(DA, _cachedResult);
+                return;
+            }
+            _lastInputHash = inputHash;
+        }
+        else
+        {
+            _consumedGeneration = _triggerGeneration;
+            _lastInputHash = ComputeInputHash(network!, q, loads, config);
+        }
+
+        // ── Start background optimization ────────────────────────
+        StartOptimization(network!, q, loads, config);
+        OutputIntermediateOrCached(DA);
     }
 
-    // ── Preview drawing ─────────────────────────────────────────────
+    // ── Async optimization lifecycle ─────────────────────────────────
 
-    public override void DrawViewportWires(IGH_PreviewArgs args)
+    private void StartOptimization(
+        FDM_Network network, List<double> q, List<Vector3d> loads, OptimizationConfig config)
     {
-        base.DrawViewportWires(args);
+        CancelAndDisposeCts();
+        _expirePending = false;
+        _lastWasOptimization = true;
+        _pendingResult = null;
+        _pendingError = null;
 
-        Point3d[]? pts;
-        Line[]? lines;
-        string? status;
+        lock (_intermediateLock)
+            _intermediateOutput = null;
 
-        lock (_previewLock)
+        _cts = new CancellationTokenSource();
+        var token = _cts.Token;
+        var generation = ++_solveGeneration;
+
+        var edgeIndices = BuildEdgeIndexPairs(network);
+        bool stream = config.StreamPreview;
+
+        Func<int, double, double[], double[], bool> callback = (iter, loss, xyz, qVals) =>
         {
-            pts = _previewPoints;
-            lines = _previewLines;
-            status = _previewStatus;
-        }
+            if (token.IsCancellationRequested) return false;
+            if (stream)
+                OnProgress(iter, loss, xyz, qVals, edgeIndices);
+            return true;
+        };
 
-        if (pts == null && lines == null) return;
+        var snap = new SolveSnapshot(network, q.AsReadOnly(), loads.AsReadOnly(), config);
 
-        var lineColor = Color.FromArgb(200, 50, 200, 50);
-        var pointColor = Color.FromArgb(200, 255, 165, 0);
+        _state = SolverState.Running;
+        Message = "Solving...";
 
-        if (lines != null)
+        Task.Run(() =>
         {
-            foreach (var line in lines)
-                args.Display.DrawLine(line, lineColor, 2);
-        }
-
-        if (pts != null)
-        {
-            args.Display.DrawPoints(pts, PointStyle.RoundSimple, 4, pointColor);
-        }
-
-        if (status != null)
-        {
-            var bbox = BoundingBox.Empty;
-            if (pts != null)
+            try
             {
-                foreach (var p in pts) bbox.Union(p);
+                var result = RunSolve(snap, callback);
+                if (token.IsCancellationRequested || generation != _solveGeneration)
+                    return;
+
+                _pendingResult = result;
+                _state = SolverState.Done;
+                _uiContext?.Post(_ => ExpireSolution(true), null);
             }
-            if (bbox.IsValid)
+            catch (Exception ex)
             {
-                var anchor = bbox.Center + new Vector3d(0, 0, bbox.Diagonal.Z * 0.6);
-                args.Display.Draw2dText(status, Color.White, anchor, false, 14);
+                if (token.IsCancellationRequested || generation != _solveGeneration)
+                    return;
+
+                _pendingError = ex;
+                _state = SolverState.Done;
+                _uiContext?.Post(_ => ExpireSolution(true), null);
             }
-        }
+        });
     }
 
-    public override BoundingBox ClippingBox
+    private void HarvestResult(IGH_DataAccess DA)
     {
-        get
+        lock (_intermediateLock)
+            _intermediateOutput = null;
+
+        _state = SolverState.Idle;
+        Message = "";
+
+        if (_pendingError != null)
         {
-            var bbox = base.ClippingBox;
-            lock (_previewLock)
+            AddRuntimeMessage(GH_RuntimeMessageLevel.Error, _pendingError.Message);
+            _pendingError = null;
+            if (_cachedResult != null)
+                OutputResult(DA, _cachedResult);
+            return;
+        }
+
+        if (_pendingResult != null)
+        {
+            _cachedResult = _pendingResult;
+            _pendingResult = null;
+            OutputResult(DA, _cachedResult);
+
+            if (_lastWasOptimization)
             {
-                if (_previewPoints != null)
+                if (_cachedResult.Converged)
                 {
-                    foreach (var p in _previewPoints) bbox.Union(p);
+                    AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
+                        $"Converged in {_cachedResult.Iterations} iterations");
+                }
+                else
+                {
+                    AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
+                        $"Did not converge after {_cachedResult.Iterations} iterations");
                 }
             }
-            return bbox;
+            return;
         }
+
+        if (_cachedResult != null)
+            OutputResult(DA, _cachedResult);
     }
 
-    // ── Callback / preview helpers ──────────────────────────────────
+    // ── Progress callback ────────────────────────────────────────────
 
-    private void OnProgress(int evalCount, double loss, double[] xyz, (int start, int end)[] edgeIndices)
+    private void OnProgress(int evalCount, double loss, double[] xyz, double[] qVals, (int start, int end)[] edgeIndices)
     {
         int nn = xyz.Length / 3;
-        var pts = new Point3d[nn];
+        var nodes = new List<Point3d>(nn);
         for (int i = 0; i < nn; i++)
-            pts[i] = new Point3d(xyz[i * 3], xyz[i * 3 + 1], xyz[i * 3 + 2]);
+            nodes.Add(new Point3d(xyz[i * 3], xyz[i * 3 + 1], xyz[i * 3 + 2]));
 
-        var lines = new Line[edgeIndices.Length];
-        for (int i = 0; i < edgeIndices.Length; i++)
+        int ne = edgeIndices.Length;
+        var edges = new List<LineCurve>(ne);
+        var lengths = new List<double>(ne);
+        var forces = new List<double>(ne);
+        var qList = new List<double>(qVals);
+
+        for (int i = 0; i < ne; i++)
         {
             var (s, e) = edgeIndices[i];
-            lines[i] = new Line(pts[s], pts[e]);
+            var lc = new LineCurve(nodes[s], nodes[e]);
+            edges.Add(lc);
+            double len = lc.GetLength();
+            lengths.Add(len);
+            forces.Add(i < qVals.Length ? qVals[i] * len : 0.0);
         }
 
-        lock (_previewLock)
-        {
-            _previewPoints = pts;
-            _previewLines = lines;
-            _previewStatus = $"eval {evalCount}  loss {loss:E3}";
-        }
+        var intermediate = new IntermediateOutput(nodes, edges, qList, forces, lengths, evalCount);
 
-        RhinoApp.InvokeOnUiThread(new Action<object?>(_ =>
+        lock (_intermediateLock)
+            _intermediateOutput = intermediate;
+
+        if (!_expirePending)
         {
-            RhinoDoc.ActiveDoc?.Views.Redraw();
-        }), null);
+            _expirePending = true;
+            _uiContext?.Post(_ =>
+            {
+                _expirePending = false;
+                ExpireSolution(true);
+            }, null);
+        }
     }
 
-    private void ClearPreview()
+    // ── Output helpers ───────────────────────────────────────────────
+
+    private void OutputIntermediateOrCached(IGH_DataAccess DA)
     {
-        lock (_previewLock)
+        IntermediateOutput? intermediate;
+        lock (_intermediateLock)
+            intermediate = _intermediateOutput;
+
+        if (intermediate != null)
         {
-            _previewPoints = null;
-            _previewLines = null;
-            _previewStatus = null;
+            DA.SetDataList(1, intermediate.Nodes);
+            DA.SetDataList(2, intermediate.Edges);
+            DA.SetDataList(3, intermediate.Q);
+            DA.SetDataList(4, intermediate.Forces);
+            DA.SetDataList(5, intermediate.Lengths);
+            DA.SetData(6, intermediate.EvalCount);
+            DA.SetData(7, false);
+        }
+        else if (_cachedResult != null)
+        {
+            OutputResult(DA, _cachedResult);
         }
     }
 
@@ -285,6 +366,24 @@ public class TheseusSolveComponent : GH_TaskCapableComponent<SolveResult>
         _cts?.Cancel();
         _cts?.Dispose();
         _cts = null;
+    }
+
+    private static int ComputeInputHash(
+        FDM_Network network, List<double> q, List<Vector3d> loads, OptimizationConfig config)
+    {
+        var hash = new HashCode();
+        hash.Add(RuntimeHelpers.GetHashCode(network));
+        foreach (var v in q) hash.Add(v);
+        foreach (var l in loads) { hash.Add(l.X); hash.Add(l.Y); hash.Add(l.Z); }
+        hash.Add(config.MaxIterations);
+        hash.Add(config.AbsTol);
+        hash.Add(config.RelTol);
+        hash.Add(config.BarrierWeight);
+        hash.Add(config.BarrierSharpness);
+        hash.Add(config.Objectives.Count);
+        foreach (var lb in config.LowerBounds) hash.Add(lb);
+        foreach (var ub in config.UpperBounds) hash.Add(ub);
+        return hash.ToHashCode();
     }
 
     private static (int start, int end)[] BuildEdgeIndexPairs(FDM_Network network)
@@ -305,7 +404,7 @@ public class TheseusSolveComponent : GH_TaskCapableComponent<SolveResult>
 
     // ── Solve logic ─────────────────────────────────────────────────
 
-    private static SolveResult RunSolve(SolveSnapshot snap, Func<int, double, double[], bool>? callback)
+    private static SolveResult RunSolve(SolveSnapshot snap, Func<int, double, double[], double[], bool>? callback)
     {
         if (snap.Config is { } cfg && cfg.Objectives.Count > 0)
         {
@@ -347,6 +446,17 @@ public class TheseusSolveComponent : GH_TaskCapableComponent<SolveResult>
         DA.SetDataList(5, result.MemberLengths);
         DA.SetData(6, result.Iterations);
         DA.SetData(7, result.Converged);
+    }
+
+    // ── Cleanup ─────────────────────────────────────────────────────
+
+    public override void RemovedFromDocument(GH_Document document)
+    {
+        CancelAndDisposeCts();
+        lock (_intermediateLock)
+            _intermediateOutput = null;
+        _state = SolverState.Idle;
+        base.RemovedFromDocument(document);
     }
 
     protected override Bitmap Icon => Properties.Resources.Create;

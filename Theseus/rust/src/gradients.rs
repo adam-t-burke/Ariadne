@@ -204,12 +204,20 @@ pub(crate) fn grad_target_length(
     }
 }
 
+/// Minimum sharpness for variation gradients (must match objectives.rs guard).
+const MIN_VARIATION_SHARPNESS: f64 = 1e-10;
+
 /// Softmax weights: w_i = exp(β(v_i − m)) / Σ exp(β(v_j − m))
 /// Returns one weight per edge in `edge_indices`.
+/// If sum is zero or non-finite (e.g. all values NaN), returns uniform weights to avoid NaN.
 fn softmax_weights(values: &[f64], edge_indices: &[usize], beta: f64) -> Vec<f64> {
+    let n = edge_indices.len();
     let m = edge_indices.iter().map(|&i| values[i]).fold(f64::NEG_INFINITY, f64::max);
     let exps: Vec<f64> = edge_indices.iter().map(|&i| ((values[i] - m) * beta).exp()).collect();
     let sum: f64 = exps.iter().sum();
+    if !sum.is_finite() || sum <= 0.0 {
+        return vec![1.0 / n as f64; n];
+    }
     exps.into_iter().map(|e| e / sum).collect()
 }
 
@@ -223,6 +231,7 @@ pub(crate) fn grad_length_variation(
     beta: f64,
 ) {
     if edge_indices.is_empty() { return; }
+    let beta = beta.abs().max(MIN_VARIATION_SHARPNESS);
 
     // softmax for smooth_max  (positive β)
     let w_max = softmax_weights(&cache.member_lengths, edge_indices, beta);
@@ -245,6 +254,7 @@ pub(crate) fn grad_force_variation(
     beta: f64,
 ) {
     if edge_indices.is_empty() { return; }
+    let beta = beta.abs().max(MIN_VARIATION_SHARPNESS);
 
     let w_max = softmax_weights(&cache.member_forces, edge_indices, beta);
     let w_min = softmax_weights(&cache.member_forces, edge_indices, -beta);
@@ -356,8 +366,8 @@ pub(crate) fn grad_rigid_set_compare(
                 delta[d] = cache.nf[[idx_i, d]] - cache.nf[[idx_j, d]];
                 t_delta[d] = target[[i, d]] - target[[j, d]];
             }
-            let d_net = (delta[0].powi(2) + delta[1].powi(2) + delta[2].powi(2)).sqrt();
-            let d_tgt = (t_delta[0].powi(2) + t_delta[1].powi(2) + t_delta[2].powi(2)).sqrt();
+            let d_net = (delta[0].powi(2) + delta[1].powi(2) + delta[2].powi(2)).max(0.0).sqrt();
+            let d_tgt = (t_delta[0].powi(2) + t_delta[1].powi(2) + t_delta[2].powi(2)).max(0.0).sqrt();
 
             if d_net < f64::EPSILON { continue; }
 

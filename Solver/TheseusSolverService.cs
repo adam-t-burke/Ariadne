@@ -18,15 +18,15 @@ public static class TheseusSolverService
     /// Solve an FDM network with optimization.
     /// </summary>
     /// <param name="progressCallback">
-    /// Optional callback invoked every <paramref name="reportFrequency"/>
-    /// evaluations with (iteration, loss, xyz[numNodes*3]).
+    /// Optional callback invoked every ReportFrequency evaluations with
+    /// (iteration, loss, xyz[numNodes*3], q[numEdges]).
     /// Return <c>true</c> to continue, <c>false</c> to cancel.
     /// </param>
     public static SolveResult Solve(
         FDM_Network network,
         SolverInputs inputs,
         SolverOptions? options = null,
-        Func<int, double, double[], bool>? progressCallback = null)
+        Func<int, double, double[], double[], bool>? progressCallback = null)
     {
         ValidateCommon(network, inputs);
         ValidateOptimizationBounds(inputs);

@@ -95,11 +95,15 @@ impl<'a> FdmProblem<'a> {
         if let Some(cb) = self.progress_callback {
             if eval_count == 1 || eval_count % self.report_frequency == 0 {
                 let nn = self.problem.topology.num_nodes;
+                let ne = self.problem.topology.num_edges;
                 let nf = &fdm_cache.nf;
                 let xyz_flat: Vec<f64> = (0..nn)
                     .flat_map(|i| (0..3).map(move |d| nf[[i, d]]))
                     .collect();
-                let should_continue = unsafe { cb(eval_count, val, xyz_flat.as_ptr(), nn) };
+                let q = &theta[..ne];
+                let should_continue = unsafe {
+                    cb(eval_count, val, xyz_flat.as_ptr(), nn, q.as_ptr(), ne)
+                };
                 if should_continue == 0 {
                     return Err(argmin::core::Error::msg("cancelled"));
                 }

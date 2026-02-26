@@ -27,9 +27,9 @@ public class OptConfigComponent : GH_Component
         pManager.AddNumberParameter("Relative Tolerance", "RelTol", "Relative convergence tolerance", GH_ParamAccess.item, 1e-6);
         pManager.AddNumberParameter("Barrier Weight", "BW", "Barrier function weight", GH_ParamAccess.item, 10.0);
         pManager.AddNumberParameter("Barrier Sharpness", "BS", "Barrier function sharpness", GH_ParamAccess.item, 10.0);
-        pManager.AddIntegerParameter("Report Frequency", "ReportFreq", "Update viewport preview every N evaluations (0 = no preview)", GH_ParamAccess.item, 10);
+        pManager.AddIntegerParameter("Report Frequency", "ReportFreq", "Invoke progress callback every N evaluations (0 = every evaluation)", GH_ParamAccess.item, 10);
         pManager.AddBooleanParameter("Run", "Run", "Toggle true for open-loop optimization; use a button for single-trigger", GH_ParamAccess.item, false);
-        pManager.AddBooleanParameter("Stream Preview", "Preview", "Show intermediate geometry during optimization", GH_ParamAccess.item, true);
+        pManager.AddBooleanParameter("Stream Preview", "Stream", "Stream intermediate results to outputs during optimization (false = only output final result)", GH_ParamAccess.item, true);
     }
 
     protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -67,6 +67,18 @@ public class OptConfigComponent : GH_Component
         {
             AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
                 "No objectives provided. Optimization will fall back to a forward solve.");
+        }
+
+        // Infeasible bounds (qMin > qMax) can cause solver NaN/Inf; warn but do not block
+        int n = Math.Min(lb.Count, ub.Count);
+        for (int i = 0; i < n; i++)
+        {
+            if (lb[i] > ub[i])
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
+                    "Lower bound (qMin) > upper bound (qMax) for some indices; infeasible bounds can cause solver errors.");
+                break;
+            }
         }
 
         var config = new OptimizationConfig

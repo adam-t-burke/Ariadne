@@ -216,11 +216,11 @@ public sealed class TheseusSolver : IDisposable
 
     /// <summary>
     /// Register a managed callback invoked every <paramref name="frequency"/>
-    /// evaluations with (iteration, loss, xyz[numNodes*3]).
+    /// evaluations with (iteration, loss, xyz[numNodes*3], q[numEdges]).
     /// Return <c>true</c> to continue, <c>false</c> to cancel.
     /// Pass null to clear.  The delegate is pinned for the lifetime of this solver.
     /// </summary>
-    public void SetProgressCallback(Func<int, double, double[], bool>? callback, int frequency)
+    public void SetProgressCallback(Func<int, double, double[], double[], bool>? callback, int frequency)
     {
         ThrowIfDisposed();
         if (callback == null)
@@ -231,11 +231,14 @@ public sealed class TheseusSolver : IDisposable
         }
 
         int nn = _numNodes;
-        _pinnedCallback = (nuint iteration, double loss, IntPtr xyzPtr, nuint numNodes) =>
+        int ne = _numEdges;
+        _pinnedCallback = (nuint iteration, double loss, IntPtr xyzPtr, nuint numNodes, IntPtr qPtr, nuint numEdges) =>
         {
             var xyz = new double[nn * 3];
             Marshal.Copy(xyzPtr, xyz, 0, nn * 3);
-            bool shouldContinue = callback((int)iteration, loss, xyz);
+            var q = new double[ne];
+            Marshal.Copy(qPtr, q, 0, ne);
+            bool shouldContinue = callback((int)iteration, loss, xyz, q);
             return shouldContinue ? (byte)1 : (byte)0;
         };
 

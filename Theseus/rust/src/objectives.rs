@@ -174,11 +174,15 @@ fn smooth_min(values: &[f64], indices: &[usize], beta: f64) -> f64 {
     m - sum.ln() / beta
 }
 
+/// Minimum sharpness to avoid division-by-zero in smooth_max/smooth_min (1/β term).
+const MIN_VARIATION_SHARPNESS: f64 = 1e-10;
+
 /// LengthVariation:  smooth_max(ℓ) − smooth_min(ℓ)  over selected edges.
 fn length_variation_loss(lengths: &[f64], edge_indices: &[usize], beta: f64) -> f64 {
     if edge_indices.is_empty() {
         return 0.0;
     }
+    let beta = beta.abs().max(MIN_VARIATION_SHARPNESS);
     smooth_max(lengths, edge_indices, beta) - smooth_min(lengths, edge_indices, beta)
 }
 
@@ -187,6 +191,7 @@ fn force_variation_loss(forces: &[f64], edge_indices: &[usize], beta: f64) -> f6
     if edge_indices.is_empty() {
         return 0.0;
     }
+    let beta = beta.abs().max(MIN_VARIATION_SHARPNESS);
     smooth_max(forces, edge_indices, beta) - smooth_min(forces, edge_indices, beta)
 }
 
@@ -222,6 +227,7 @@ fn max_penalty(values: &[f64], edge_indices: &[usize], threshold: &[f64], k: f64
 }
 
 /// RigidSetCompare: Σ_{i<j} (d_target − d_network)²
+/// Uses max(0, …) before sqrt to avoid NaN from floating-point negative squared distance.
 fn rigid_set_compare_loss(xyz: &Array2<f64>, node_indices: &[usize], target: &Array2<f64>) -> f64 {
     let n = node_indices.len();
     let mut loss = 0.0;
@@ -233,12 +239,12 @@ fn rigid_set_compare_loss(xyz: &Array2<f64>, node_indices: &[usize], target: &Ar
             let dx = xyz[[idx_i, 0]] - xyz[[idx_j, 0]];
             let dy = xyz[[idx_i, 1]] - xyz[[idx_j, 1]];
             let dz = xyz[[idx_i, 2]] - xyz[[idx_j, 2]];
-            let d_net = (dx * dx + dy * dy + dz * dz).sqrt();
+            let d_net = (dx * dx + dy * dy + dz * dz).max(0.0).sqrt();
 
             let tx = target[[i, 0]] - target[[j, 0]];
             let ty = target[[i, 1]] - target[[j, 1]];
             let tz = target[[i, 2]] - target[[j, 2]];
-            let d_tgt = (tx * tx + ty * ty + tz * tz).sqrt();
+            let d_tgt = (tx * tx + ty * ty + tz * tz).max(0.0).sqrt();
 
             let diff = d_tgt - d_net;
             loss += diff * diff;

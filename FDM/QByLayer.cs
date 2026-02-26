@@ -16,7 +16,7 @@ namespace Ariadne.FDM
         public nodeQByLayer()
           : base("QByLayer", "LayerQ",
               "Assign a force density value per layer",
-              "Ariadne", "Design")
+              "Ariadne", "Experimental")
         {
         }
 

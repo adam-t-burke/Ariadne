@@ -130,7 +130,8 @@ internal static class TheseusInterop
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate byte NativeProgressCallback(
-        nuint iteration, double loss, IntPtr xyz, nuint numNodes);
+        nuint iteration, double loss, IntPtr xyz, nuint numNodes,
+        IntPtr q, nuint numEdges);
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
     public static extern int theseus_set_progress_callback(
