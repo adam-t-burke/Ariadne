@@ -12,6 +12,9 @@ using Ariadne.Graphs;
 
 namespace Ariadne.FDM
 {
+    /// <summary>
+    /// Builds an FDM network from a tree of edges and anchor points. Outputs a single Network for use with Theseus Solve.
+    /// </summary>
     public class ConstructNetwork : GH_Component
     {
         FDM_Network oldNet;

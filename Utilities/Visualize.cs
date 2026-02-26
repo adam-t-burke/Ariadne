@@ -11,6 +11,9 @@ using System.Drawing;
 
 namespace Ariadne.Utilities
 {
+    /// <summary>
+    /// Visualizes an FDM network with optional property coloring (e.g. force, length), loads, and reactions.
+    /// </summary>
     internal class Visualize : GH_Component
     {
         private FDM_Network _network;

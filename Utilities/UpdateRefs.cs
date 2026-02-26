@@ -14,7 +14,9 @@ using System.Threading;
 
 namespace Ariadne.Utilities
 {
-
+    /// <summary>
+    /// Updates reference geometry in the Rhino document to match the current solved network (e.g. after optimization).
+    /// </summary>
     public class UpdateRefs : GH_Component
     {
         FDM_Network oldNet;

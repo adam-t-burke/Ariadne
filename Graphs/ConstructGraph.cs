@@ -1,4 +1,4 @@
-﻿using Grasshopper;
+using Grasshopper;
 using Grasshopper.Kernel;
 using Grasshopper.Kernel.Data;
 using Grasshopper.Kernel.Types;
@@ -11,6 +11,9 @@ using System.Drawing;
 
 namespace Ariadne.Graphs
 {
+    /// <summary>
+    /// Builds a Graph (nodes and edges) from a tree of curves with optional tolerance-based vertex merging.
+    /// </summary>
     public class ConstructGraph : GH_Component
     {
         /// <summary>

@@ -69,6 +69,7 @@ public sealed class TargetXYZObjective : NodeObjective
 /// </summary>
 public sealed class TargetPlaneObjective : NodeObjective
 {
+    /// <summary>Plane to project target positions onto; null uses world XY.</summary>
     public Plane? Plane { get; }
 
     public TargetPlaneObjective(double weight, List<Node>? nodes = null, Plane? plane = null)

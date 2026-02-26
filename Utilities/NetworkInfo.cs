@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
 using Grasshopper.Kernel;
@@ -9,10 +9,13 @@ using System.Drawing;
 
 namespace Ariadne.Utilities
 {
+    /// <summary>
+    /// Outputs information about an FDM network (node/edge counts, validity, etc.) for display or debugging.
+    /// </summary>
     public class NetworkInfo : GH_Component
     {
         /// <summary>
-        /// Initializes a new instance of the VisualizeNetwork class.
+        /// Initializes a new instance of the NetworkInfo class.
         /// </summary>
         public NetworkInfo()
           : base("NetworkInformation", "Info",

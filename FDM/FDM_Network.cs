@@ -14,10 +14,14 @@ using Ariadne.Utilities;
 
 namespace Ariadne.FDM
 {
+    /// <summary>
+    /// Force density method network: topology (<see cref="Graph"/>), fixed/free node partition,
+    /// and anchor positions. Consumed by the solver for forward and optimization solves.
+    /// </summary>
     public class FDM_Network
     {
         /// <summary>
-        /// Pass along the graph
+        /// Underlying graph (nodes and edges) for this network.
         /// </summary>
         public Graph Graph { get; set; }
 
@@ -45,6 +49,7 @@ namespace Ariadne.FDM
         [JsonIgnore]
         public List<Node> Free { get; set; }
 
+        /// <summary>Indices of free nodes in <see cref="Graph.Nodes"/> (nodes that are not anchors).</summary>
         public List<int> FreeNodes { get; set; }
 
         /// <summary>
@@ -53,6 +58,7 @@ namespace Ariadne.FDM
         [JsonIgnore]
         public List<Node> Fixed { get; set; }
 
+        /// <summary>Indices of fixed (anchor) nodes in <see cref="Graph.Nodes"/>.</summary>
         public List<int> FixedNodes { get; set; }
 
         /// <summary>
@@ -61,6 +67,7 @@ namespace Ariadne.FDM
         [JsonIgnore]
         public bool Valid { get; set; }
 
+        /// <summary>When true, the network is being updated (e.g. during solver callbacks); used to avoid re-entrancy.</summary>
         public bool IsUpdating { get; set; }
 
         /// <summary>
@@ -81,12 +88,12 @@ namespace Ariadne.FDM
         }
 
         /// <summary>
-        /// Constructor from a list of curves
+        /// Builds an FDM network from curves, merging endpoints within tolerance and classifying nodes by anchor positions.
         /// </summary>
-        /// <param name="_Edges"></param>
-        /// <param name="_ETol"></param>
-        /// <param name="_Anchors"></param>
-        /// <param name="_ATol"></param>
+        /// <param name="_Edges">Input curves; endpoints become nodes, curves become edges.</param>
+        /// <param name="_ETol">End-to-end tolerance for building the graph (vertex merging).</param>
+        /// <param name="_Anchors">Fixed support positions; nodes within <paramref name="_ATol"/> of these become fixed.</param>
+        /// <param name="_ATol">Distance tolerance for matching nodes to anchor positions.</param>
         public FDM_Network(List<GH_Curve> _Edges, double _ETol, List<Point3d> _Anchors, double _ATol)
         {
             //Set fields
@@ -105,12 +112,11 @@ namespace Ariadne.FDM
         }
 
         /// <summary>
-        /// Constructor from another graph
+        /// Builds an FDM network from an existing graph and anchor positions.
         /// </summary>
-        /// <param name="graph"></param>
-        /// <param name="anchors"></param>
-        /// <param name="_ForceDensities"></param>
-        /// <param name="_Tolerance"></param>
+        /// <param name="_Graph">Pre-built graph (nodes and edges).</param>
+        /// <param name="_Anchors">Fixed support positions; nodes within <paramref name="_ATol"/> become fixed.</param>
+        /// <param name="_ATol">Distance tolerance for matching nodes to anchor positions.</param>
         public FDM_Network(Graph _Graph, List<Point3d> _Anchors, double _ATol)
         {
             //Set fields
@@ -134,6 +140,7 @@ namespace Ariadne.FDM
         /// Copies lists to avoid shared-mutation issues.
         /// Does NOT re-run FixedFree since the source is already partitioned.
         /// </summary>
+        /// <param name="other">Network to copy from.</param>
         public FDM_Network(FDM_Network other)
         {
             Graph = new Graph(other.Graph);
@@ -203,9 +210,9 @@ private void ValidCheck()
         }
 
         /// <summary>
-        /// checks for sufficient number of anchors
+        /// Checks that the network has at least two anchor positions (required for a valid FDM setup).
         /// </summary>
-        /// <returns></returns>
+        /// <returns>True if Anchors has at least two elements.</returns>
         public bool AnchorCheck()
         {
             if (Anchors.Count < 2) return false;
@@ -213,9 +220,9 @@ private void ValidCheck()
         }
 
         /// <summary>
-        /// Checks that N and F were properly generated
+        /// Checks that fixed and free node counts match anchors and total node count.
         /// </summary>
-        /// <returns></returns>
+        /// <returns>True if Fixed.Count equals Anchors.Count and Fixed + Free equals Graph.Nn.</returns>
         public bool NFCheck()
         {
             if (Fixed.Count != Anchors.Count || Fixed.Count + Free.Count != Graph.Nn) return false;

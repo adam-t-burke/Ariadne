@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
 using Grasshopper.Kernel;
@@ -15,6 +15,9 @@ using System.Drawing;
 
 namespace Ariadne.Utilities
 {
+    /// <summary>
+    /// Bakes an FDM network (or visualization) into the Rhino document as curves/meshes on a layer.
+    /// </summary>
     public class Baker : GH_Component
     {
 

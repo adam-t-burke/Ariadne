@@ -1,10 +1,13 @@
-﻿using Grasshopper;
+using Grasshopper;
 using Grasshopper.Kernel;
 using System;
 using System.Drawing;
 
 namespace Ariadne
 {
+    /// <summary>
+    /// Assembly metadata for the Ariadne Grasshopper plugin (name, description, author).
+    /// </summary>
     public class AriadneInfo : GH_AssemblyInfo
     {
         public override string Name => "Ariadne";

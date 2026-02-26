@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
 using Grasshopper.Kernel;
@@ -10,6 +10,9 @@ using System.Drawing;
 
 namespace Ariadne.Utilities
 {
+    /// <summary>
+    /// Serializes an object to JSON text for inspection or debugging.
+    /// </summary>
     public class SeralizeObjects : GH_Component
     {
         /// <summary>

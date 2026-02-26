@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
 using Grasshopper.Kernel;
@@ -10,6 +10,9 @@ using System.Drawing;
 
 namespace Ariadne.Utilities
 {
+    /// <summary>
+    /// Produces a minimal FDM network for testing downstream components without a full definition.
+    /// </summary>
     public class DummyNetwork : GH_Component
     {
         /// <summary>

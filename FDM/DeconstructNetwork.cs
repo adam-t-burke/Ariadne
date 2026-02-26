@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
 using System.Xml.Serialization;
@@ -15,6 +15,9 @@ using Ariadne.Graphs;
 
 namespace Ariadne.FDM
 {
+    /// <summary>
+    /// Deconstructs an FDM network into nodes, edges, indices, and free/fixed node lists for downstream use.
+    /// </summary>
     public class DeconstructNetwork : GH_Component
     {
         /// <summary>

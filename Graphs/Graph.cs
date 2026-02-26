@@ -13,41 +13,61 @@ using System.Threading.Tasks;
 
 namespace Ariadne.Graphs
 {
+    /// <summary>
+    /// Topology and geometry of a network: nodes (points) and edges (curves) built from input curves
+    /// with optional tolerance-based vertex merging. Used by <see cref="FDM.FDM_Network"/>.
+    /// </summary>
     public class Graph
     {
+        /// <summary>Distance tolerance for merging coincident or near-coincident vertices when building the graph.</summary>
         [JsonIgnore]
         public double Tolerance { get; set; }
 
+        /// <summary>All nodes (vertices) in the graph.</summary>
         [JsonIgnore]
         public List<Node> Nodes { get; set; }
 
+        /// <summary>All edges (branches) in the graph, each connecting two nodes.</summary>
         [JsonIgnore]
         public List<Edge> Edges { get; set; }
 
+        /// <summary>Grasshopper tree mapping to branch/item indices for graph elements.</summary>
         [JsonIgnore]
         public GH_Structure<GH_Number> IndicesTree { get; set; }
 
+        /// <summary>Grasshopper tree representing adjacency structure.</summary>
         [JsonIgnore]
         public GH_Structure<GH_Number> AdjacencyTree { get; set; }
 
+        /// <summary>Maps each edge index to (branchIndex, itemIndex) in the original input tree.</summary>
         [JsonIgnore]
         public List<(int branchIndex, int itemIndex)> EdgeInputMap { get; set; }
 
-        [JsonIgnore] 
+        /// <summary>Output edge tree matching Grasshopper structure for downstream components.</summary>
+        [JsonIgnore]
         public GH_Structure<Edge> OutputEdgeTree { get; set; }
 
+        /// <summary>Parameterless constructor; initialize properties before use.</summary>
         public Graph() { }
 
+        /// <summary>Builds a graph from a flat list of curves using the given merge tolerance.</summary>
+        /// <param name="_InputCurves">Curves to convert into edges; endpoints become nodes.</param>
+        /// <param name="_Tolerance">Distance tolerance for merging coincident vertices.</param>
         public Graph(List<GH_Curve> _InputCurves, double _Tolerance)
         {
             ConstructGraph(_InputCurves, _Tolerance);
         }
 
+        /// <summary>Builds a graph from a Grasshopper tree of curves.</summary>
+        /// <param name="inputTree">Tree of curves; structure is preserved in output.</param>
+        /// <param name="tol">Distance tolerance for merging coincident vertices.</param>
         public Graph(GH_Structure<GH_Curve> inputTree, double tol)
         {
             ConstructGraphFromTree(inputTree, tol);
         }
 
+        /// <summary>Copy constructor; shallow copy of node and edge lists.</summary>
+        /// <param name="other">Graph to copy from.</param>
         public Graph(Graph other)
         {
             Tolerance = other.Tolerance;
@@ -440,17 +460,24 @@ namespace Ariadne.Graphs
         }
     }
 
+    /// <summary>
+    /// A vertex in a <see cref="Graph"/>, with position, neighbor list, and optional anchor flag.
+    /// </summary>
     public class Node : GH_Point
     {
-  [JsonIgnore]
+        /// <summary>When true, this node is treated as a fixed support (anchor).</summary>
+        [JsonIgnore]
         public bool Anchor { get; set; }
 
-   [JsonIgnore]
+        /// <summary>Nodes connected to this node by an edge.</summary>
+        [JsonIgnore]
         public List<Node> Neighbors { get; set; }
 
+        /// <summary>Stable index of this node in the graph's Nodes list (0-based).</summary>
         [JsonIgnore]
-    public int Index { get; set; }
+        public int Index { get; set; }
 
+        /// <summary>Default constructor; non-anchor, empty neighbors, index -1.</summary>
         public Node()
         {
             Anchor = false;
@@ -459,6 +486,8 @@ namespace Ariadne.Graphs
             Index = -1;
         }
 
+        /// <summary>Copy constructor.</summary>
+        /// <param name="other">Node to copy from.</param>
         public Node(Node other)
         {
             Anchor = other.Anchor;
@@ -467,52 +496,70 @@ namespace Ariadne.Graphs
             Index = other.Index;
         }
 
+        /// <summary>Constructs a node with the given anchor flag and neighbor list.</summary>
+        /// <param name="anchor">Whether this node is a fixed support.</param>
+        /// <param name="neighbors">Initial neighbor list.</param>
         public Node(bool anchor, List<Node> neighbors)
         {
             Anchor = anchor;
             Neighbors = neighbors;
-      Index = -1;
+            Index = -1;
         }
     }
 
+    /// <summary>
+    /// A branch in a <see cref="Graph"/> connecting two <see cref="Node"/>s, with optional force density Q and geometry.
+    /// </summary>
     public class Edge : GH_Curve
     {
+        /// <summary>Start node of this edge.</summary>
         [JsonIgnore]
-     public Node Start { get; set; }
+        public Node Start { get; set; }
 
-     [JsonIgnore]
+        /// <summary>End node of this edge.</summary>
+        [JsonIgnore]
         public Node End { get; set; }
 
+        /// <summary>Force density (q) for this member; used by the FDM solver.</summary>
         [JsonIgnore]
         public double Q { get; set; }
 
+        /// <summary>Optional reference ID for Grasshopper geometry linking.</summary>
         [JsonIgnore]
         public new Guid ReferenceID { get; set; }
 
+        /// <summary>Default constructor; empty start/end nodes, Q = 0.</summary>
         public Edge()
         {
-        Start = new();
-    End = new();
-          Q = 0;
-ReferenceID = Guid.Empty;
-        }
-
-        public Edge(Node start, Node end, double q, GH_Curve curve)
-        {
-          Start = start;
-      End = end;
-            Q = q;
-  Value = curve.Value;
+            Start = new Node();
+            End = new Node();
+            Q = 0;
             ReferenceID = Guid.Empty;
         }
 
+        /// <summary>Constructs an edge from two nodes, force density, and curve geometry.</summary>
+        /// <param name="start">Start node.</param>
+        /// <param name="end">End node.</param>
+        /// <param name="q">Force density for this member.</param>
+        /// <param name="curve">Curve geometry (length and shape).</param>
+        public Edge(Node start, Node end, double q, GH_Curve curve)
+        {
+            Start = start;
+            End = end;
+            Q = q;
+            Value = curve.Value;
+            ReferenceID = Guid.Empty;
+        }
+
+        /// <summary>Copy constructor.</summary>
+        /// <param name="other">Edge to copy from.</param>
         public Edge(Edge other)
- {
-   Start = other.Start;
-         End = other.End;
-      Q = other.Q;
-   Value = other.Value;
-       ReferenceID = other.ReferenceID;
-}
+        {
+            Start = other.Start;
+            End = other.End;
+            Q = other.Q;
+            Value = other.Value;
+            ReferenceID = other.ReferenceID;
+        }
     }
 }

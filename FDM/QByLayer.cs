@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
@@ -8,6 +8,9 @@ using Rhino.Geometry;
 
 namespace Ariadne.FDM
 {
+    /// <summary>
+    /// Assigns force density (q) per Rhino layer: edges on named layers get the corresponding q values; others get a default.
+    /// </summary>
     public class nodeQByLayer : GH_Component
     {
         /// <summary>

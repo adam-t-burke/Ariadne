@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
 using Grasshopper.Kernel;
@@ -14,6 +14,9 @@ using Ariadne.Graphs;
 
 namespace Ariadne.GH_Design.Experimental
 {
+    /// <summary>
+    /// Experimental: constrains or visualizes network points relative to a control surface (e.g. NURBS).
+    /// </summary>
     public class CtrlSurfPoint : GH_Component
     {
         private FDM_Network network;

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using Grasshopper.Kernel;
 using Rhino.Geometry;
@@ -11,6 +11,9 @@ using System.Linq;
 
 namespace Ariadne.Utilities
 {
+    /// <summary>
+    /// Displays tags (e.g. indices or values) on network nodes or edges in the viewport.
+    /// </summary>
     public class Tagger : GH_Component
     {
         FDM_Network network;

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
 using Grasshopper.Kernel;
@@ -8,6 +8,9 @@ using System.Drawing;
 
 namespace Ariadne.Utilities
 {
+    /// <summary>
+    /// Draws lines connecting initial and solved edge geometry to show deformation or mapping.
+    /// </summary>
     public class CurveToCurve : GH_Component
     {
         Line[] lines;

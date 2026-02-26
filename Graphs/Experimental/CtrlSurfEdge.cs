@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Security.Policy;
 using Grasshopper.Kernel;
@@ -13,6 +13,9 @@ using System.Drawing;
 
 namespace Ariadne.GH_Design.Experimental
 {
+    /// <summary>
+    /// Experimental: constrains or visualizes network edges relative to a control surface (e.g. NURBS).
+    /// </summary>
     public class CtrlSurfEdge : GH_Component
     {
         private List<Curve> curves;

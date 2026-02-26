@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
@@ -8,10 +8,13 @@ using Rhino.Geometry;
 
 namespace Ariadne.Graphs
 {
+    /// <summary>
+    /// Deconstructs a Graph into node positions, edge curves, edge indices, and adjacency list.
+    /// </summary>
     public class DeconstructGraph : GH_Component
     {
         /// <summary>
-        /// Initializes a new instance of the MyComponent1 class.
+        /// Initializes a new instance of the DeconstructGraph class.
         /// </summary>
         public DeconstructGraph()
           : base("DeconstructGraph", "Deconstruct Graph",
