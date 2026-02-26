@@ -1,0 +1,3 @@
+apiRules:
+  - include: Ariadne*
+  - exclude: Ariadne.Properties*

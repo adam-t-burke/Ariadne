@@ -1,0 +1,15 @@
+- name: Home
+  href: index.md
+- name: Theory
+  href: docs/articles/theory.md
+- name: Getting started
+  href: docs/articles/getting-started.md
+- name: Workflow
+  href: docs/articles/workflow.md
+- name: Component guide
+  href: docs/articles/component-guide.md
+- name: Examples
+  href: docs/articles/examples.md
+- name: API Reference
+  href: api/
+  homepage: api/index.md

@@ -1,0 +1,76 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'examples/**'
+      - '**.cs'
+      - 'Ariadne.csproj'
+      - 'docfx.json'
+      - 'toc.yml'
+      - 'index.md'
+      - 'apiFilter.yml'
+      - 'README.md'
+      - 'Resources/**'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build project (Release)
+        run: dotnet build -c Release
+
+      - name: Prepare API metadata (project outputs .gha; DocFX expects .dll)
+        run: Copy-Item -Path bin\Release\net8.0\Ariadne.gha -Destination bin\Release\net8.0\Ariadne.dll
+
+      - name: Copy icon assets to docs
+        run: |
+          # Icons live in repo root Resources/ (e.g. Resources\Create.png, parameters.png)
+          New-Item -ItemType Directory -Force -Path docs\assets\icons
+          if (Test-Path Resources\*.png) {
+            Copy-Item -Path Resources\*.png -Destination docs\assets\icons\
+          }
+
+      - name: Install DocFX
+        run: dotnet tool install -g docfx
+
+      - name: Build DocFX metadata and site
+        run: |
+          $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
+          docfx metadata
+          docfx build
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@3
+        with:
+          path: _site
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@4
