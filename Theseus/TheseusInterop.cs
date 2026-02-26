@@ -47,6 +47,13 @@ internal static class TheseusInterop
         double[] target_xy);
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_add_target_plane(
+        IntPtr handle, double weight,
+        nuint[] node_indices, nuint num_nodes,
+        double[] target_xyz,
+        double[] origin, double[] x_axis, double[] y_axis);
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
     public static extern int theseus_add_target_length(
         IntPtr handle, double weight,
         nuint[] edge_indices, nuint num_edges,
@@ -122,7 +129,7 @@ internal static class TheseusInterop
     // ── Progress callback ────────────────────────────────────
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    public delegate void NativeProgressCallback(
+    public delegate byte NativeProgressCallback(
         nuint iteration, double loss, IntPtr xyz, nuint numNodes);
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]

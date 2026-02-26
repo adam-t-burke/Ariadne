@@ -93,13 +93,16 @@ impl<'a> FdmProblem<'a> {
         };
 
         if let Some(cb) = self.progress_callback {
-            if eval_count % self.report_frequency == 0 {
+            if eval_count == 1 || eval_count % self.report_frequency == 0 {
                 let nn = self.problem.topology.num_nodes;
                 let nf = &fdm_cache.nf;
                 let xyz_flat: Vec<f64> = (0..nn)
                     .flat_map(|i| (0..3).map(move |d| nf[[i, d]]))
                     .collect();
-                unsafe { cb(eval_count, val, xyz_flat.as_ptr(), nn); }
+                let should_continue = unsafe { cb(eval_count, val, xyz_flat.as_ptr(), nn) };
+                if should_continue == 0 {
+                    return Err(argmin::core::Error::msg("cancelled"));
+                }
             }
         }
 

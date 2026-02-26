@@ -19,14 +19,34 @@ public sealed record SolverOptions
 }
 
 /// <summary>
-/// Inputs required for the solver.
+/// Bundled optimization configuration passed from the OptConfig component
+/// to the solve component. When absent, the solver runs forward-only.
+/// </summary>
+public sealed record OptimizationConfig
+{
+    public required IReadOnlyList<Objective> Objectives { get; init; }
+    public IReadOnlyList<double> LowerBounds { get; init; } = [0.1];
+    public IReadOnlyList<double> UpperBounds { get; init; } = [100.0];
+    public int MaxIterations { get; init; } = 500;
+    public double AbsTol { get; init; } = 1e-6;
+    public double RelTol { get; init; } = 1e-6;
+    public double BarrierWeight { get; init; } = 10.0;
+    public double BarrierSharpness { get; init; } = 10.0;
+    public int ReportFrequency { get; init; } = 10;
+    public bool Run { get; init; } = false;
+    public bool StreamPreview { get; init; } = true;
+}
+
+/// <summary>
+/// Inputs required for the solver. Bounds are nullable: null means
+/// unconstrained (forward-only), non-null means optimization bounds.
 /// </summary>
 public sealed record SolverInputs
 {
     public required List<double> QInit { get; init; }
     public required List<Vector3d> Loads { get; init; }
-    public required List<double> LowerBounds { get; init; }
-    public required List<double> UpperBounds { get; init; }
+    public List<double>? LowerBounds { get; init; }
+    public List<double>? UpperBounds { get; init; }
     public List<Objective> Objectives { get; init; } = [];
 }
 

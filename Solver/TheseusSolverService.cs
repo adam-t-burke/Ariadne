@@ -12,22 +12,24 @@ using Theseus.Interop;
 /// Encapsulates all Theseus solver operations. Provides a clean interface
 /// for solving FDM networks without Grasshopper dependencies.
 /// </summary>
-public sealed class TheseusSolverService
+public static class TheseusSolverService
 {
     /// <summary>
     /// Solve an FDM network with optimization.
     /// </summary>
     /// <param name="progressCallback">
-    /// Optional callback invoked every <see cref="SolverOptions.ReportFrequency"/>
+    /// Optional callback invoked every <paramref name="reportFrequency"/>
     /// evaluations with (iteration, loss, xyz[numNodes*3]).
+    /// Return <c>true</c> to continue, <c>false</c> to cancel.
     /// </param>
-    public SolveResult Solve(
+    public static SolveResult Solve(
         FDM_Network network,
         SolverInputs inputs,
         SolverOptions? options = null,
-        Action<int, double, double[]>? progressCallback = null)
+        Func<int, double, double[], bool>? progressCallback = null)
     {
-        ValidateInputs(network, inputs);
+        ValidateCommon(network, inputs);
+        ValidateOptimizationBounds(inputs);
         options ??= new SolverOptions();
 
         var context = BuildContext(network);
@@ -62,10 +64,12 @@ public sealed class TheseusSolverService
 
     /// <summary>
     /// Solve an FDM network without optimization (forward solve only).
+    /// Supplies unconstrained bounds so the Rust solver selects LDL
+    /// factorization, which handles mixed-sign q values correctly.
     /// </summary>
-    public SolveResult SolveForward(FDM_Network network, SolverInputs inputs)
+    public static SolveResult SolveForward(FDM_Network network, SolverInputs inputs)
     {
-        ValidateInputs(network, inputs);
+        ValidateCommon(network, inputs);
 
         var context = BuildContext(network);
         var data = BuildSolverData(network, inputs, context);
@@ -82,9 +86,9 @@ public sealed class TheseusSolverService
         return BuildResult(network, result, context);
     }
 
-    #region Private Methods
+    #region Validation
 
-    private static void ValidateInputs(FDM_Network network, SolverInputs inputs)
+    private static void ValidateCommon(FDM_Network network, SolverInputs inputs)
     {
         if (network == null)
             throw new ArgumentNullException(nameof(network));
@@ -94,11 +98,19 @@ public sealed class TheseusSolverService
             throw new ArgumentException("Loads list cannot be empty.", nameof(inputs));
         if (inputs.QInit == null || inputs.QInit.Count == 0)
             throw new ArgumentException("Initial force densities cannot be empty.", nameof(inputs));
-        if (inputs.LowerBounds == null || inputs.LowerBounds.Count == 0)
-            throw new ArgumentException("Lower bounds cannot be empty.", nameof(inputs));
-        if (inputs.UpperBounds == null || inputs.UpperBounds.Count == 0)
-            throw new ArgumentException("Upper bounds cannot be empty.", nameof(inputs));
     }
+
+    private static void ValidateOptimizationBounds(SolverInputs inputs)
+    {
+        if (inputs.LowerBounds == null || inputs.LowerBounds.Count == 0)
+            throw new ArgumentException("Lower bounds cannot be empty for optimization.", nameof(inputs));
+        if (inputs.UpperBounds == null || inputs.UpperBounds.Count == 0)
+            throw new ArgumentException("Upper bounds cannot be empty for optimization.", nameof(inputs));
+    }
+
+    #endregion
+
+    #region Private Methods
 
     private static SolverContext BuildContext(FDM_Network network)
     {
@@ -162,14 +174,22 @@ public sealed class TheseusSolverService
             fixedPos[i * 3 + 2] = pos.Z;
         }
 
+        double[] lowerBounds = inputs.LowerBounds != null
+            ? Expand(inputs.LowerBounds, numEdges)
+            : ExpandConstant(double.NegativeInfinity, numEdges);
+
+        double[] upperBounds = inputs.UpperBounds != null
+            ? Expand(inputs.UpperBounds, numEdges)
+            : ExpandConstant(double.PositiveInfinity, numEdges);
+
         return new SolverData(
             numEdges, numNodes, numFree,
             cooRows, cooCols, cooVals,
             [.. network.FreeNodes], [.. network.FixedNodes],
             loads, fixedPos,
             Expand(inputs.QInit, numEdges),
-            Expand(inputs.LowerBounds, numEdges),
-            Expand(inputs.UpperBounds, numEdges));
+            lowerBounds,
+            upperBounds);
     }
 
     private static SolveResult BuildResult(FDM_Network oldNetwork, SolverResult result, SolverContext context)
@@ -258,7 +278,7 @@ public sealed class TheseusSolverService
         };
     }
 
-    private static double[] Expand(List<double> values, int length)
+    private static double[] Expand(IReadOnlyList<double> values, int length)
     {
         if (values.Count == 0)
             throw new ArgumentException("Values list cannot be empty", nameof(values));
@@ -266,6 +286,13 @@ public sealed class TheseusSolverService
         var result = new double[length];
         for (int i = 0; i < length; i++)
             result[i] = i < values.Count ? values[i] : values[^1];
+        return result;
+    }
+
+    private static double[] ExpandConstant(double value, int length)
+    {
+        var result = new double[length];
+        Array.Fill(result, value);
         return result;
     }
 

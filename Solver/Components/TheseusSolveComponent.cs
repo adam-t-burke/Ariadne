@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Grasshopper.Kernel;
 using Rhino;
@@ -8,7 +10,6 @@ using Rhino.Display;
 using Rhino.Geometry;
 using Ariadne.FDM;
 using Ariadne.Graphs;
-using Theseus.Interop;
 
 namespace Ariadne.Solver;
 
@@ -20,6 +21,9 @@ namespace Ariadne.Solver;
 public class TheseusSolveComponent : GH_TaskCapableComponent<SolveResult>
 {
     private SolveResult? _cachedResult;
+    private bool _lastWasOptimization;
+
+    private CancellationTokenSource? _cts;
 
     private readonly object _previewLock = new();
     private Point3d[]? _previewPoints;
@@ -35,14 +39,9 @@ public class TheseusSolveComponent : GH_TaskCapableComponent<SolveResult>
     protected override void RegisterInputParams(GH_InputParamManager pManager)
     {
         pManager.AddGenericParameter("Network", "Network", "FDM Network to solve", GH_ParamAccess.item);
-        pManager.AddNumberParameter("Force Densities", "q", "Initial force densities (feed previous Q output for warm-start)", GH_ParamAccess.list, 10.0);
+        pManager.AddNumberParameter("Force Densities", "q", "Initial force densities", GH_ParamAccess.list, 10.0);
         pManager.AddVectorParameter("Loads", "Loads", "Loads on free nodes", GH_ParamAccess.list, new Vector3d(0, 0, -1));
-        pManager.AddGenericParameter("Objectives", "OBJ", "Objective functions to minimize", GH_ParamAccess.list);
-        pManager.AddNumberParameter("Lower Bounds", "qMin", "Lower bounds on force densities", GH_ParamAccess.list, 0.1);
-        pManager.AddNumberParameter("Upper Bounds", "qMax", "Upper bounds on force densities", GH_ParamAccess.list, 100.0);
-        pManager.AddIntegerParameter("Max Iterations", "MaxIter", "Maximum solver iterations", GH_ParamAccess.item, 500);
-        pManager.AddBooleanParameter("Optimize", "Opt", "Run optimization (connect a button for on-demand solving)", GH_ParamAccess.item, false);
-        pManager.AddIntegerParameter("Report Frequency", "ReportFreq", "Update viewport preview every N evaluations (0 = no preview)", GH_ParamAccess.item, 10);
+        pManager.AddGenericParameter("Opt Config", "OptConfig", "Optimization configuration (optional, connect for optimization)", GH_ParamAccess.item);
 
         pManager[3].Optional = true;
     }
@@ -63,25 +62,16 @@ public class TheseusSolveComponent : GH_TaskCapableComponent<SolveResult>
     {
         if (InPreSolve)
         {
+            // ── Gather inputs ──────────────────────────────────────
             FDM_Network? network = null;
             List<double> q = [];
             List<Vector3d> loads = [];
-            List<Objective> objectives = [];
-            List<double> lb = [];
-            List<double> ub = [];
-            int maxIter = 500;
-            bool optimize = false;
-            int reportFreq = 10;
+            OptimizationConfig? config = null;
 
             if (!DA.GetData(0, ref network)) return;
             DA.GetDataList(1, q);
             DA.GetDataList(2, loads);
-            DA.GetDataList(3, objectives);
-            DA.GetDataList(4, lb);
-            DA.GetDataList(5, ub);
-            DA.GetData(6, ref maxIter);
-            DA.GetData(7, ref optimize);
-            DA.GetData(8, ref reportFreq);
+            DA.GetData(3, ref config);
 
             if (network == null || !network.Valid)
             {
@@ -89,30 +79,78 @@ public class TheseusSolveComponent : GH_TaskCapableComponent<SolveResult>
                 return;
             }
 
-            if (!optimize && _cachedResult != null)
+            // ── State machine ──────────────────────────────────────
+            if (config == null)
             {
-                OutputResult(DA, _cachedResult);
+                // No OptConfig: cancel any in-progress optimization, forward solve
+                CancelAndDisposeCts();
+                ClearPreview();
+                _lastWasOptimization = false;
+
+                var snap = new SolveSnapshot(network, q.AsReadOnly(), loads.AsReadOnly(), null);
+                TaskList.Add(Task.Run(() => RunSolve(snap, null)));
                 return;
             }
 
-            var snapshot = new SolveSnapshot(network, q, loads, objectives, lb, ub, maxIter, optimize, reportFreq);
-
-            ClearPreview();
-
-            var edgeIndices = BuildEdgeIndexPairs(network);
-            Action<int, double, double[]>? callback = null;
-            if (optimize && reportFreq > 0)
+            if (!config.Run)
             {
-                callback = (iter, loss, xyz) =>
-                    OnProgress(iter, loss, xyz, edgeIndices);
+                // Run = false: do nothing. Let any in-progress optimization finish.
+                // Pass 2 will pick up a completed result or output cache.
+                return;
             }
 
-            Task<SolveResult> task = Task.Run(() => RunSolve(snapshot, callback));
-            TaskList.Add(task);
+            // Config.Run = true: cancel old optimization, start new one
+            if (config.Objectives.Count == 0)
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
+                    "No objectives provided. Falling back to forward solve.");
+                CancelAndDisposeCts();
+                ClearPreview();
+                _lastWasOptimization = false;
+
+                var snap = new SolveSnapshot(network, q.AsReadOnly(), loads.AsReadOnly(), null);
+                TaskList.Add(Task.Run(() => RunSolve(snap, null)));
+                return;
+            }
+
+            // Optimization with objectives
+            CancelAndDisposeCts();
+            ClearPreview();
+            _lastWasOptimization = true;
+
+            _cts = new CancellationTokenSource();
+            var token = _cts.Token;
+
+            var edgeIndices = BuildEdgeIndexPairs(network);
+            bool streamPreview = config.StreamPreview;
+
+            Func<int, double, double[], bool> callback = (iter, loss, xyz) =>
+            {
+                if (token.IsCancellationRequested) return false;
+                if (streamPreview)
+                    OnProgress(iter, loss, xyz, edgeIndices);
+                return true;
+            };
+
+            var optSnap = new SolveSnapshot(network, q.AsReadOnly(), loads.AsReadOnly(), config);
+            TaskList.Add(Task.Run(() => RunSolve(optSnap, callback)));
             return;
         }
 
-        if (!GetSolveResults(DA, out var result))
+        // ── Pass 2 ─────────────────────────────────────────────────
+        SolveResult? result;
+        bool hasResult;
+        try
+        {
+            hasResult = GetSolveResults(DA, out result);
+        }
+        catch
+        {
+            hasResult = false;
+            result = null;
+        }
+
+        if (!hasResult)
         {
             if (_cachedResult != null)
                 OutputResult(DA, _cachedResult);
@@ -122,21 +160,24 @@ public class TheseusSolveComponent : GH_TaskCapableComponent<SolveResult>
         ClearPreview();
 
         _cachedResult = result;
-        OutputResult(DA, result);
+        OutputResult(DA, result!);
 
-        if (result.Converged)
+        if (_lastWasOptimization)
         {
-            AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
-                $"Converged in {result.Iterations} iterations");
-        }
-        else if (result.Iterations > 1)
-        {
-            AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
-                $"Did not converge after {result.Iterations} iterations");
+            if (result!.Converged)
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
+                    $"Converged in {result.Iterations} iterations");
+            }
+            else
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
+                    $"Did not converge after {result.Iterations} iterations");
+            }
         }
     }
 
-    // ?? Preview drawing ?????????????????????????????????????????
+    // ── Preview drawing ─────────────────────────────────────────────
 
     public override void DrawViewportWires(IGH_PreviewArgs args)
     {
@@ -200,7 +241,7 @@ public class TheseusSolveComponent : GH_TaskCapableComponent<SolveResult>
         }
     }
 
-    // ?? Callback / preview helpers ??????????????????????????????
+    // ── Callback / preview helpers ──────────────────────────────────
 
     private void OnProgress(int evalCount, double loss, double[] xyz, (int start, int end)[] edgeIndices)
     {
@@ -239,6 +280,13 @@ public class TheseusSolveComponent : GH_TaskCapableComponent<SolveResult>
         }
     }
 
+    private void CancelAndDisposeCts()
+    {
+        _cts?.Cancel();
+        _cts?.Dispose();
+        _cts = null;
+    }
+
     private static (int start, int end)[] BuildEdgeIndexPairs(FDM_Network network)
     {
         var graph = network.Graph;
@@ -255,32 +303,38 @@ public class TheseusSolveComponent : GH_TaskCapableComponent<SolveResult>
         return pairs;
     }
 
-    // ?? Solve logic ?????????????????????????????????????????????
+    // ── Solve logic ─────────────────────────────────────────────────
 
-    private static SolveResult RunSolve(SolveSnapshot snap, Action<int, double, double[]>? progressCallback)
+    private static SolveResult RunSolve(SolveSnapshot snap, Func<int, double, double[], bool>? callback)
     {
-        var solver = new TheseusSolverService();
-
-        var inputs = new SolverInputs
+        if (snap.Config is { } cfg && cfg.Objectives.Count > 0)
         {
-            QInit = snap.Q,
-            Loads = snap.Loads,
-            LowerBounds = snap.LowerBounds,
-            UpperBounds = snap.UpperBounds,
-            Objectives = snap.Objectives
-        };
-
-        if (snap.Optimize && snap.Objectives.Count > 0)
-        {
+            var inputs = new SolverInputs
+            {
+                QInit = snap.Q.ToList(),
+                Loads = snap.Loads.ToList(),
+                LowerBounds = cfg.LowerBounds.ToList(),
+                UpperBounds = cfg.UpperBounds.ToList(),
+                Objectives = cfg.Objectives.ToList(),
+            };
             var options = new SolverOptions
             {
-                MaxIterations = snap.MaxIterations,
-                ReportFrequency = snap.ReportFrequency,
+                MaxIterations = cfg.MaxIterations,
+                AbsTol = cfg.AbsTol,
+                RelTol = cfg.RelTol,
+                BarrierWeight = cfg.BarrierWeight,
+                BarrierSharpness = cfg.BarrierSharpness,
+                ReportFrequency = cfg.ReportFrequency,
             };
-            return solver.Solve(snap.Network, inputs, options, progressCallback);
+            return TheseusSolverService.Solve(snap.Network, inputs, options, callback);
         }
 
-        return solver.SolveForward(snap.Network, inputs);
+        var fwdInputs = new SolverInputs
+        {
+            QInit = snap.Q.ToList(),
+            Loads = snap.Loads.ToList(),
+        };
+        return TheseusSolverService.SolveForward(snap.Network, fwdInputs);
     }
 
     private static void OutputResult(IGH_DataAccess DA, SolveResult result)
@@ -306,11 +360,6 @@ public class TheseusSolveComponent : GH_TaskCapableComponent<SolveResult>
 /// </summary>
 internal sealed record SolveSnapshot(
     FDM_Network Network,
-    List<double> Q,
-    List<Vector3d> Loads,
-    List<Objective> Objectives,
-    List<double> LowerBounds,
-    List<double> UpperBounds,
-    int MaxIterations,
-    bool Optimize,
-    int ReportFrequency);
+    IReadOnlyList<double> Q,
+    IReadOnlyList<Vector3d> Loads,
+    OptimizationConfig? Config);

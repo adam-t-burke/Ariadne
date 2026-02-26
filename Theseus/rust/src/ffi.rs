@@ -100,16 +100,18 @@ pub unsafe extern "C" fn theseus_last_error(buf: *mut u8, buf_len: usize) -> i32
 /// C-callable progress callback.
 ///
 /// Called every `report_frequency` evaluations during optimization with:
-///   - `iteration`: evaluation count (0-based)
+///   - `iteration`: evaluation count (1-based)
 ///   - `loss`: current objective value
 ///   - `xyz`: pointer to `num_nodes * 3` doubles (row-major node positions)
 ///   - `num_nodes`: total number of nodes
+///
+/// Returns `1` to continue optimization, `0` to cancel.
 pub type ProgressCallback = unsafe extern "C" fn(
     iteration: usize,
     loss: f64,
     xyz: *const f64,
     num_nodes: usize,
-);
+) -> u8;
 
 /// Solver handle that owns the problem + state.
 pub struct TheseusHandle {
@@ -335,8 +337,9 @@ pub unsafe extern "C" fn theseus_add_min_length(
 
 /// Add a TargetXY objective (XY plane only).  Returns 0 on success.
 ///
-/// `target_xy` is a flat row-major `num_nodes × 3` array (Z column is ignored
-/// by the loss but must be present for uniform layout).
+/// `target_xy` must be exactly `num_nodes * 3` doubles, row-major (X,Y,Z per node).
+/// The Z component is ignored by the loss but must be present so the layout matches
+/// TargetXYZ and the FFI does not read past the buffer.
 ///
 /// # Safety
 /// Valid handle and arrays.
@@ -356,6 +359,48 @@ pub unsafe extern "C" fn theseus_add_target_xy(
             slice::from_raw_parts(target_xy, num_nodes * 3).to_vec(),
         ).map_err(|e| TheseusError::Shape(format!("target_xy: {e}")))?;
         h.problem.objectives.push(Box::new(TargetXY { weight, node_indices: idx, target }));
+        Ok(())
+    }))
+}
+
+/// Add a TargetPlane objective (projection onto an arbitrary plane).
+///
+/// `target_xyz` is row-major `num_nodes × 3` world positions.
+/// `origin`, `x_axis`, `y_axis` are 3-element arrays in world coordinates;
+/// axes should be unit and orthogonal (e.g. Rhino plane Origin, XAxis, YAxis).
+///
+/// # Safety
+/// Valid handle and arrays; origin/x_axis/y_axis must each point to 3 doubles.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_add_target_plane(
+    handle: *mut TheseusHandle,
+    weight: f64,
+    node_indices: *const usize,
+    num_nodes: usize,
+    target_xyz: *const f64,
+    origin: *const f64,
+    x_axis: *const f64,
+    y_axis: *const f64,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let h = &mut *handle;
+        let idx = slice::from_raw_parts(node_indices, num_nodes).to_vec();
+        let target = Array2::from_shape_vec(
+            (num_nodes, 3),
+            slice::from_raw_parts(target_xyz, num_nodes * 3).to_vec(),
+        )
+        .map_err(|e| TheseusError::Shape(format!("target_plane target_xyz: {e}")))?;
+        let origin_arr: [f64; 3] = [*origin.add(0), *origin.add(1), *origin.add(2)];
+        let x_axis_arr: [f64; 3] = [*x_axis.add(0), *x_axis.add(1), *x_axis.add(2)];
+        let y_axis_arr: [f64; 3] = [*y_axis.add(0), *y_axis.add(1), *y_axis.add(2)];
+        h.problem.objectives.push(Box::new(TargetPlane {
+            weight,
+            node_indices: idx,
+            target,
+            origin: origin_arr,
+            x_axis: x_axis_arr,
+            y_axis: y_axis_arr,
+        }));
         Ok(())
     }))
 }

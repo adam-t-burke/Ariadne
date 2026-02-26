@@ -136,6 +136,41 @@ pub(crate) fn grad_target_xy(
     }
 }
 
+/// TargetPlane:  L = w Σ ((u_p − u_t)² + (v_p − v_t)²).  dL/dp = 2w((Δu)x_axis + (Δv)y_axis).
+pub(crate) fn grad_target_plane(
+    cache: &mut FdmCache,
+    weight: f64,
+    node_indices: &[usize],
+    target: &Array2<f64>,
+    origin: &[f64; 3],
+    x_axis: &[f64; 3],
+    y_axis: &[f64; 3],
+    _free_node_indices: &[usize],
+) {
+    for (i, &idx) in node_indices.iter().enumerate() {
+        if let Some(j) = cache.node_to_free_idx[idx] {
+            let u_p = (cache.nf[[idx, 0]] - origin[0]) * x_axis[0]
+                + (cache.nf[[idx, 1]] - origin[1]) * x_axis[1]
+                + (cache.nf[[idx, 2]] - origin[2]) * x_axis[2];
+            let v_p = (cache.nf[[idx, 0]] - origin[0]) * y_axis[0]
+                + (cache.nf[[idx, 1]] - origin[1]) * y_axis[1]
+                + (cache.nf[[idx, 2]] - origin[2]) * y_axis[2];
+            let u_t = (target[[i, 0]] - origin[0]) * x_axis[0]
+                + (target[[i, 1]] - origin[1]) * x_axis[1]
+                + (target[[i, 2]] - origin[2]) * x_axis[2];
+            let v_t = (target[[i, 0]] - origin[0]) * y_axis[0]
+                + (target[[i, 1]] - origin[1]) * y_axis[1]
+                + (target[[i, 2]] - origin[2]) * y_axis[2];
+            let du = u_p - u_t;
+            let dv = v_p - v_t;
+            let scale = 2.0 * weight;
+            for d in 0..3 {
+                cache.grad_x[[j, d]] += scale * (du * x_axis[d] + dv * y_axis[d]);
+            }
+        }
+    }
+}
+
 /// TargetLength:  L = w Σ (ℓ_k − t_k)²
 /// dL/dx̂ via chain rule through ℓ_k = ‖ΔN_k‖
 ///   dℓ/dx̂[j,d] = ΔN_k[d] / ℓ_k  ×  (±1 depending on edge orientation)

@@ -26,6 +26,8 @@ pub enum TheseusError {
     Solver(String),
     /// Shape mismatch in input data.
     Shape(String),
+    /// Optimization was cancelled by the caller via the progress callback.
+    Cancelled,
 }
 
 impl fmt::Display for TheseusError {
@@ -38,6 +40,7 @@ impl fmt::Display for TheseusError {
                 write!(f, "factorization not computed (call solve_fdm first)"),
             Self::Solver(msg) => write!(f, "solver error: {msg}"),
             Self::Shape(msg) => write!(f, "shape error: {msg}"),
+            Self::Cancelled => write!(f, "optimization cancelled by user"),
         }
     }
 }
@@ -110,6 +113,18 @@ pub struct TargetXY {
     pub weight: f64,
     pub node_indices: Vec<usize>,
     pub target: Array2<f64>,
+}
+
+/// Target positions on an arbitrary plane. Origin and axes are in world coordinates;
+/// axes should be unit and orthogonal (e.g. Rhino plane Origin, XAxis, YAxis).
+#[derive(Debug, Clone)]
+pub struct TargetPlane {
+    pub weight: f64,
+    pub node_indices: Vec<usize>,
+    pub target: Array2<f64>, // n × 3 world positions
+    pub origin: [f64; 3],
+    pub x_axis: [f64; 3],
+    pub y_axis: [f64; 3],
 }
 
 #[derive(Debug, Clone)]

@@ -105,6 +105,22 @@ public sealed class TheseusSolver : IDisposable
             _handle, weight, ToNuint(nodeIndices), (nuint)nodeIndices.Length, targetXy));
     }
 
+    public void AddTargetPlane(double weight, int[] nodeIndices, double[] targetXyz, double[] origin, double[] xAxis, double[] yAxis)
+    {
+        ThrowIfDisposed();
+        if (targetXyz.Length != nodeIndices.Length * 3)
+            throw new ArgumentException("targetXyz length must be nodeIndices.Length * 3.", nameof(targetXyz));
+        if (origin == null || origin.Length != 3)
+            throw new ArgumentException("origin must have length 3.", nameof(origin));
+        if (xAxis == null || xAxis.Length != 3)
+            throw new ArgumentException("xAxis must have length 3.", nameof(xAxis));
+        if (yAxis == null || yAxis.Length != 3)
+            throw new ArgumentException("yAxis must have length 3.", nameof(yAxis));
+        Check(TheseusInterop.theseus_add_target_plane(
+            _handle, weight, ToNuint(nodeIndices), (nuint)nodeIndices.Length,
+            targetXyz, origin, xAxis, yAxis));
+    }
+
     public void AddTargetLength(double weight, int[] edgeIndices, double[] targets)
     {
         ThrowIfDisposed();
@@ -201,9 +217,10 @@ public sealed class TheseusSolver : IDisposable
     /// <summary>
     /// Register a managed callback invoked every <paramref name="frequency"/>
     /// evaluations with (iteration, loss, xyz[numNodes*3]).
+    /// Return <c>true</c> to continue, <c>false</c> to cancel.
     /// Pass null to clear.  The delegate is pinned for the lifetime of this solver.
     /// </summary>
-    public void SetProgressCallback(Action<int, double, double[]>? callback, int frequency)
+    public void SetProgressCallback(Func<int, double, double[], bool>? callback, int frequency)
     {
         ThrowIfDisposed();
         if (callback == null)
@@ -218,7 +235,8 @@ public sealed class TheseusSolver : IDisposable
         {
             var xyz = new double[nn * 3];
             Marshal.Copy(xyzPtr, xyz, 0, nn * 3);
-            callback((int)iteration, loss, xyz);
+            bool shouldContinue = callback((int)iteration, loss, xyz);
+            return shouldContinue ? (byte)1 : (byte)0;
         };
 
         Check(TheseusInterop.theseus_set_progress_callback(

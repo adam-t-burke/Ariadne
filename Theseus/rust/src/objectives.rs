@@ -6,7 +6,7 @@
 
 use crate::types::{
     GeometrySnapshot, ObjectiveTrait, FdmCache, Problem,
-    TargetXYZ, TargetXY, TargetLength, LengthVariation, ForceVariation,
+    TargetXYZ, TargetXY, TargetPlane, TargetLength, LengthVariation, ForceVariation,
     SumForceLength, MinLength, MaxLength, MinForce, MaxForce,
     RigidSetCompare, ReactionDirection, ReactionDirectionMagnitude,
 };
@@ -112,6 +112,37 @@ fn target_xy_loss(xyz: &Array2<f64>, node_indices: &[usize], target: &Array2<f64
             let diff = xyz[[idx, d]] - target[[i, d]];
             loss += diff * diff;
         }
+    }
+    loss
+}
+
+/// TargetPlane:  Σ_i ((u_p − u_t)² + (v_p − v_t)²) in plane coords.
+/// u = (p − origin)·x_axis, v = (p − origin)·y_axis.
+fn target_plane_loss(
+    xyz: &Array2<f64>,
+    node_indices: &[usize],
+    target: &Array2<f64>,
+    origin: &[f64; 3],
+    x_axis: &[f64; 3],
+    y_axis: &[f64; 3],
+) -> f64 {
+    let mut loss = 0.0;
+    for (i, &idx) in node_indices.iter().enumerate() {
+        let u_p = (xyz[[idx, 0]] - origin[0]) * x_axis[0]
+            + (xyz[[idx, 1]] - origin[1]) * x_axis[1]
+            + (xyz[[idx, 2]] - origin[2]) * x_axis[2];
+        let v_p = (xyz[[idx, 0]] - origin[0]) * y_axis[0]
+            + (xyz[[idx, 1]] - origin[1]) * y_axis[1]
+            + (xyz[[idx, 2]] - origin[2]) * y_axis[2];
+        let u_t = (target[[i, 0]] - origin[0]) * x_axis[0]
+            + (target[[i, 1]] - origin[1]) * x_axis[1]
+            + (target[[i, 2]] - origin[2]) * x_axis[2];
+        let v_t = (target[[i, 0]] - origin[0]) * y_axis[0]
+            + (target[[i, 1]] - origin[1]) * y_axis[1]
+            + (target[[i, 2]] - origin[2]) * y_axis[2];
+        let du = u_p - u_t;
+        let dv = v_p - v_t;
+        loss += du * du + dv * dv;
     }
     loss
 }
@@ -285,6 +316,34 @@ impl ObjectiveTrait for TargetXY {
         gradients::grad_target_xy(cache, self.weight, &self.node_indices, &self.target, &problem.topology.free_node_indices);
     }
     fn weight(&self) -> f64 { self.weight }
+}
+
+impl ObjectiveTrait for TargetPlane {
+    fn loss(&self, snap: &GeometrySnapshot) -> f64 {
+        self.weight * target_plane_loss(
+            snap.xyz_full,
+            &self.node_indices,
+            &self.target,
+            &self.origin,
+            &self.x_axis,
+            &self.y_axis,
+        )
+    }
+    fn accumulate_gradient(&self, cache: &mut FdmCache, problem: &Problem) {
+        gradients::grad_target_plane(
+            cache,
+            self.weight,
+            &self.node_indices,
+            &self.target,
+            &self.origin,
+            &self.x_axis,
+            &self.y_axis,
+            &problem.topology.free_node_indices,
+        );
+    }
+    fn weight(&self) -> f64 {
+        self.weight
+    }
 }
 
 impl ObjectiveTrait for TargetLength {

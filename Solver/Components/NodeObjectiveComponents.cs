@@ -86,6 +86,51 @@ public class TargetXYZComponent : GH_Component
 }
 
 /// <summary>
+/// Minimize deviation from starting nodal positions projected onto an arbitrary plane.
+/// Defaults to the world XY plane when no plane is connected.
+/// </summary>
+public class TargetPlaneComponent : GH_Component
+{
+    public TargetPlaneComponent()
+        : base("Target Plane", "TargetPlane",
+            "Minimize deviation from starting positions projected onto a plane (default: World XY).",
+            "Ariadne", "Objectives")
+    { }
+
+    protected override void RegisterInputParams(GH_InputParamManager pManager)
+    {
+        pManager.AddGenericParameter("Nodes", "Nodes", "Nodes to target (optional)", GH_ParamAccess.list);
+        pManager.AddPlaneParameter("Plane", "P", "Target plane (default: World XY)", GH_ParamAccess.item);
+        pManager.AddNumberParameter("Weight", "Weight", "Objective weight", GH_ParamAccess.item, 1.0);
+        pManager[0].Optional = true;
+        pManager[1].Optional = true;
+    }
+
+    protected override void RegisterOutputParams(GH_OutputParamManager pManager)
+    {
+        pManager.AddGenericParameter("Objective", "OBJ", "Target Plane Objective", GH_ParamAccess.item);
+    }
+
+    protected override void SolveInstance(IGH_DataAccess DA)
+    {
+        List<Node> nodes = [];
+        Plane plane = Plane.WorldXY;
+        double weight = 1.0;
+
+        DA.GetDataList(0, nodes);
+        bool hasPlane = DA.GetData(1, ref plane);
+        DA.GetData(2, ref weight);
+
+        Plane? planeOpt = hasPlane ? plane : null;
+        var objective = new TargetPlaneObjective(weight, nodes.Count > 0 ? nodes : null, planeOpt);
+        DA.SetData(0, objective);
+    }
+
+    protected override Bitmap Icon => Properties.Resources.Target_UV;
+    public override Guid ComponentGuid => new("E7F8A9B0-C1D2-4E5F-6A7B-8C9D0E1F2A3B");
+}
+
+/// <summary>
 /// Maintain relative distances within a point set (rigid body).
 /// </summary>
 public class RigidPointSetComponent : GH_Component
