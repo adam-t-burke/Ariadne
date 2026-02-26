@@ -380,7 +380,8 @@ public class TheseusSolveComponent : GH_Component
         hash.Add(config.RelTol);
         hash.Add(config.BarrierWeight);
         hash.Add(config.BarrierSharpness);
-        hash.Add(config.Objectives.Count);
+        foreach (var obj in config.Objectives)
+            hash.Add(obj.GetContentHashCode());
         foreach (var lb in config.LowerBounds) hash.Add(lb);
         foreach (var ub in config.UpperBounds) hash.Add(ub);
         return hash.ToHashCode();

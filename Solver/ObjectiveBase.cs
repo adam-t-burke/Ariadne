@@ -3,6 +3,7 @@ namespace Ariadne.Solver;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using Ariadne.FDM;
 using Ariadne.Graphs;
 using Theseus.Interop;
@@ -21,6 +22,15 @@ public abstract class Objective
     /// <param name="solver">The Theseus solver instance to configure.</param>
     /// <param name="context">Resolved node/edge indices and network data.</param>
     public abstract void ApplyTo(TheseusSolver solver, SolverContext context);
+
+    /// <summary>Content hash for cache invalidation; must reflect node/edge subset and parameters.</summary>
+    public virtual int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(Weight);
+        h.Add(GetType());
+        return h.ToHashCode();
+    }
 }
 
 /// <summary>
@@ -75,6 +85,20 @@ public abstract class NodeObjective : Objective
 {
     /// <summary>Nodes to apply the objective to; null or empty means all free nodes.</summary>
     public List<Node>? TargetNodes { get; init; }
+
+    /// <inheritdoc />
+    public override int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(Weight);
+        h.Add(GetType());
+        if (TargetNodes == null || TargetNodes.Count == 0)
+            h.Add(0); // sentinel for "all nodes"
+        else
+            foreach (var n in TargetNodes)
+                h.Add(RuntimeHelpers.GetHashCode(n));
+        return h.ToHashCode();
+    }
 }
 
 /// <summary>
@@ -86,6 +110,21 @@ public abstract class EdgeObjective : Objective
     public List<Edge>? TargetEdges { get; init; }
     /// <summary>Sharpness parameter for barrier/smoothing (e.g. in min/max constraints).</summary>
     public double Sharpness { get; init; } = 20.0;
+
+    /// <inheritdoc />
+    public override int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(Weight);
+        h.Add(Sharpness);
+        h.Add(GetType());
+        if (TargetEdges == null || TargetEdges.Count == 0)
+            h.Add(0); // sentinel for "all edges"
+        else
+            foreach (var e in TargetEdges)
+                h.Add(RuntimeHelpers.GetHashCode(e));
+        return h.ToHashCode();
+    }
 }
 
 /// <summary>
@@ -95,6 +134,16 @@ public abstract class ThresholdEdgeObjective : EdgeObjective
 {
     /// <summary>Threshold values per edge (or one value applied to all).</summary>
     public List<double> Thresholds { get; init; } = [];
+
+    /// <inheritdoc />
+    public override int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(base.GetContentHashCode());
+        foreach (var t in Thresholds)
+            h.Add(t);
+        return h.ToHashCode();
+    }
 
     /// <summary>Expands Thresholds to an array of length count (repeating last value if needed).</summary>
     /// <param name="count">Required length.</param>

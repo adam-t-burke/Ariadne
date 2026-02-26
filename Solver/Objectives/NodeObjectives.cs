@@ -1,5 +1,6 @@
 namespace Ariadne.Solver;
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Ariadne.Graphs;
@@ -99,6 +100,21 @@ public sealed class TargetPlaneObjective : NodeObjective
 
         solver.AddTargetPlane(Weight, indices, targetXyz, origin, xAxis, yAxis);
     }
+
+    public override int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(base.GetContentHashCode());
+        if (Plane is { } p)
+        {
+            h.Add(p.Origin.X); h.Add(p.Origin.Y); h.Add(p.Origin.Z);
+            h.Add(p.XAxis.X); h.Add(p.XAxis.Y); h.Add(p.XAxis.Z);
+            h.Add(p.YAxis.X); h.Add(p.YAxis.Y); h.Add(p.YAxis.Z);
+        }
+        else
+            h.Add(0);
+        return h.ToHashCode();
+    }
 }
 
 /// <summary>
@@ -180,5 +196,19 @@ public sealed class ReactionObjective : NodeObjective
         {
             solver.AddReactionDirection(Weight, indices, targetDirs);
         }
+    }
+
+    public override int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(base.GetContentHashCode());
+        h.Add(IncludeMagnitude);
+        if (TargetDirections != null)
+            foreach (var d in TargetDirections)
+            { h.Add(d.X); h.Add(d.Y); h.Add(d.Z); }
+        if (TargetMagnitudes != null)
+            foreach (var m in TargetMagnitudes)
+                h.Add(m);
+        return h.ToHashCode();
     }
 }
