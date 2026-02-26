@@ -1,3 +1,5 @@
 apiRules:
-  - include: Ariadne*
-  - exclude: Ariadne.Properties*
+  - include:
+      uidRegex: ^Ariadne\.
+  - exclude:
+      uidRegex: ^Ariadne\.Properties

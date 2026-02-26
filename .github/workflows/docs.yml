@@ -40,13 +40,8 @@ jobs:
       - name: Build project (Release)
         run: dotnet build -c Release
 
-      - name: Copy icon assets to docs
-        run: |
-          # Icons live in repo root Resources/ (e.g. Resources\Create.png, parameters.png)
-          New-Item -ItemType Directory -Force -Path docs\assets\icons
-          if (Test-Path Resources\*.png) {
-            Copy-Item -Path Resources\*.png -Destination docs\assets\icons\
-          }
+      - name: Prepare API metadata (DocFX requires .dll; project outputs .gha)
+        run: Copy-Item -Path bin\Release\net8.0\Ariadne.gha -Destination bin\Release\net8.0\Ariadne.dll
 
       - name: Install DocFX
         run: dotnet tool install -g docfx

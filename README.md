@@ -1,8 +1,8 @@
 # Ariadne
 
-[![docs: latest](https://img.shields.io/badge/docs-latest-8ca0b4?style=flat-square)](https://adam-t-burke.github.io/Ariadne/)
+[![API reference](https://img.shields.io/badge/API-reference-8ca0b4?style=flat-square)](https://adam-t-burke.github.io/Ariadne/api/)
 
-Ariadne is a Grasshopper plugin for **inverse design of form-found structures** in Rhino 8. It uses the force density method (FDM) and the Theseus solver for directed form-finding of tensile networks. The method is based on Schek (1974); see the [documentation](https://adam-t-burke.github.io/Ariadne/) for theory and optimization details.
+Ariadne is a Grasshopper plugin for **inverse design of form-found structures** in Rhino 8. It uses the force density method (FDM) and the Theseus solver for directed form-finding of tensile networks.
 
 ## Features
 
@@ -24,11 +24,11 @@ Ariadne is a Grasshopper plugin for **inverse design of form-found structures** 
 
 ## Quick start
 
-Define an FDM network (nodes, branches, fixed nodes), set initial force densities and loads, and connect **Theseus Solve**. For equilibrium only, leave the Opt Config input disconnected. For inverse form-finding, connect **Optimization Config** with objectives and bounds. See the [documentation](https://adam-t-burke.github.io/Ariadne/) and [examples](examples/) for step-by-step workflows.
+Define an FDM network (nodes, branches, fixed nodes), set initial force densities and loads, and connect **Theseus Solve**. For equilibrium only, leave the Opt Config input disconnected. For inverse form-finding, connect **Optimization Config** with objectives and bounds.
 
 ## Examples
 
-Example Grasshopper files (`.gh`) are in the [examples](examples/) folder. The [documentation](https://adam-t-burke.github.io/Ariadne/) lists each example with a short description and download link.
+Example Grasshopper files (`.gh`) are in the [examples](examples/) folder.
 
 ## Project structure
 
@@ -40,7 +40,7 @@ Example Grasshopper files (`.gh`) are in the [examples](examples/) folder. The [
 | **Utilities** | Visualization, serialization, tagging, helpers |
 | **Theseus** | FFI and wrapper for the Rust force-density solver |
 
-The [API reference](https://adam-t-burke.github.io/Ariadne/api/) is generated from the C# source.
+The [API reference](https://adam-t-burke.github.io/Ariadne/api/) is generated from the C# source and published at the link above.
 
 ## License
 
