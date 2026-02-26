@@ -14,6 +14,7 @@ on:
       - 'apiFilter.yml'
       - 'README.md'
       - 'Resources/**'
+  workflow_dispatch:
 
 permissions:
   contents: read
