@@ -127,6 +127,18 @@ pub struct TargetPlane {
     pub y_axis: [f64; 3],
 }
 
+/// Planar constraint: pull nodes onto a plane along a given direction. No target positions —
+/// loss is Σ t² where t = n·(O−P)/(n·d) (signed distance along d to the plane).
+#[derive(Debug, Clone)]
+pub struct PlanarConstraintAlongDirection {
+    pub weight: f64,
+    pub node_indices: Vec<usize>,
+    pub origin: [f64; 3],
+    pub x_axis: [f64; 3],
+    pub y_axis: [f64; 3],
+    pub direction: [f64; 3],
+}
+
 #[derive(Debug, Clone)]
 pub struct TargetLength {
     pub weight: f64,

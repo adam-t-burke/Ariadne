@@ -171,6 +171,38 @@ pub(crate) fn grad_target_plane(
     }
 }
 
+/// PlanarConstraintAlongDirection:  L = w Σ t², t = n·(O−P)/(n·d).  dL/dP = −2w t · n / (n·d).
+pub(crate) fn grad_planar_constraint_along_direction(
+    cache: &mut FdmCache,
+    weight: f64,
+    node_indices: &[usize],
+    origin: &[f64; 3],
+    x_axis: &[f64; 3],
+    y_axis: &[f64; 3],
+    direction: &[f64; 3],
+    _free_node_indices: &[usize],
+) {
+    let nx = x_axis[1] * y_axis[2] - x_axis[2] * y_axis[1];
+    let ny = x_axis[2] * y_axis[0] - x_axis[0] * y_axis[2];
+    let nz = x_axis[0] * y_axis[1] - x_axis[1] * y_axis[0];
+    let n_dot_d = nx * direction[0] + ny * direction[1] + nz * direction[2];
+    if n_dot_d.abs() < 1e-12 {
+        return;
+    }
+    let scale = -2.0 * weight / n_dot_d;
+    for &idx in node_indices {
+        if let Some(j) = cache.node_to_free_idx[idx] {
+            let n_dot_op = nx * (origin[0] - cache.nf[[idx, 0]])
+                + ny * (origin[1] - cache.nf[[idx, 1]])
+                + nz * (origin[2] - cache.nf[[idx, 2]]);
+            let t = n_dot_op / n_dot_d;
+            cache.grad_x[[j, 0]] += scale * t * nx;
+            cache.grad_x[[j, 1]] += scale * t * ny;
+            cache.grad_x[[j, 2]] += scale * t * nz;
+        }
+    }
+}
+
 /// TargetLength:  L = w Σ (ℓ_k − t_k)²
 /// dL/dx̂ via chain rule through ℓ_k = ‖ΔN_k‖
 ///   dℓ/dx̂[j,d] = ΔN_k[d] / ℓ_k  ×  (±1 depending on edge orientation)

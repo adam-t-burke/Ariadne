@@ -327,6 +327,15 @@ fn ffi_register_all_objectives() {
         assert_eq!(0, theseus_add_reaction_direction(h, 1.0, anchor_idx.as_ptr(), anchor_idx.len(), dirs_2x3.as_ptr()));
         assert_eq!(0, theseus_add_reaction_direction_magnitude(h, 1.0, anchor_idx.as_ptr(), anchor_idx.len(), dirs_2x3.as_ptr(), mags_2.as_ptr()));
 
+        // PlanarConstraintAlongDirection: plane + direction only (no target array)
+        let origin = [0.0, 0.0, 0.0];
+        let x_axis = [1.0, 0.0, 0.0];
+        let y_axis = [0.0, 1.0, 0.0];
+        let direction = [0.0, 0.0, 1.0];
+        assert_eq!(0, theseus_add_planar_constraint_along_direction(
+            h, 0.5, node_idx.as_ptr(), node_idx.len(),
+            origin.as_ptr(), x_axis.as_ptr(), y_axis.as_ptr(), direction.as_ptr()));
+
         theseus_free(h);
     }
 }

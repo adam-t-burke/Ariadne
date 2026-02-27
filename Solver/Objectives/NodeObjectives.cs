@@ -118,6 +118,68 @@ public sealed class TargetPlaneObjective : NodeObjective
 }
 
 /// <summary>
+/// Planar constraint: pull nodes onto a plane along a given direction. No target positions —
+/// at each step minimizes squared distance (along the direction) from each node to the plane.
+/// When Direction is null, uses the plane normal (orthographic pull onto the plane).
+/// </summary>
+public sealed class PlanarConstraintAlongDirectionObjective : NodeObjective
+{
+    /// <summary>Plane to constrain nodes to; null uses world XY.</summary>
+    public Plane? Plane { get; }
+    /// <summary>Direction along which distance to the plane is measured; null uses plane normal.</summary>
+    public Vector3d? Direction { get; }
+
+    public PlanarConstraintAlongDirectionObjective(double weight, List<Node>? nodes = null, Plane? plane = null, Vector3d? direction = null)
+    {
+        Weight = weight;
+        TargetNodes = nodes;
+        Plane = plane;
+        Direction = direction;
+    }
+
+    public override void ApplyTo(TheseusSolver solver, SolverContext context)
+    {
+        var plane = Plane ?? Rhino.Geometry.Plane.WorldXY;
+        Vector3d dir = Direction ?? plane.ZAxis;
+        double nDotD = Math.Abs(plane.ZAxis.X * dir.X + plane.ZAxis.Y * dir.Y + plane.ZAxis.Z * dir.Z);
+        if (nDotD < 1e-6)
+        {
+            IsValid = false;
+            return;
+        }
+
+        int[] indices = context.ResolveNodeIndices(TargetNodes);
+        double[] origin = { plane.Origin.X, plane.Origin.Y, plane.Origin.Z };
+        double[] xAxis = { plane.XAxis.X, plane.XAxis.Y, plane.XAxis.Z };
+        double[] yAxis = { plane.YAxis.X, plane.YAxis.Y, plane.YAxis.Z };
+        double[] directionArr = { dir.X, dir.Y, dir.Z };
+
+        solver.AddPlanarConstraintAlongDirection(Weight, indices, origin, xAxis, yAxis, directionArr);
+    }
+
+    public override int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(base.GetContentHashCode());
+        if (Plane is { } p)
+        {
+            h.Add(p.Origin.X); h.Add(p.Origin.Y); h.Add(p.Origin.Z);
+            h.Add(p.XAxis.X); h.Add(p.XAxis.Y); h.Add(p.XAxis.Z);
+            h.Add(p.YAxis.X); h.Add(p.YAxis.Y); h.Add(p.YAxis.Z);
+        }
+        else
+            h.Add(0);
+        if (Direction is { } d)
+        {
+            h.Add(d.X); h.Add(d.Y); h.Add(d.Z);
+        }
+        else
+            h.Add(0);
+        return h.ToHashCode();
+    }
+}
+
+/// <summary>
 /// Maintain relative distances within a point set (rigid body constraint).
 /// </summary>
 public sealed class RigidPointSetObjective : NodeObjective

@@ -54,6 +54,12 @@ internal static class TheseusInterop
         double[] origin, double[] x_axis, double[] y_axis);
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_add_planar_constraint_along_direction(
+        IntPtr handle, double weight,
+        nuint[] node_indices, nuint num_nodes,
+        double[] origin, double[] x_axis, double[] y_axis, double[] direction);
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
     public static extern int theseus_add_target_length(
         IntPtr handle, double weight,
         nuint[] edge_indices, nuint num_edges,

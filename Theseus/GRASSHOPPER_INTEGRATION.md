@@ -205,6 +205,8 @@ var result = solver.OptimizeConstrained(
 |--------|-----------|-------------|
 | `AddTargetXyz` | TargetXYZ | Minimize 3D distance to target positions |
 | `AddTargetXy` | TargetXY | Minimize 2D (XY) distance to target positions |
+| `AddTargetPlane` | TargetPlane | Minimize (u,v) distance to target positions on a plane |
+| `AddPlanarConstraintAlongDirection` | PlanarConstraintAlongDirection | Planar constraint: pull nodes onto a plane along a direction; no target positions |
 | `AddTargetLength` | TargetLength | Minimize difference from target edge lengths |
 | `AddLengthVariation` | LengthVariation | Minimize range of edge lengths |
 | `AddForceVariation` | ForceVariation | Minimize range of member forces |

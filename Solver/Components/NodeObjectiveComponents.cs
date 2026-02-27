@@ -131,6 +131,58 @@ public class TargetPlaneComponent : GH_Component
 }
 
 /// <summary>
+/// Planar constraint: pull nodes onto a plane along a direction. No target positions —
+/// minimizes distance (along the direction) from each node to the plane. Default direction is the plane normal.
+/// </summary>
+public class ProjectToPlaneComponent : GH_Component
+{
+    public ProjectToPlaneComponent()
+        : base("Project to Plane", "ProjPlane",
+            "Pull nodes onto a plane along a direction (default: plane normal). No target positions.",
+            "Ariadne", "Objectives")
+    { }
+
+    protected override void RegisterInputParams(GH_InputParamManager pManager)
+    {
+        pManager.AddGenericParameter("Nodes", "Nodes", "Nodes to constrain (optional)", GH_ParamAccess.list);
+        pManager.AddPlaneParameter("Plane", "P", "Plane to project onto (default: World XY)", GH_ParamAccess.item);
+        pManager.AddVectorParameter("Direction", "D", "Projection direction (default: plane normal)", GH_ParamAccess.item);
+        pManager.AddNumberParameter("Weight", "Weight", "Objective weight", GH_ParamAccess.item, 1.0);
+        pManager[0].Optional = true;
+        pManager[1].Optional = true;
+        pManager[2].Optional = true;
+    }
+
+    protected override void RegisterOutputParams(GH_OutputParamManager pManager)
+    {
+        pManager.AddGenericParameter("Objective", "OBJ", "Project to Plane Objective", GH_ParamAccess.item);
+    }
+
+    protected override void SolveInstance(IGH_DataAccess DA)
+    {
+        List<Node> nodes = [];
+        Plane plane = Plane.WorldXY;
+        Vector3d dir = default;
+        double weight = 1.0;
+
+        DA.GetDataList(0, nodes);
+        bool hasPlane = DA.GetData(1, ref plane);
+        bool hasDir = DA.GetData(2, ref dir) && dir.Length > 1e-10;
+        DA.GetData(3, ref weight);
+
+        Vector3d? directionOpt = hasDir ? dir : null;
+        Plane? planeOpt = hasPlane ? plane : null;
+        var objective = new PlanarConstraintAlongDirectionObjective(weight, nodes.Count > 0 ? nodes : null, planeOpt, directionOpt);
+        if (!objective.IsValid)
+            AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, "Direction is parallel to plane; objective will be skipped.");
+        DA.SetData(0, objective);
+    }
+
+    protected override Bitmap Icon => Properties.Resources.Project_Nodes_To_Plane;
+    public override Guid ComponentGuid => new("F8E9B0A1-D2C3-4E5F-6A7B-8C9D0E1F2B4C");
+}
+
+/// <summary>
 /// Maintain relative distances within a point set (rigid body).
 /// </summary>
 public class RigidPointSetComponent : GH_Component

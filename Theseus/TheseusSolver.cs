@@ -121,6 +121,22 @@ public sealed class TheseusSolver : IDisposable
             targetXyz, origin, xAxis, yAxis));
     }
 
+    public void AddPlanarConstraintAlongDirection(double weight, int[] nodeIndices, double[] origin, double[] xAxis, double[] yAxis, double[] direction)
+    {
+        ThrowIfDisposed();
+        if (origin == null || origin.Length != 3)
+            throw new ArgumentException("origin must have length 3.", nameof(origin));
+        if (xAxis == null || xAxis.Length != 3)
+            throw new ArgumentException("xAxis must have length 3.", nameof(xAxis));
+        if (yAxis == null || yAxis.Length != 3)
+            throw new ArgumentException("yAxis must have length 3.", nameof(yAxis));
+        if (direction == null || direction.Length != 3)
+            throw new ArgumentException("direction must have length 3.", nameof(direction));
+        Check(TheseusInterop.theseus_add_planar_constraint_along_direction(
+            _handle, weight, ToNuint(nodeIndices), (nuint)nodeIndices.Length,
+            origin, xAxis, yAxis, direction));
+    }
+
     public void AddTargetLength(double weight, int[] edgeIndices, double[] targets)
     {
         ThrowIfDisposed();

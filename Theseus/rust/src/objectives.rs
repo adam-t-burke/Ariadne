@@ -6,7 +6,7 @@
 
 use crate::types::{
     GeometrySnapshot, ObjectiveTrait, FdmCache, Problem,
-    TargetXYZ, TargetXY, TargetPlane, TargetLength, LengthVariation, ForceVariation,
+    TargetXYZ, TargetXY, TargetPlane, PlanarConstraintAlongDirection, TargetLength, LengthVariation, ForceVariation,
     SumForceLength, MinLength, MaxLength, MinForce, MaxForce,
     RigidSetCompare, ReactionDirection, ReactionDirectionMagnitude,
 };
@@ -143,6 +143,34 @@ fn target_plane_loss(
         let du = u_p - u_t;
         let dv = v_p - v_t;
         loss += du * du + dv * dv;
+    }
+    loss
+}
+
+/// PlanarConstraintAlongDirection:  Σ_i t_i²  where t = n·(O−P)/(n·d).
+/// Skip nodes where n·d is near zero to avoid division blow-up.
+fn planar_constraint_along_direction_loss(
+    xyz: &Array2<f64>,
+    node_indices: &[usize],
+    origin: &[f64; 3],
+    x_axis: &[f64; 3],
+    y_axis: &[f64; 3],
+    direction: &[f64; 3],
+) -> f64 {
+    let nx = x_axis[1] * y_axis[2] - x_axis[2] * y_axis[1];
+    let ny = x_axis[2] * y_axis[0] - x_axis[0] * y_axis[2];
+    let nz = x_axis[0] * y_axis[1] - x_axis[1] * y_axis[0];
+    let n_dot_d = nx * direction[0] + ny * direction[1] + nz * direction[2];
+    if n_dot_d.abs() < 1e-12 {
+        return 0.0;
+    }
+    let mut loss = 0.0;
+    for &idx in node_indices {
+        let n_dot_op = nx * (origin[0] - xyz[[idx, 0]])
+            + ny * (origin[1] - xyz[[idx, 1]])
+            + nz * (origin[2] - xyz[[idx, 2]]);
+        let t = n_dot_op / n_dot_d;
+        loss += t * t;
     }
     loss
 }
@@ -344,6 +372,34 @@ impl ObjectiveTrait for TargetPlane {
             &self.origin,
             &self.x_axis,
             &self.y_axis,
+            &problem.topology.free_node_indices,
+        );
+    }
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+}
+
+impl ObjectiveTrait for PlanarConstraintAlongDirection {
+    fn loss(&self, snap: &GeometrySnapshot) -> f64 {
+        self.weight * planar_constraint_along_direction_loss(
+            snap.xyz_full,
+            &self.node_indices,
+            &self.origin,
+            &self.x_axis,
+            &self.y_axis,
+            &self.direction,
+        )
+    }
+    fn accumulate_gradient(&self, cache: &mut FdmCache, problem: &Problem) {
+        gradients::grad_planar_constraint_along_direction(
+            cache,
+            self.weight,
+            &self.node_indices,
+            &self.origin,
+            &self.x_axis,
+            &self.y_axis,
+            &self.direction,
             &problem.topology.free_node_indices,
         );
     }

@@ -407,6 +407,44 @@ pub unsafe extern "C" fn theseus_add_target_plane(
     }))
 }
 
+/// Add a PlanarConstraintAlongDirection objective (pull nodes onto a plane along a direction).
+///
+/// No target positions — minimizes squared distance along `direction` to the plane.
+/// `origin`, `x_axis`, `y_axis`, `direction` are 3-element arrays in world coordinates.
+/// Direction must not be parallel to the plane (n·d ≠ 0).
+///
+/// # Safety
+/// Valid handle and arrays; origin/x_axis/y_axis/direction must each point to 3 doubles.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_add_planar_constraint_along_direction(
+    handle: *mut TheseusHandle,
+    weight: f64,
+    node_indices: *const usize,
+    num_nodes: usize,
+    origin: *const f64,
+    x_axis: *const f64,
+    y_axis: *const f64,
+    direction: *const f64,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let h = &mut *handle;
+        let idx = slice::from_raw_parts(node_indices, num_nodes).to_vec();
+        let origin_arr: [f64; 3] = [*origin.add(0), *origin.add(1), *origin.add(2)];
+        let x_axis_arr: [f64; 3] = [*x_axis.add(0), *x_axis.add(1), *x_axis.add(2)];
+        let y_axis_arr: [f64; 3] = [*y_axis.add(0), *y_axis.add(1), *y_axis.add(2)];
+        let direction_arr: [f64; 3] = [*direction.add(0), *direction.add(1), *direction.add(2)];
+        h.problem.objectives.push(Box::new(PlanarConstraintAlongDirection {
+            weight,
+            node_indices: idx,
+            origin: origin_arr,
+            x_axis: x_axis_arr,
+            y_axis: y_axis_arr,
+            direction: direction_arr,
+        }));
+        Ok(())
+    }))
+}
+
 /// Add a LengthVariation objective (minimise range of edge lengths).
 ///
 /// # Safety
