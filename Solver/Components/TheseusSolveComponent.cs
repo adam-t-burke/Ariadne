@@ -61,9 +61,11 @@ public class TheseusSolveComponent : GH_Component
         pManager.AddGenericParameter("Network", "Network", "FDM Network to solve", GH_ParamAccess.item);
         pManager.AddNumberParameter("Force Densities", "q", "Initial force densities", GH_ParamAccess.list, 10.0);
         pManager.AddVectorParameter("Loads", "Loads", "Loads on free nodes", GH_ParamAccess.list, new Vector3d(0, 0, -1));
+        pManager.AddPointParameter("Load Nodes", "LN", "Nodes to apply loads to (optional; if empty, loads apply to all free nodes)", GH_ParamAccess.list);
         pManager.AddGenericParameter("Opt Config", "OptConfig", "Optimization configuration (optional, connect for optimization)", GH_ParamAccess.item);
 
         pManager[3].Optional = true;
+        pManager[4].Optional = true;
     }
 
     protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -86,6 +88,7 @@ public class TheseusSolveComponent : GH_Component
         FDM_Network? network = null;
         List<double> q = [];
         List<Vector3d> loads = [];
+        List<Point3d> loadNodes = [];
         OptimizationConfig? config = null;
 
         if (_state != SolverState.Done)
@@ -93,7 +96,8 @@ public class TheseusSolveComponent : GH_Component
             if (!DA.GetData(0, ref network)) return;
             DA.GetDataList(1, q);
             DA.GetDataList(2, loads);
-            DA.GetData(3, ref config);
+            DA.GetDataList(3, loadNodes);
+            DA.GetData(4, ref config);
 
             if (network == null || !network.Valid)
             {
@@ -127,7 +131,7 @@ public class TheseusSolveComponent : GH_Component
                 Message = "";
             }
             _lastWasOptimization = false;
-            var snap = new SolveSnapshot(network!, q.AsReadOnly(), loads.AsReadOnly(), null);
+            var snap = new SolveSnapshot(network!, q.AsReadOnly(), loads.AsReadOnly(), loadNodes.AsReadOnly(), null);
             var result = RunSolve(snap, null);
             _cachedResult = result;
             OutputResult(DA, result);
@@ -138,14 +142,14 @@ public class TheseusSolveComponent : GH_Component
         if (_state == SolverState.Running)
         {
             bool newTrigger = _triggerGeneration != _consumedGeneration;
-            int inputHash = ComputeInputHash(network!, q, loads, config);
+            int inputHash = ComputeInputHash(network!, q, loads, loadNodes, config);
             bool inputsChanged = inputHash != _lastInputHash;
 
             if (newTrigger || (currentRun && inputsChanged))
             {
                 _consumedGeneration = _triggerGeneration;
                 _lastInputHash = inputHash;
-                StartOptimization(network!, q, loads, config);
+                StartOptimization(network!, q, loads, loadNodes, config);
             }
 
             OutputIntermediateOrCached(DA);
@@ -166,7 +170,7 @@ public class TheseusSolveComponent : GH_Component
             AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
                 "No objectives provided. Falling back to forward solve.");
             _lastWasOptimization = false;
-            var snap = new SolveSnapshot(network!, q.AsReadOnly(), loads.AsReadOnly(), null);
+            var snap = new SolveSnapshot(network!, q.AsReadOnly(), loads.AsReadOnly(), loadNodes.AsReadOnly(), null);
             var result = RunSolve(snap, null);
             _cachedResult = result;
             OutputResult(DA, result);
@@ -175,7 +179,7 @@ public class TheseusSolveComponent : GH_Component
 
         if (_triggerGeneration == _consumedGeneration)
         {
-            int inputHash = ComputeInputHash(network!, q, loads, config);
+            int inputHash = ComputeInputHash(network!, q, loads, loadNodes, config);
             if (inputHash == _lastInputHash)
             {
                 if (_cachedResult != null)
@@ -187,18 +191,18 @@ public class TheseusSolveComponent : GH_Component
         else
         {
             _consumedGeneration = _triggerGeneration;
-            _lastInputHash = ComputeInputHash(network!, q, loads, config);
+            _lastInputHash = ComputeInputHash(network!, q, loads, loadNodes, config);
         }
 
         // ── Start background optimization ────────────────────────
-        StartOptimization(network!, q, loads, config);
+        StartOptimization(network!, q, loads, loadNodes, config);
         OutputIntermediateOrCached(DA);
     }
 
     // ── Async optimization lifecycle ─────────────────────────────────
 
     private void StartOptimization(
-        FDM_Network network, List<double> q, List<Vector3d> loads, OptimizationConfig config)
+        FDM_Network network, List<double> q, List<Vector3d> loads, List<Point3d> loadNodes, OptimizationConfig config)
     {
         CancelAndDisposeCts();
         _expirePending = false;
@@ -224,7 +228,7 @@ public class TheseusSolveComponent : GH_Component
             return true;
         };
 
-        var snap = new SolveSnapshot(network, q.AsReadOnly(), loads.AsReadOnly(), config);
+        var snap = new SolveSnapshot(network, q.AsReadOnly(), loads.AsReadOnly(), loadNodes.AsReadOnly(), config);
 
         _state = SolverState.Running;
         Message = "Solving...";
@@ -369,12 +373,13 @@ public class TheseusSolveComponent : GH_Component
     }
 
     private static int ComputeInputHash(
-        FDM_Network network, List<double> q, List<Vector3d> loads, OptimizationConfig config)
+        FDM_Network network, List<double> q, List<Vector3d> loads, List<Point3d> loadNodes, OptimizationConfig config)
     {
         var hash = new HashCode();
         hash.Add(RuntimeHelpers.GetHashCode(network));
         foreach (var v in q) hash.Add(v);
         foreach (var l in loads) { hash.Add(l.X); hash.Add(l.Y); hash.Add(l.Z); }
+        foreach (var ln in loadNodes) { hash.Add(ln.X); hash.Add(ln.Y); hash.Add(ln.Z); }
         hash.Add(config.MaxIterations);
         hash.Add(config.AbsTol);
         hash.Add(config.RelTol);
@@ -407,12 +412,17 @@ public class TheseusSolveComponent : GH_Component
 
     private static SolveResult RunSolve(SolveSnapshot snap, Func<int, double, double[], double[], bool>? callback)
     {
+        var loadNodeIndices = snap.LoadNodes.Count > 0
+            ? TheseusSolverService.ResolveLoadNodeIndices(snap.Network, snap.LoadNodes)
+            : null;
+
         if (snap.Config is { } cfg && cfg.Objectives.Count > 0)
         {
             var inputs = new SolverInputs
             {
                 QInit = snap.Q.ToList(),
                 Loads = snap.Loads.ToList(),
+                LoadNodeIndices = loadNodeIndices,
                 LowerBounds = cfg.LowerBounds.ToList(),
                 UpperBounds = cfg.UpperBounds.ToList(),
                 Objectives = cfg.Objectives.ToList(),
@@ -433,6 +443,7 @@ public class TheseusSolveComponent : GH_Component
         {
             QInit = snap.Q.ToList(),
             Loads = snap.Loads.ToList(),
+            LoadNodeIndices = loadNodeIndices,
         };
         return TheseusSolverService.SolveForward(snap.Network, fwdInputs);
     }
@@ -473,4 +484,5 @@ internal sealed record SolveSnapshot(
     FDM_Network Network,
     IReadOnlyList<double> Q,
     IReadOnlyList<Vector3d> Loads,
+    IReadOnlyList<Point3d> LoadNodes,
     OptimizationConfig? Config);

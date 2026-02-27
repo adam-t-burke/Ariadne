@@ -86,6 +86,43 @@ public static class TheseusSolverService
         return BuildResult(network, result, context);
     }
 
+    /// <summary>
+    /// Resolves a list of load-node positions to their indices in the network's
+    /// free-node list (0-based). Matches by proximity using the network's ATol.
+    /// </summary>
+    /// <returns>List of free-node indices corresponding to each input point.</returns>
+    /// <exception cref="ArgumentException">Thrown when a point doesn't match any free node.</exception>
+    public static List<int> ResolveLoadNodeIndices(FDM_Network network, IReadOnlyList<Point3d> loadNodePoints)
+    {
+        var indices = new List<int>(loadNodePoints.Count);
+        double tol = network.ATol;
+
+        for (int p = 0; p < loadNodePoints.Count; p++)
+        {
+            var pt = loadNodePoints[p];
+            int bestIdx = -1;
+            double bestDist = double.MaxValue;
+
+            for (int i = 0; i < network.Free.Count; i++)
+            {
+                double dist = pt.DistanceTo(network.Free[i].Value);
+                if (dist < bestDist)
+                {
+                    bestDist = dist;
+                    bestIdx = i;
+                }
+            }
+
+            if (bestIdx < 0 || bestDist > tol)
+                throw new ArgumentException(
+                    $"Load node at ({pt.X:G4}, {pt.Y:G4}, {pt.Z:G4}) does not match any free node within tolerance {tol}.");
+
+            indices.Add(bestIdx);
+        }
+
+        return indices;
+    }
+
     #region Validation
 
     private static void ValidateCommon(FDM_Network network, SolverInputs inputs)
@@ -157,12 +194,31 @@ public static class TheseusSolverService
         }
 
         double[] loads = new double[numFree * 3];
-        for (int i = 0; i < numFree; i++)
+        if (inputs.LoadNodeIndices is { Count: > 0 } targetIndices)
         {
-            var load = i < inputs.Loads.Count ? inputs.Loads[i] : inputs.Loads[^1];
-            loads[i * 3 + 0] = load.X;
-            loads[i * 3 + 1] = load.Y;
-            loads[i * 3 + 2] = load.Z;
+            if (inputs.Loads.Count != 1 && inputs.Loads.Count != targetIndices.Count)
+                throw new ArgumentException(
+                    $"When load nodes are specified ({targetIndices.Count}), " +
+                    $"provide either 1 load or exactly {targetIndices.Count} loads (got {inputs.Loads.Count}).");
+
+            for (int i = 0; i < targetIndices.Count; i++)
+            {
+                int freeIdx = targetIndices[i];
+                var load = inputs.Loads.Count == 1 ? inputs.Loads[0] : inputs.Loads[i];
+                loads[freeIdx * 3 + 0] = load.X;
+                loads[freeIdx * 3 + 1] = load.Y;
+                loads[freeIdx * 3 + 2] = load.Z;
+            }
+        }
+        else
+        {
+            for (int i = 0; i < numFree; i++)
+            {
+                var load = i < inputs.Loads.Count ? inputs.Loads[i] : inputs.Loads[^1];
+                loads[i * 3 + 0] = load.X;
+                loads[i * 3 + 1] = load.Y;
+                loads[i * 3 + 2] = load.Z;
+            }
         }
 
         double[] fixedPos = new double[numFixed * 3];

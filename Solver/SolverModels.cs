@@ -64,6 +64,8 @@ public sealed record SolverInputs
     public required List<double> QInit { get; init; }
     /// <summary>Load vectors on free nodes (one per free node).</summary>
     public required List<Vector3d> Loads { get; init; }
+    /// <summary>Indices into the free-node list that should receive loads (null = all free nodes).</summary>
+    public List<int>? LoadNodeIndices { get; init; }
     /// <summary>Lower bounds on q (null = forward-only).</summary>
     public List<double>? LowerBounds { get; init; }
     /// <summary>Upper bounds on q (null = forward-only).</summary>
