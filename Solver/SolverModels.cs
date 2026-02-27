@@ -16,10 +16,6 @@ public sealed record SolverOptions
     public double AbsTol { get; init; } = 1e-6;
     /// <summary>Relative convergence tolerance.</summary>
     public double RelTol { get; init; } = 1e-6;
-    /// <summary>Barrier function weight for bound constraints.</summary>
-    public double BarrierWeight { get; init; } = 10.0;
-    /// <summary>Barrier function sharpness.</summary>
-    public double BarrierSharpness { get; init; } = 10.0;
     /// <summary>Invoke progress callback every N evaluations (0 = every evaluation).</summary>
     public int ReportFrequency { get; init; } = 10;
 }
@@ -42,10 +38,6 @@ public sealed record OptimizationConfig
     public double AbsTol { get; init; } = 1e-6;
     /// <summary>Relative convergence tolerance.</summary>
     public double RelTol { get; init; } = 1e-6;
-    /// <summary>Barrier function weight.</summary>
-    public double BarrierWeight { get; init; } = 10.0;
-    /// <summary>Barrier function sharpness.</summary>
-    public double BarrierSharpness { get; init; } = 10.0;
     /// <summary>Progress callback frequency (evaluations between callbacks).</summary>
     public int ReportFrequency { get; init; } = 10;
     /// <summary>When true, optimization runs (e.g. from a button or toggle).</summary>
@@ -91,6 +83,8 @@ public sealed record SolveResult
     public required int Iterations { get; init; }
     /// <summary>True if the optimizer converged (or N/A for forward-only).</summary>
     public required bool Converged { get; init; }
+    /// <summary>Why the optimizer stopped (e.g. "Converged", "LineSearchFailure", "MaxIter").</summary>
+    public string TerminationReason { get; init; } = "";
 
     /// <summary>
     /// Node positions as Point3d list (convenience accessor).

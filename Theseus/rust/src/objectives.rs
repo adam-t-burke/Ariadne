@@ -46,49 +46,6 @@ pub fn softplus_grad(x: f64, b: f64, k: f64) -> f64 {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  Bound penalties  (barrier on the packed θ vector)
-// ─────────────────────────────────────────────────────────────
-
-/// Smooth barrier loss for lower and upper bounds on θ.
-pub fn bounds_penalty(theta: &[f64], lb: &[f64], ub: &[f64], lb_idx: &[usize], ub_idx: &[usize], sharpness: f64) -> f64 {
-    let mut loss = 0.0;
-    for &i in lb_idx {
-        if lb[i].is_finite() {
-            loss += softplus(theta[i], lb[i], -sharpness);
-        }
-    }
-    for &i in ub_idx {
-        if ub[i].is_finite() {
-            loss += softplus(theta[i], ub[i], sharpness);
-        }
-    }
-    loss
-}
-
-/// Gradient of `bounds_penalty` w.r.t. θ.  Accumulates into `grad`.
-pub fn bounds_penalty_grad(
-    grad: &mut [f64],
-    theta: &[f64],
-    lb: &[f64],
-    ub: &[f64],
-    lb_idx: &[usize],
-    ub_idx: &[usize],
-    sharpness: f64,
-    barrier_weight: f64,
-) {
-    for &i in lb_idx {
-        if lb[i].is_finite() {
-            grad[i] += barrier_weight * softplus_grad(theta[i], lb[i], -sharpness);
-        }
-    }
-    for &i in ub_idx {
-        if ub[i].is_finite() {
-            grad[i] += barrier_weight * softplus_grad(theta[i], ub[i], sharpness);
-        }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────
 //  Individual objective losses
 // ─────────────────────────────────────────────────────────────
 

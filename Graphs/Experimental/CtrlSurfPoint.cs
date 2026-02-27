@@ -19,19 +19,19 @@ namespace Ariadne.GH_Design.Experimental
     /// </summary>
     public class CtrlSurfPoint : GH_Component
     {
-        private FDM_Network network;
-        private List<Point3d> inputPoints;
-        private NurbsSurface surf;
-        private NurbsSurface offsetSurf;
-        private List<Point3d> points;
-        private List<Point3d> offsetPoints;
-        private List<string> names;
-        private List<double> zvalues;
-        private List<double> values;
+        private FDM_Network network = null!;
+        private List<Point3d> inputPoints = null!;
+        private NurbsSurface surf = null!;
+        private NurbsSurface offsetSurf = null!;
+        private List<Point3d> points = null!;
+        private List<Point3d> offsetPoints = null!;
+        private List<string> names = null!;
+        private List<double> zvalues = null!;
+        private List<double> values = null!;
         private BoundingBox bb;
         private double height;
         private double baseline;
-        private GH_Document ghd;
+        private GH_Document ghd = null!;
         private int ctrlidx = 7;
         private int u;
         private int v;
@@ -235,7 +235,6 @@ namespace Ariadne.GH_Design.Experimental
         /// <summary>
         /// get bounding box
         /// </summary>
-        /// <param name="points"></param>
         private void GetBB()
         {
             var pointlist = new Point3dList(inputPoints);

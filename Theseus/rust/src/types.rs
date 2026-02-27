@@ -22,7 +22,7 @@ pub enum TheseusError {
     SparsityMismatch { edge: usize, row: usize, col: usize },
     /// The factorization has not been computed yet.
     MissingFactorization,
-    /// Argmin solver returned an error.
+    /// Optimization solver returned an error.
     Solver(String),
     /// Shape mismatch in input data.
     Shape(String),
@@ -59,18 +59,6 @@ impl From<sprs::errors::LinalgError> for TheseusError {
         Self::Linalg(e)
     }
 }
-
-impl From<argmin::core::Error> for TheseusError {
-    fn from(e: argmin::core::Error) -> Self {
-        Self::Solver(e.to_string())
-    }
-}
-
-// ─────────────────────────────────────────────────────────────
-//  Constants
-// ─────────────────────────────────────────────────────────────
-
-pub const DEFAULT_BARRIER_SHARPNESS: f64 = 10.0;
 
 // ─────────────────────────────────────────────────────────────
 //  Objective trait  (extensible — implement for custom objectives)
@@ -237,8 +225,6 @@ pub struct SolverOptions {
     pub relative_tolerance: f64,
     pub max_iterations: usize,
     pub report_frequency: usize,
-    pub barrier_weight: f64,
-    pub barrier_sharpness: f64,
 }
 
 impl Default for SolverOptions {
@@ -248,12 +234,9 @@ impl Default for SolverOptions {
             relative_tolerance: 1e-6,
             max_iterations: 500,
             report_frequency: 1,
-            barrier_weight: 10.0,
-            barrier_sharpness: DEFAULT_BARRIER_SHARPNESS,
         }
     }
 }
-
 
 // ─────────────────────────────────────────────────────────────
 //  Network topology

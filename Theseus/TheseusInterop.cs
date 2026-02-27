@@ -5,8 +5,7 @@ namespace Theseus.Interop;
 
 /// <summary>
 /// Raw P/Invoke declarations for theseus.dll.
-///
-// / Every function here maps 1:1 to an <c>extern "C"</c> symbol
+/// Every function here maps 1:1 to an <c>extern "C"</c> symbol
 /// in <c>rust/src/ffi.rs</c>.  Prefer the managed <see cref="TheseusSolver"/>
 /// wrapper for production use.
 /// </summary>
@@ -123,8 +122,7 @@ internal static class TheseusInterop
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
     public static extern int theseus_set_solver_options(
         IntPtr handle,
-        nuint max_iterations, double abs_tol, double rel_tol,
-        double barrier_weight, double barrier_sharpness);
+        nuint max_iterations, double abs_tol, double rel_tol);
 
     // ── Progress callback ────────────────────────────────────
 
@@ -147,6 +145,12 @@ internal static class TheseusInterop
         double[] out_xyz, double[] out_lengths, double[] out_forces,
         double[] out_q, double[] out_reactions,
         ref nuint out_iterations, ref byte out_converged);
+
+    // ── Termination diagnostics ────────────────────────────────
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_termination_reason(
+        IntPtr handle, byte[] buf, nuint buf_len);
 
     // ── Forward solve ────────────────────────────────────────
 

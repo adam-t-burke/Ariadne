@@ -25,18 +25,18 @@ namespace Ariadne.Utilities
         System.Drawing.Color c0;
         System.Drawing.Color cmed;
         System.Drawing.Color c1;
-        GH_Gradient grad;
+        GH_Gradient grad = null!;
         int prop;
-        FDM_Network network;
-        string layer;
+        FDM_Network network = null!;
+        string layer = null!;
         int layeridx;
         BoundingBox bb;
 
-        RhinoDoc doc;
+        RhinoDoc doc = null!;
         Vector3d offset;
         Vector3d fulloffset;
 
-        List<ObjectAttributes> attribs;
+        List<ObjectAttributes> attribs = null!;
 
         //default colours
         readonly System.Drawing.Color lightgray = System.Drawing.Color.FromArgb(230, 231, 232);
@@ -69,10 +69,12 @@ namespace Ariadne.Utilities
             pManager.AddBooleanParameter("Bake", "Bake", "Bake geometry", GH_ParamAccess.item, false);
             pManager.AddVectorParameter("BakeOffset", "Offset", "Additional offset of baked geometry (defaults to 1.5x bounding box to left", GH_ParamAccess.item, new Vector3d(0, 0, 0));
 
-            Param_Integer param = pManager[5] as Param_Integer;
-            param.AddNamedValue("None", -1);
-            param.AddNamedValue("Force", 0);
-            param.AddNamedValue("Q", 1);
+            if (pManager[5] is Param_Integer param)
+            {
+                param.AddNamedValue("None", -1);
+                param.AddNamedValue("Force", 0);
+                param.AddNamedValue("Q", 1);
+            }
         }
 
         /// <summary>

@@ -149,11 +149,11 @@ fn make_arch_problem(bounds: Bounds, objectives: Vec<Box<dyn ObjectiveTrait>>) -
 
 /// Evaluate loss-only at θ (without gradient — fresh cache each call so the
 /// Factorization is clean).
-fn eval_loss(problem: &Problem, theta: &[f64], lb: &[f64], ub: &[f64], lb_idx: &[usize], ub_idx: &[usize]) -> f64 {
+fn eval_loss(problem: &Problem, theta: &[f64]) -> f64 {
     let mut cache = FdmCache::new(problem).unwrap();
     let mut grad = vec![0.0; theta.len()];
     theseus::gradients::value_and_gradient(
-        &mut cache, problem, theta, &mut grad, lb, ub, lb_idx, ub_idx,
+        &mut cache, problem, theta, &mut grad,
     ).unwrap()
 }
 
@@ -170,27 +170,11 @@ fn fd_gradient_check(
     let ne = problem.topology.num_edges;
     let n = theta.len();
 
-    // Bound arrays (for barrier — use wide bounds so barrier is negligible)
-    let lb: Vec<f64> = problem.bounds.lower.iter()
-        .chain(std::iter::repeat(&f64::NEG_INFINITY).take(n - ne))
-        .take(n)
-        .copied()
-        .collect();
-    let ub: Vec<f64> = problem.bounds.upper.iter()
-        .chain(std::iter::repeat(&f64::INFINITY).take(n - ne))
-        .take(n)
-        .copied()
-        .collect();
-
-    // For bounds penalty we need to pass the relevant indices
-    let lb_idx: Vec<usize> = (0..ne).filter(|&i| lb[i].is_finite()).collect();
-    let ub_idx: Vec<usize> = (0..ne).filter(|&i| ub[i].is_finite()).collect();
-
     // Analytic gradient
     let mut cache = FdmCache::new(problem).unwrap();
     let mut grad_analytic = vec![0.0; n];
     let _loss = theseus::gradients::value_and_gradient(
-        &mut cache, problem, theta, &mut grad_analytic, &lb, &ub, &lb_idx, &ub_idx,
+        &mut cache, problem, theta, &mut grad_analytic,
     ).unwrap();
 
     // FD gradient
@@ -202,8 +186,8 @@ fn fd_gradient_check(
         theta_plus[i] = theta[i] + h;
         theta_minus[i] = theta[i] - h;
 
-        let f_plus = eval_loss(problem, &theta_plus, &lb, &ub, &lb_idx, &ub_idx);
-        let f_minus = eval_loss(problem, &theta_minus, &lb, &ub, &lb_idx, &ub_idx);
+        let f_plus = eval_loss(problem, &theta_plus);
+        let f_minus = eval_loss(problem, &theta_minus);
 
         grad_fd[i] = (f_plus - f_minus) / (2.0 * h);
 
@@ -765,28 +749,16 @@ fn cholesky_ldl_consistency() {
     );
 
     // Evaluate both
-    let lb_chol = problem_chol.bounds.lower.clone();
-    let ub_chol = problem_chol.bounds.upper.clone();
-    let lb_idx_chol: Vec<usize> = (0..ne).filter(|&i| lb_chol[i].is_finite()).collect();
-    let ub_idx_chol: Vec<usize> = (0..ne).filter(|&i| ub_chol[i].is_finite()).collect();
-
-    let lb_ldl = problem_ldl.bounds.lower.clone();
-    let ub_ldl = problem_ldl.bounds.upper.clone();
-    let lb_idx_ldl: Vec<usize> = (0..ne).filter(|&i| lb_ldl[i].is_finite()).collect();
-    let ub_idx_ldl: Vec<usize> = (0..ne).filter(|&i| ub_ldl[i].is_finite()).collect();
-
     let mut cache_chol = FdmCache::new(&problem_chol).unwrap();
     let mut grad_chol = vec![0.0; ne];
     let _loss_chol = theseus::gradients::value_and_gradient(
         &mut cache_chol, &problem_chol, &theta, &mut grad_chol,
-        &lb_chol, &ub_chol, &lb_idx_chol, &ub_idx_chol,
     ).unwrap();
 
     let mut cache_ldl = FdmCache::new(&problem_ldl).unwrap();
     let mut grad_ldl = vec![0.0; ne];
     let _loss_ldl = theseus::gradients::value_and_gradient(
         &mut cache_ldl, &problem_ldl, &theta, &mut grad_ldl,
-        &lb_ldl, &ub_ldl, &lb_idx_ldl, &ub_idx_ldl,
     ).unwrap();
 
     // Positions should match (same q, same network)

@@ -18,21 +18,21 @@ namespace Ariadne.GH_Design.Experimental
     /// </summary>
     public class CtrlSurfEdge : GH_Component
     {
-        private List<Curve> curves;
-        private NurbsSurface surf;
-        private NurbsSurface offsetSurf;
-        private List<Point3d> points;
-        private List<Point3d> offsetPoints;
+        private List<Curve> curves = null!;
+        private NurbsSurface surf = null!;
+        private NurbsSurface offsetSurf = null!;
+        private List<Point3d> points = null!;
+        private List<Point3d> offsetPoints = null!;
 
-        private List<string> names;
-        private List<double> zvalues;
-        private List<double> values;
+        private List<string> names = null!;
+        private List<double> zvalues = null!;
+        private List<double> values = null!;
 
         private BoundingBox bb;
         private double height;
         private double baseline;
 
-        private GH_Document ghd;
+        private GH_Document ghd = null!;
         private int ctrlidx = 7;
         private int u;
         private int v;
@@ -254,7 +254,6 @@ namespace Ariadne.GH_Design.Experimental
         /// <summary>
         /// get bounding box
         /// </summary>
-        /// <param name="curves"></param>
         private void GetBB()
         {
             bb = new BoundingBox();

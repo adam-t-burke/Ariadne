@@ -378,8 +378,6 @@ public class TheseusSolveComponent : GH_Component
         hash.Add(config.MaxIterations);
         hash.Add(config.AbsTol);
         hash.Add(config.RelTol);
-        hash.Add(config.BarrierWeight);
-        hash.Add(config.BarrierSharpness);
         foreach (var obj in config.Objectives)
             hash.Add(obj.GetContentHashCode());
         foreach (var lb in config.LowerBounds) hash.Add(lb);
@@ -422,8 +420,6 @@ public class TheseusSolveComponent : GH_Component
                 MaxIterations = cfg.MaxIterations,
                 AbsTol = cfg.AbsTol,
                 RelTol = cfg.RelTol,
-                BarrierWeight = cfg.BarrierWeight,
-                BarrierSharpness = cfg.BarrierSharpness,
                 ReportFrequency = cfg.ReportFrequency,
             };
             return TheseusSolverService.Solve(snap.Network, inputs, options, callback);

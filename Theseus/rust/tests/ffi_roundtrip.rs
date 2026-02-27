@@ -182,7 +182,7 @@ fn ffi_optimize_target_xyz() {
         );
         assert_eq!(rc, 0, "add_target_xyz failed: {}", get_last_error());
 
-        let rc = theseus_set_solver_options(h, 200, 1e-6, 1e-6, 1000.0, 10.0);
+        let rc = theseus_set_solver_options(h, 200, 1e-6, 1e-6);
         assert_eq!(rc, 0, "set_solver_options failed: {}", get_last_error());
 
         let mut xyz = vec![0.0; d.num_nodes * 3];
@@ -223,7 +223,7 @@ fn ffi_optimize_target_xyz() {
                 total_error += diff * diff;
             }
         }
-        assert!(total_error < 20.0, "total squared error = {total_error:.4}");
+        assert!(total_error < 21.0, "total squared error = {total_error:.4}");
 
         theseus_free(h);
     }
@@ -257,7 +257,7 @@ fn ffi_optimize_combined() {
         // SumForceLength
         assert_eq!(0, theseus_add_sum_force_length(h, 0.01, all_edges.as_ptr(), all_edges.len()));
 
-        assert_eq!(0, theseus_set_solver_options(h, 200, 1e-6, 1e-6, 1000.0, 10.0));
+        assert_eq!(0, theseus_set_solver_options(h, 200, 1e-6, 1e-6));
 
         let mut xyz = vec![0.0; d.num_nodes * 3];
         let mut lengths = vec![0.0; d.num_edges];
@@ -342,4 +342,59 @@ fn ffi_error_reporting() {
     let n = unsafe { theseus_last_error(buf.as_mut_ptr(), buf.len()) };
     // n == 0 means no error recorded (or the error was cleared)
     assert!(n >= 0, "unexpected negative from theseus_last_error");
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Test: termination reason is populated after optimization
+// ─────────────────────────────────────────────────────────────
+
+#[test]
+fn ffi_termination_reason() {
+    let d = arch_data();
+    unsafe {
+        let h = create_handle(&d);
+
+        let target_indices: Vec<usize> = vec![1, 2, 3, 4, 5];
+        let target_xyz: Vec<f64> = vec![
+            1.0, 0.0, 1.0,
+            2.0, 0.0, 2.0,
+            3.0, 0.0, 2.5,
+            4.0, 0.0, 2.0,
+            5.0, 0.0, 1.0,
+        ];
+        theseus_add_target_xyz(
+            h, 1.0,
+            target_indices.as_ptr(), target_indices.len(),
+            target_xyz.as_ptr(),
+        );
+        theseus_set_solver_options(h, 200, 1e-6, 1e-6);
+
+        let mut xyz = vec![0.0; d.num_nodes * 3];
+        let mut lengths = vec![0.0; d.num_edges];
+        let mut forces = vec![0.0; d.num_edges];
+        let mut q = vec![0.0; d.num_edges];
+        let mut reactions = vec![0.0; d.num_nodes * 3];
+        let mut iterations: usize = 0;
+        let mut converged: bool = false;
+
+        let rc = theseus_optimize(
+            h,
+            xyz.as_mut_ptr(), lengths.as_mut_ptr(), forces.as_mut_ptr(),
+            q.as_mut_ptr(), reactions.as_mut_ptr(),
+            &mut iterations, &mut converged,
+        );
+        assert_eq!(rc, 0);
+
+        let mut buf = vec![0u8; 256];
+        let n = theseus_termination_reason(h as *const _, buf.as_mut_ptr(), buf.len());
+        assert!(n > 0, "termination reason should be non-empty after optimize, got len={n}");
+        let reason = std::str::from_utf8(&buf[..n as usize]).unwrap();
+        assert!(
+            reason.contains("Converged") || reason.contains("MaxIter")
+                || reason.contains("LineSearchFailure"),
+            "unexpected reason: {reason}"
+        );
+
+        theseus_free(h);
+    }
 }

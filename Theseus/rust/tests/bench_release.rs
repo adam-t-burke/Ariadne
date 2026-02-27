@@ -149,12 +149,12 @@ fn make_grid_problem(n: usize) -> Problem {
 ///   10  →     180 edges
 ///   32  →   1,984 edges
 ///  100  →  19,800 edges
-///  316  → 199,080 edges   (~200k)
+///  158  →  49,612 edges   (~50k)
 const GRID_SIZES: &[(usize, &str)] = &[
     (10,  "10×10"),
     (32,  "32×32"),
     (100, "100×100"),
-    (316, "316×316"),
+    (158, "158×158"),
 ];
 
 fn fmt_count(n: usize) -> String {
@@ -232,16 +232,11 @@ fn bench_value_and_gradient_scaling() {
         let ne = problem.topology.num_edges;
         let theta = vec![1.0; ne];
 
-        let lb = problem.bounds.lower.clone();
-        let ub = problem.bounds.upper.clone();
-        let lb_idx: Vec<usize> = (0..ne).filter(|&i| lb[i].is_finite()).collect();
-        let ub_idx: Vec<usize> = (0..ne).filter(|&i| ub[i].is_finite()).collect();
-
         // Warm-up
         let mut cache = FdmCache::new(&problem).unwrap();
         let mut grad = vec![0.0; ne];
         theseus::gradients::value_and_gradient(
-            &mut cache, &problem, &theta, &mut grad, &lb, &ub, &lb_idx, &ub_idx,
+            &mut cache, &problem, &theta, &mut grad,
         ).unwrap();
 
         let iters: usize = if ne < 1_000 { 3000 }
@@ -255,7 +250,7 @@ fn bench_value_and_gradient_scaling() {
             cache.factorization = None;
             grad.fill(0.0);
             theseus::gradients::value_and_gradient(
-                &mut cache, &problem, &theta, &mut grad, &lb, &ub, &lb_idx, &ub_idx,
+                &mut cache, &problem, &theta, &mut grad,
             ).unwrap();
         }
         let elapsed = start.elapsed();
@@ -280,7 +275,7 @@ fn bench_full_optimize_scaling() {
         (10,  "10×10"),
         (32,  "32×32"),
         (100, "100×100"),
-        (316, "316×316"),
+        (158, "158×158"),
     ];
 
     eprintln!("\n┌─────────────────────────────────────────────────────────────────┐");

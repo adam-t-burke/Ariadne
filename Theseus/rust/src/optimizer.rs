@@ -1,141 +1,26 @@
-//! L-BFGS optimisation driver via the `argmin` crate.
+//! L-BFGS-B optimisation driver via the `lbfgsb-rs-pure` crate.
 //!
-//! Wraps the hand-coded `value_and_gradient` into argmin's `CostFunction`
-//! + `Gradient` traits, then runs L-BFGS with the user's solver options.
+//! Wraps the hand-coded `value_and_gradient` into a closure for the L-BFGS-B
+//! solver, which directly supports box constraints on parameters.
 //!
-//! Uses `Vec<f64>` as the argmin parameter type to avoid ndarray version
-//! conflicts between our ndarray 0.16 and argmin-math's bundled ndarray.
+//! Key robustness features:
+//! - Failed forward solves return a large finite penalty (not NaN) so the
+//!   line search can backtrack instead of dying.
+//! - Convergence is controlled entirely via the iteration callback, checking
+//!   both projected-gradient norm AND relative function decrease.
+//! - On LineSearchFailure / NumericalFailure the solver restarts from the
+//!   best known point with fresh L-BFGS memory (up to MAX_RESTARTS times).
 
 use crate::ffi::ProgressCallback;
 use crate::gradients::value_and_gradient;
 use crate::types::{FdmCache, Problem, SolverResult, OptimizationState, TheseusError};
-use argmin::core::{CostFunction, Gradient, Executor, State, TerminationReason, TerminationStatus};
-use argmin::solver::linesearch::MoreThuenteLineSearch;
-use argmin::solver::quasinewton::LBFGS;
+use lbfgsb_rs_pure::{LBFGSB, IterationControl};
 use ndarray::Array2;
 use std::cell::RefCell;
 
-// ─────────────────────────────────────────────────────────────
-//  argmin problem wrapper
-// ─────────────────────────────────────────────────────────────
-
-/// Wraps the FDM problem + cache + barrier data so argmin can evaluate
-/// cost and gradient.
-///
-/// `RefCell` is used for the cache because argmin's `CostFunction` /
-/// `Gradient` traits take `&self`, but our forward solver mutates the cache.
-/// The solver is single-threaded, so the borrow never actually conflicts,
-/// but `RefCell` gives us debug-mode borrow checking for free.
-///
-/// **Evaluation cache**: argmin calls `cost(θ)` and `gradient(θ)` separately
-/// at the same θ each iteration.  We cache the last `(θ, loss, grad)` so the
-/// expensive forward + adjoint solve runs only once per unique θ.
-struct FdmProblem<'a> {
-    problem: &'a Problem,
-    cache: RefCell<FdmCache>,
-    lb: Vec<f64>,
-    ub: Vec<f64>,
-    lb_idx: Vec<usize>,
-    ub_idx: Vec<usize>,
-    /// Cached (θ, loss, gradient) from the last evaluation.
-    last_eval: RefCell<Option<(Vec<f64>, f64, Vec<f64>)>>,
-    /// Loss value recorded at each unique evaluation.
-    loss_trace: RefCell<Vec<f64>>,
-    /// Optional FFI callback for progress reporting.
-    progress_callback: Option<ProgressCallback>,
-    /// How often (in evaluations) to invoke the callback.
-    report_frequency: usize,
-}
-
-impl<'a> FdmProblem<'a> {
-    /// Ensure the cache contains results for `theta`.
-    /// If θ matches the cached value, this is a no-op.
-    /// Otherwise, runs the full forward + adjoint solve.
-    fn ensure_evaluated(&self, theta: &[f64]) -> Result<(), argmin::core::Error> {
-        {
-            let cached = self.last_eval.borrow();
-            if let Some((ref t, _, _)) = *cached {
-                if t == theta {
-                    return Ok(());
-                }
-            }
-        }
-        // Reject θ vectors containing NaN/Inf before attempting the solve
-        if theta.iter().any(|v| !v.is_finite()) {
-            return Err(argmin::core::Error::msg("theta contains NaN or Inf"));
-        }
-
-        // Cache miss — run the full solve
-        let mut fdm_cache = self.cache.borrow_mut();
-        let mut grad = vec![0.0; theta.len()];
-        let val = value_and_gradient(
-            &mut fdm_cache,
-            self.problem,
-            theta,
-            &mut grad,
-            &self.lb,
-            &self.ub,
-            &self.lb_idx,
-            &self.ub_idx,
-        ).map_err(|e| argmin::core::Error::msg(e.to_string()))?;
-
-        // Guard against NaN/Inf in loss or gradient
-        if !val.is_finite() || grad.iter().any(|g| !g.is_finite()) {
-            return Err(argmin::core::Error::msg(
-                "value_and_gradient produced NaN or Inf",
-            ));
-        }
-
-        let eval_count = {
-            let mut trace = self.loss_trace.borrow_mut();
-            trace.push(val);
-            trace.len()
-        };
-
-        if let Some(cb) = self.progress_callback {
-            if eval_count == 1 || eval_count % self.report_frequency == 0 {
-                let nn = self.problem.topology.num_nodes;
-                let ne = self.problem.topology.num_edges;
-                let nf = &fdm_cache.nf;
-                let xyz_flat: Vec<f64> = (0..nn)
-                    .flat_map(|i| (0..3).map(move |d| nf[[i, d]]))
-                    .collect();
-                let q = &theta[..ne];
-                let should_continue = unsafe {
-                    cb(eval_count, val, xyz_flat.as_ptr(), nn, q.as_ptr(), ne)
-                };
-                if should_continue == 0 {
-                    return Err(argmin::core::Error::msg("cancelled"));
-                }
-            }
-        }
-
-        *self.last_eval.borrow_mut() = Some((theta.to_vec(), val, grad));
-        Ok(())
-    }
-}
-
-impl<'a> CostFunction for FdmProblem<'a> {
-    type Param = Vec<f64>;
-    type Output = f64;
-
-    fn cost(&self, theta: &Self::Param) -> Result<Self::Output, argmin::core::Error> {
-        self.ensure_evaluated(theta)?;
-        let cached = self.last_eval.borrow();
-        Ok(cached.as_ref().unwrap().1)
-    }
-}
-
-impl<'a> Gradient for FdmProblem<'a> {
-    type Param = Vec<f64>;
-    type Gradient = Vec<f64>;
-
-    fn gradient(&self, theta: &Self::Param) -> Result<Self::Gradient, argmin::core::Error> {
-        self.ensure_evaluated(theta)?;
-        let cached = self.last_eval.borrow();
-        Ok(cached.as_ref().unwrap().2.clone())
-    }
-}
+const MAX_RESTARTS: usize = 3;
+const MIN_ITERATIONS_BEFORE_CONVERGENCE: usize = 10;
+const CONVERGENCE_WINDOW: usize = 5;
 
 // ─────────────────────────────────────────────────────────────
 //  Parameter packing / unpacking
@@ -177,7 +62,7 @@ pub fn unpack_parameters(problem: &Problem, theta: &[f64]) -> (Vec<f64>, Array2<
 }
 
 // ─────────────────────────────────────────────────────────────
-//  Bound index precomputation
+//  Bound precomputation
 // ─────────────────────────────────────────────────────────────
 
 fn parameter_bounds(problem: &Problem) -> (Vec<f64>, Vec<f64>) {
@@ -191,15 +76,35 @@ fn parameter_bounds(problem: &Problem) -> (Vec<f64>, Vec<f64>) {
     (lb, ub)
 }
 
-fn finite_indices(v: &[f64]) -> Vec<usize> {
-    v.iter().enumerate().filter(|(_, &x)| x.is_finite()).map(|(i, _)| i).collect()
+/// Clamp `x` into the feasible box `[lb, ub]`.
+fn project_to_bounds(x: &mut [f64], lb: &[f64], ub: &[f64]) {
+    for i in 0..x.len() {
+        if x[i] < lb[i] { x[i] = lb[i]; }
+        if x[i] > ub[i] { x[i] = ub[i]; }
+    }
+}
+
+/// Apply a small deterministic perturbation to q-parameters that are strictly
+/// interior to their bounds, nudging them toward the midpoint.  This helps
+/// the solver escape a stale point after a restart.
+fn perturb_interior(x: &mut [f64], lb: &[f64], ub: &[f64], ne: usize, strength: f64) {
+    for i in 0..ne {
+        let lo = lb[i];
+        let hi = ub[i];
+        if hi.is_infinite() || lo.is_infinite() { continue; }
+        let range = hi - lo;
+        if range <= 0.0 { continue; }
+        let mid = (lo + hi) * 0.5;
+        let nudge = (mid - x[i]) * strength;
+        x[i] = (x[i] + nudge).max(lo).min(hi);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
 //  Top-level optimisation entry point
 // ─────────────────────────────────────────────────────────────
 
-/// Run L-BFGS optimisation on the FDM problem.
+/// Run L-BFGS-B optimisation on the FDM problem.
 ///
 /// `progress_cb` / `report_freq` control an optional FFI callback invoked
 /// every `report_freq` evaluations with the current node positions.
@@ -209,74 +114,188 @@ pub fn optimize(
     progress_cb: Option<ProgressCallback>,
     report_freq: usize,
 ) -> Result<SolverResult, TheseusError> {
-    let cache = FdmCache::new(problem)?;
-
+    let report_freq = if report_freq == 0 { 1 } else { report_freq };
     let (lb, ub) = parameter_bounds(problem);
-    let lb_idx = finite_indices(&lb);
-    let ub_idx = finite_indices(&ub);
+    let ne = problem.topology.num_edges;
 
-    let init_param = pack_parameters(problem, state);
+    let mut x = pack_parameters(problem, state);
+    project_to_bounds(&mut x, &lb, &ub);
 
-    let fdm_problem = FdmProblem {
-        problem,
-        cache: RefCell::new(cache),
-        lb,
-        ub,
-        lb_idx,
-        ub_idx,
-        last_eval: RefCell::new(None),
-        loss_trace: RefCell::new(Vec::new()),
-        progress_callback: progress_cb,
-        report_frequency: if report_freq == 0 { 1 } else { report_freq },
-    };
+    let mut global_best_x = x.clone();
+    let mut global_best_f = f64::INFINITY;
+    let mut all_traces: Vec<f64> = Vec::new();
+    let mut total_iterations: usize = 0;
+    let mut final_status = String::from("MaxIter");
+    let mut was_cancelled = false;
 
-    // Configure L-BFGS with user-specified tolerances
-    let linesearch = MoreThuenteLineSearch::new();
-    let solver = LBFGS::new(linesearch, 10)
-        .with_tolerance_grad(problem.solver.absolute_tolerance)
-        .map_err(|e| TheseusError::Solver(format!("tolerance_grad: {e}")))?
-        .with_tolerance_cost(problem.solver.relative_tolerance)
-        .map_err(|e| TheseusError::Solver(format!("tolerance_cost: {e}")))?;
+    let abs_tol = problem.solver.absolute_tolerance;
+    let rel_tol = problem.solver.relative_tolerance;
+    let max_iter = problem.solver.max_iterations;
 
-    let executor = Executor::new(fdm_problem, solver)
-        .configure(|config| {
-            config
-                .param(init_param)
-                .max_iters(problem.solver.max_iterations as u64)
-                .target_cost(f64::NEG_INFINITY)
-        });
+    for restart in 0..=MAX_RESTARTS {
+        if restart > 0 {
+            x = global_best_x.clone();
+            let strength = 0.02 * (restart as f64);
+            perturb_interior(&mut x, &lb, &ub, ne, strength);
+        }
 
-    let result = executor.run()?;
-    let loss_trace = result.problem.problem
-        .as_ref()
-        .map(|p| p.loss_trace.borrow().clone())
-        .unwrap_or_default();
+        let remaining_iter = max_iter.saturating_sub(total_iterations);
+        if remaining_iter < 5 {
+            break;
+        }
 
-    // Extract solution
-    let best_param = result.state().get_best_param()
-        .ok_or_else(|| TheseusError::Solver("L-BFGS returned no best parameters".into()))?;
-    let (q, anchors) = unpack_parameters(problem, best_param);
+        let cache = RefCell::new(FdmCache::new(problem)?);
+        let loss_trace = RefCell::new(Vec::<f64>::new());
+        let cancelled = RefCell::new(false);
+        let best_x = RefCell::new(x.clone());
+        let best_f = RefCell::new(f64::INFINITY);
+        let last_valid_grad = RefCell::new(vec![0.0; x.len()]);
+        let recent_f = RefCell::new(Vec::<f64>::with_capacity(CONVERGENCE_WINDOW + 1));
 
-    // Final forward solve to get geometry
+        // Disable the library's internal pgtol so we control convergence
+        // entirely from the callback (Issue 2 fix).
+        let mut solver = LBFGSB::new(10)
+            .with_pgtol(0.0)
+            .with_max_iter(remaining_iter);
+
+        let solution_res = solver.minimize_with_callback(
+            &mut x,
+            &lb,
+            &ub,
+            // ── Objective closure ────────────────────────────
+            &mut |theta: &[f64]| {
+                let mut fdm_cache = cache.borrow_mut();
+                let mut grad = vec![0.0; theta.len()];
+
+                match value_and_gradient(&mut fdm_cache, problem, theta, &mut grad) {
+                    Ok(val) => {
+                        loss_trace.borrow_mut().push(val);
+                        *last_valid_grad.borrow_mut() = grad.clone();
+                        if val < *best_f.borrow() {
+                            *best_f.borrow_mut() = val;
+                            *best_x.borrow_mut() = theta.to_vec();
+                        }
+                        (val, grad)
+                    }
+                    Err(_) => {
+                        // Issue 1 fix: return a large finite penalty so the
+                        // line search sees "very bad point" and backtracks,
+                        // instead of NaN which poisons dcstep permanently.
+                        let penalty = best_f.borrow().abs().max(1.0) * 1e6;
+                        let fallback_grad = last_valid_grad.borrow().clone();
+                        (penalty, fallback_grad)
+                    }
+                }
+            },
+            // ── Iteration callback ───────────────────────────
+            &mut |info, theta| {
+                let eval_count = info.n_func_evals;
+                let val = info.f;
+
+                // Track rolling window for relative decrease check
+                {
+                    let mut rf = recent_f.borrow_mut();
+                    rf.push(val);
+                    if rf.len() > CONVERGENCE_WINDOW {
+                        rf.remove(0);
+                    }
+                }
+
+                // Issue 2 fix: callback-based convergence checking both
+                // projected gradient AND relative function decrease.
+                let iter_so_far = total_iterations + info.iteration;
+                if iter_so_far >= MIN_ITERATIONS_BEFORE_CONVERGENCE
+                    && info.proj_grad_norm <= abs_tol
+                {
+                    let rf = recent_f.borrow();
+                    if rf.len() >= 2 {
+                        let oldest = rf[0];
+                        let newest = *rf.last().unwrap();
+                        let denom = oldest.abs().max(newest.abs()).max(1.0);
+                        let rel_change = (oldest - newest).abs() / denom;
+                        if rel_change < rel_tol {
+                            return IterationControl::StopConverged;
+                        }
+                    }
+                }
+
+                // Progress reporting via FFI callback
+                if let Some(cb) = progress_cb {
+                    if eval_count == 1 || eval_count % report_freq == 0 {
+                        let nn = problem.topology.num_nodes;
+                        let ne = problem.topology.num_edges;
+                        let fdm_cache = cache.borrow();
+                        let nf = &fdm_cache.nf;
+                        let xyz_flat: Vec<f64> = (0..nn)
+                            .flat_map(|i| (0..3).map(move |d| nf[[i, d]]))
+                            .collect();
+                        let q = &theta[..ne];
+
+                        let should_continue = unsafe {
+                            cb(eval_count, val, xyz_flat.as_ptr(), nn, q.as_ptr(), ne)
+                        };
+
+                        if should_continue == 0 {
+                            *cancelled.borrow_mut() = true;
+                            return IterationControl::StopCustom;
+                        }
+                    }
+                }
+                IterationControl::Continue
+            },
+        );
+
+        if *cancelled.borrow() {
+            was_cancelled = true;
+        }
+
+        // Harvest results from this run
+        let local_best_x = best_x.into_inner();
+        let local_best_f = *best_f.borrow();
+        all_traces.append(&mut loss_trace.into_inner());
+
+        if local_best_f < global_best_f {
+            global_best_f = local_best_f;
+            global_best_x = local_best_x;
+        }
+
+        match &solution_res {
+            Ok(sol) => {
+                total_iterations += sol.iterations;
+                final_status = format!("{:?}", sol.status);
+                if final_status.contains("Converged") || was_cancelled {
+                    break;
+                }
+                // LineSearchFailure or MaxIter — try restart (Issue 3 fix)
+            }
+            Err(s) => {
+                final_status = s.to_string();
+                // Library returned Err — try restart
+            }
+        }
+
+        if was_cancelled {
+            break;
+        }
+    }
+
+    if was_cancelled {
+        return Err(TheseusError::Cancelled);
+    }
+
+    let (q, anchors) = unpack_parameters(problem, &global_best_x);
+
+    // Final forward solve to get geometry at the best point
     let mut final_cache = FdmCache::new(problem)?;
     crate::fdm::solve_fdm(&mut final_cache, &q, problem, &anchors, 1e-12)?;
     crate::fdm::compute_geometry(&mut final_cache, problem);
 
-    let termination_status = result.state().get_termination_status();
-    let converged = matches!(
-        termination_status,
-        TerminationStatus::Terminated(TerminationReason::SolverConverged)
-    );
-
-    let termination_reason = match termination_status {
-        TerminationStatus::Terminated(reason) => format!("{reason}"),
-        TerminationStatus::NotTerminated => "not terminated".to_string(),
-    };
+    let converged = final_status.contains("Converged");
 
     state.force_densities = q.clone();
     state.variable_anchor_positions = anchors.clone();
-    state.iterations = result.state().get_iter() as usize;
-    state.loss_trace = loss_trace.clone();
+    state.iterations = if total_iterations > 0 { total_iterations } else { all_traces.len() };
+    state.loss_trace = all_traces.clone();
 
     Ok(SolverResult {
         q,
@@ -285,9 +304,9 @@ pub fn optimize(
         member_lengths: final_cache.member_lengths,
         member_forces: final_cache.member_forces,
         reactions: final_cache.reactions,
-        loss_trace,
+        loss_trace: all_traces,
         iterations: state.iterations,
         converged,
-        termination_reason,
+        termination_reason: final_status,
     })
 }

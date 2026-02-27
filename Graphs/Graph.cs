@@ -25,27 +25,27 @@ namespace Ariadne.Graphs
 
         /// <summary>All nodes (vertices) in the graph.</summary>
         [JsonIgnore]
-        public List<Node> Nodes { get; set; }
+        public List<Node> Nodes { get; set; } = null!;
 
         /// <summary>All edges (branches) in the graph, each connecting two nodes.</summary>
         [JsonIgnore]
-        public List<Edge> Edges { get; set; }
+        public List<Edge> Edges { get; set; } = null!;
 
         /// <summary>Grasshopper tree mapping to branch/item indices for graph elements.</summary>
         [JsonIgnore]
-        public GH_Structure<GH_Number> IndicesTree { get; set; }
+        public GH_Structure<GH_Number> IndicesTree { get; set; } = null!;
 
         /// <summary>Grasshopper tree representing adjacency structure.</summary>
         [JsonIgnore]
-        public GH_Structure<GH_Number> AdjacencyTree { get; set; }
+        public GH_Structure<GH_Number> AdjacencyTree { get; set; } = null!;
 
         /// <summary>Maps each edge index to (branchIndex, itemIndex) in the original input tree.</summary>
         [JsonIgnore]
-        public List<(int branchIndex, int itemIndex)> EdgeInputMap { get; set; }
+        public List<(int branchIndex, int itemIndex)>? EdgeInputMap { get; set; }
 
         /// <summary>Output edge tree matching Grasshopper structure for downstream components.</summary>
         [JsonIgnore]
-        public GH_Structure<Edge> OutputEdgeTree { get; set; }
+        public GH_Structure<Edge> OutputEdgeTree { get; set; } = null!;
 
         /// <summary>Parameterless constructor; initialize properties before use.</summary>
         public Graph() { }
@@ -425,8 +425,11 @@ namespace Ariadne.Graphs
                 
                 for (int itemIdx = 0; itemIdx < branch.Count; itemIdx++)
                 {
-                    allCurves.Add((GH_Curve)branch[itemIdx]);
-                    EdgeInputMap.Add((branchIdx, itemIdx));
+                    if (branch[itemIdx] is GH_Curve curve)
+                    {
+                        allCurves.Add(curve);
+                        EdgeInputMap.Add((branchIdx, itemIdx));
+                    }
                 }
             }
             

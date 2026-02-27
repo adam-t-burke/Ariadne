@@ -121,6 +121,7 @@ pub struct TheseusHandle {
     pub state: OptimizationState,
     pub progress_callback: Option<ProgressCallback>,
     pub report_frequency: usize,
+    pub last_termination_reason: String,
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -249,6 +250,7 @@ unsafe fn create_inner(
         state,
         progress_callback: None,
         report_frequency: 1,
+        last_termination_reason: String::new(),
     })))
 }
 
@@ -641,8 +643,6 @@ pub unsafe extern "C" fn theseus_set_solver_options(
     max_iterations: usize,
     abs_tol: f64,
     rel_tol: f64,
-    barrier_weight: f64,
-    barrier_sharpness: f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
         let h = &mut *handle;
@@ -651,8 +651,6 @@ pub unsafe extern "C" fn theseus_set_solver_options(
             absolute_tolerance: abs_tol,
             relative_tolerance: rel_tol,
             report_frequency: 1,
-            barrier_weight,
-            barrier_sharpness,
         };
         Ok(())
     }))
@@ -711,6 +709,8 @@ pub unsafe extern "C" fn theseus_optimize(
         let freq = h.report_frequency;
         let result = optimizer::optimize(&h.problem, &mut h.state, cb, freq)?;
 
+        h.last_termination_reason = result.termination_reason.clone();
+
         let nn = h.problem.topology.num_nodes;
         let ne = h.problem.topology.num_edges;
 
@@ -740,6 +740,38 @@ pub unsafe extern "C" fn theseus_optimize(
 
         Ok(())
     }))
+}
+
+/// Retrieve the termination reason from the last `theseus_optimize` call.
+///
+/// Copies the UTF-8 reason string into a caller-provided buffer.  Returns
+/// the number of bytes written (excluding null terminator), or -1 if the
+/// buffer is too small.  A return of 0 means no reason has been recorded.
+///
+/// # Safety
+/// `buf` must point to at least `buf_len` writable bytes.  Valid handle.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_termination_reason(
+    handle: *const TheseusHandle,
+    buf: *mut u8,
+    buf_len: usize,
+) -> i32 {
+    if handle.is_null() {
+        return 0;
+    }
+    let h = &*handle;
+    let msg = &h.last_termination_reason;
+    if msg.is_empty() {
+        return 0;
+    }
+    let bytes = msg.as_bytes();
+    if buf_len < bytes.len() + 1 {
+        return -1;
+    }
+    let out = slice::from_raw_parts_mut(buf, buf_len);
+    out[..bytes.len()].copy_from_slice(bytes);
+    out[bytes.len()] = 0;
+    bytes.len() as i32
 }
 
 // ─────────────────────────────────────────────────────────────

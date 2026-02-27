@@ -25,8 +25,6 @@ public class OptConfigComponent : GH_Component
         pManager.AddIntegerParameter("Max Iterations", "MaxIter", "Maximum solver iterations", GH_ParamAccess.item, 500);
         pManager.AddNumberParameter("Absolute Tolerance", "AbsTol", "Absolute convergence tolerance", GH_ParamAccess.item, 1e-6);
         pManager.AddNumberParameter("Relative Tolerance", "RelTol", "Relative convergence tolerance", GH_ParamAccess.item, 1e-6);
-        pManager.AddNumberParameter("Barrier Weight", "BW", "Barrier function weight", GH_ParamAccess.item, 10.0);
-        pManager.AddNumberParameter("Barrier Sharpness", "BS", "Barrier function sharpness", GH_ParamAccess.item, 10.0);
         pManager.AddIntegerParameter("Report Frequency", "ReportFreq", "Invoke progress callback every N evaluations (0 = every evaluation)", GH_ParamAccess.item, 10);
         pManager.AddBooleanParameter("Run", "Run", "Toggle true for open-loop optimization; use a button for single-trigger", GH_ParamAccess.item, false);
         pManager.AddBooleanParameter("Stream Preview", "Stream", "Stream intermediate results to outputs during optimization (false = only output final result)", GH_ParamAccess.item, true);
@@ -45,8 +43,6 @@ public class OptConfigComponent : GH_Component
         int maxIter = 500;
         double absTol = 1e-6;
         double relTol = 1e-6;
-        double barrierWeight = 10.0;
-        double barrierSharpness = 10.0;
         int reportFreq = 10;
         bool run = false;
         bool streamPreview = true;
@@ -57,11 +53,9 @@ public class OptConfigComponent : GH_Component
         DA.GetData(3, ref maxIter);
         DA.GetData(4, ref absTol);
         DA.GetData(5, ref relTol);
-        DA.GetData(6, ref barrierWeight);
-        DA.GetData(7, ref barrierSharpness);
-        DA.GetData(8, ref reportFreq);
-        DA.GetData(9, ref run);
-        DA.GetData(10, ref streamPreview);
+        DA.GetData(6, ref reportFreq);
+        DA.GetData(7, ref run);
+        DA.GetData(8, ref streamPreview);
 
         if (objectives.Count == 0)
         {
@@ -89,8 +83,6 @@ public class OptConfigComponent : GH_Component
             MaxIterations = maxIter,
             AbsTol = absTol,
             RelTol = relTol,
-            BarrierWeight = barrierWeight,
-            BarrierSharpness = barrierSharpness,
             ReportFrequency = reportFreq,
             Run = run,
             StreamPreview = streamPreview,

@@ -17,6 +17,7 @@ public sealed class SolverResult
     public double[] Reactions { get; init; } = [];
     public int Iterations { get; init; }
     public bool Converged { get; init; }
+    public string TerminationReason { get; init; } = "";
 }
 
 /// <summary>
@@ -203,13 +204,11 @@ public sealed class TheseusSolver : IDisposable
     public void SetSolverOptions(
         int maxIterations = 500,
         double absTol = 1e-6,
-        double relTol = 1e-6,
-        double barrierWeight = 10.0,
-        double barrierSharpness = 10.0)
+        double relTol = 1e-6)
     {
         ThrowIfDisposed();
         Check(TheseusInterop.theseus_set_solver_options(
-            _handle, (nuint)maxIterations, absTol, relTol, barrierWeight, barrierSharpness));
+            _handle, (nuint)maxIterations, absTol, relTol));
     }
 
     // ── Progress callback ─────────────────────────────────────
@@ -263,6 +262,13 @@ public sealed class TheseusSolver : IDisposable
             _handle, xyz, lengths, forces, q, reactions,
             ref iterations, ref converged));
 
+        var reasonBuf = new byte[256];
+        int reasonLen = TheseusInterop.theseus_termination_reason(
+            _handle, reasonBuf, (nuint)reasonBuf.Length);
+        string reason = reasonLen > 0
+            ? Encoding.UTF8.GetString(reasonBuf, 0, reasonLen)
+            : "";
+
         return new SolverResult
         {
             Xyz = xyz,
@@ -272,6 +278,7 @@ public sealed class TheseusSolver : IDisposable
             Reactions = reactions,
             Iterations = (int)iterations,
             Converged = converged != 0,
+            TerminationReason = reason,
         };
     }
 

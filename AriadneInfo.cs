@@ -13,7 +13,7 @@ namespace Ariadne
         public override string Name => "Ariadne";
 
         //Return a 24x24 pixel bitmap to represent this GHA library.
-        public override Bitmap Icon => null;
+        public override Bitmap Icon => null!;
 
         //Return a short string describing the purpose of this GHA library.
         public override string Description => "Grasshopper plugin for the inverse design of form found structures in Rhino 8.";

@@ -8,7 +8,7 @@
 //!
 //! All gradients derived analytically — no AD framework needed.
 
-use crate::objectives::{softplus_grad, bounds_penalty_grad};
+use crate::objectives::softplus_grad;
 use crate::types::{FdmCache, GeometrySnapshot, Problem, TheseusError};
 use ndarray::Array2;
 
@@ -564,17 +564,12 @@ fn accumulate_reaction_grad(
 ///   4. Accumulate explicit dJ/dx̂ from objectives
 ///   5. Adjoint solve  A λ = dJ/dx̂
 ///   6. Implicit dJ/dq  += −Δλ · ΔN
-///   7. Barrier gradient on θ
-///   8. Pack grad_q + grad_anchors → grad vector
+///   7. Pack grad_q + grad_anchors → grad vector
 pub fn value_and_gradient(
     cache: &mut FdmCache,
     problem: &Problem,
     theta: &[f64],
     grad: &mut [f64],
-    lb: &[f64],
-    ub: &[f64],
-    lb_idx: &[usize],
-    ub_idx: &[usize],
 ) -> Result<f64, TheseusError> {
     let ne = problem.topology.num_edges;
     let nvar = problem.anchors.variable_indices.len();
@@ -605,10 +600,7 @@ pub fn value_and_gradient(
         reactions: &cache.reactions,
     };
     let geometric_loss = crate::objectives::total_loss(&problem.objectives, &snap);
-    let barrier_loss = crate::objectives::bounds_penalty(
-        theta, lb, ub, lb_idx, ub_idx, problem.solver.barrier_sharpness,
-    );
-    let total = geometric_loss + barrier_loss * problem.solver.barrier_weight;
+    let total = geometric_loss;
 
     // 4. Explicit gradients (fills grad_x, partial grad_q)
     cache.grad_q.fill(0.0);
@@ -635,12 +627,15 @@ pub fn value_and_gradient(
         }
     }
 
-    // 8. Barrier gradient
-    bounds_penalty_grad(
-        grad, theta, lb, ub, lb_idx, ub_idx,
-        problem.solver.barrier_sharpness,
-        problem.solver.barrier_weight,
-    );
+    // 8. Sanitise: replace any NaN/Inf gradient components with zero.
+    //    Near-zero member lengths or degenerate reactions can produce
+    //    non-finite values in individual terms; zeroing them is safer
+    //    than failing the entire evaluation or feeding garbage to L-BFGS-B.
+    for g in grad.iter_mut() {
+        if !g.is_finite() {
+            *g = 0.0;
+        }
+    }
 
     Ok(total)
 }

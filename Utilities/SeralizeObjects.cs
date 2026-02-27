@@ -47,9 +47,9 @@ namespace Ariadne.Utilities
         /// <param name="DA">The DA object is used to retrieve from inputs and store in outputs.</param>
         protected override void SolveInstance(IGH_DataAccess DA)
         {
-            object obj = null;
+            object? obj = null;
 
-            if (!DA.GetData(0, ref obj)) { return; }
+            if (!DA.GetData(0, ref obj) || obj == null) { return; }
 
             var options = new JsonSerializerOptions { WriteIndented = true };
             string json = JsonSerializer.Serialize(obj, options);

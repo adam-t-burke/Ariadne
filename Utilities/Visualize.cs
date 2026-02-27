@@ -16,15 +16,15 @@ namespace Ariadne.Utilities
     /// </summary>
     internal class Visualize : GH_Component
     {
-        private FDM_Network _network;
-        private Line[] _edges;
-        private List<double> _property;
-        private Line[] _externalForces;
-        private Line[] _reactionForces;
+        private FDM_Network _network = null!;
+        private Line[] _edges = null!;
+        private List<double> _property = null!;
+        private Line[] _externalForces = null!;
+        private Line[] _reactionForces = null!;
         private Color _c0;
         private Color _cMed;
         private Color _c1;
-        private GH_Gradient _grad;
+        private GH_Gradient _grad = null!;
         private int _thickness;
         private Color _cLoad;
         private Color _cReact;
@@ -62,10 +62,12 @@ namespace Ariadne.Utilities
             pManager.AddColourParameter("Reaction Colour", "Creaction", "Colour for support reactions", GH_ParamAccess.item, DefaultGreen);
             pManager.AddBooleanParameter("Show Reactions", "Reaction", "Show anchor reactions in preview", GH_ParamAccess.item, true);
 
-            Param_Integer param = pManager[7] as Param_Integer;
-            param.AddNamedValue("None", -1);
-            param.AddNamedValue("Force", 0);
-            param.AddNamedValue("Q", 1);
+            if (pManager[7] is Param_Integer param)
+            {
+                param.AddNamedValue("None", -1);
+                param.AddNamedValue("Force", 0);
+                param.AddNamedValue("Q", 1);
+            }
         }
 
         protected override void RegisterOutputParams(GH_OutputParamManager pManager)

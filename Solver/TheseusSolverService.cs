@@ -17,6 +17,9 @@ public static class TheseusSolverService
     /// <summary>
     /// Solve an FDM network with optimization.
     /// </summary>
+    /// <param name="network">FDM network to solve.</param>
+    /// <param name="inputs">Solver inputs (bounds, objectives, etc.).</param>
+    /// <param name="options">Solver options (optional).</param>
     /// <param name="progressCallback">
     /// Optional callback invoked every ReportFrequency evaluations with
     /// (iteration, loss, xyz[numNodes*3], q[numEdges]).
@@ -50,9 +53,7 @@ public static class TheseusSolverService
         solver.SetSolverOptions(
             maxIterations: options.MaxIterations,
             absTol: options.AbsTol,
-            relTol: options.RelTol,
-            barrierWeight: options.BarrierWeight,
-            barrierSharpness: options.BarrierSharpness);
+            relTol: options.RelTol);
 
         if (progressCallback != null)
             solver.SetProgressCallback(progressCallback, options.ReportFrequency);
@@ -204,7 +205,8 @@ public static class TheseusSolverService
             MemberLengths = result.MemberLengths,
             Reactions = result.Reactions,
             Iterations = result.Iterations,
-            Converged = result.Converged
+            Converged = result.Converged,
+            TerminationReason = result.TerminationReason
         };
     }
 
