@@ -87,6 +87,59 @@ public static class TheseusSolverService
     }
 
     /// <summary>
+    /// Solve for force densities via pseudoinverse of the equilibrium system.
+    /// Given target free-node positions, finds q that best satisfies equilibrium,
+    /// then performs a forward FDM solve with the resulting q.
+    /// </summary>
+    public static SolveResult SolvePseudoinverse(
+        FDM_Network network,
+        SolverInputs inputs,
+        double[] targetFreeXyz,
+        double regularization = 1e-6)
+    {
+        ValidateCommon(network, inputs);
+        var context = BuildContext(network);
+        var data = BuildSolverData(network, inputs, context);
+
+        using var solver = TheseusSolver.Create(
+            data.NumEdges, data.NumNodes, data.NumFree,
+            data.CooRows, data.CooCols, data.CooVals,
+            data.FreeIndices, data.FixedIndices,
+            data.Loads, data.FixedPositions,
+            data.QInit, data.LowerBounds, data.UpperBounds);
+
+        var result = solver.SolvePseudoinverse(targetFreeXyz, regularization);
+        return BuildResult(network, result, context);
+    }
+
+    /// <summary>
+    /// Solve for non-negative force densities via NNLS (spectral projected gradient).
+    /// Given target free-node positions, finds q >= 0 minimising the equilibrium residual,
+    /// then performs a forward FDM solve with the resulting q.
+    /// </summary>
+    public static SolveResult SolveNnls(
+        FDM_Network network,
+        SolverInputs inputs,
+        double[] targetFreeXyz,
+        int maxIter = 500,
+        double tol = 1e-6)
+    {
+        ValidateCommon(network, inputs);
+        var context = BuildContext(network);
+        var data = BuildSolverData(network, inputs, context);
+
+        using var solver = TheseusSolver.Create(
+            data.NumEdges, data.NumNodes, data.NumFree,
+            data.CooRows, data.CooCols, data.CooVals,
+            data.FreeIndices, data.FixedIndices,
+            data.Loads, data.FixedPositions,
+            data.QInit, data.LowerBounds, data.UpperBounds);
+
+        var result = solver.SolveNnls(targetFreeXyz, maxIter, tol);
+        return BuildResult(network, result, context);
+    }
+
+    /// <summary>
     /// Resolves a list of load-node positions to their indices in the network's
     /// free-node list (0-based). Matches by proximity using the network's ATol.
     /// </summary>

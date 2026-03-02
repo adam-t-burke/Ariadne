@@ -16,6 +16,7 @@ pub mod fdm;
 pub mod objectives;
 pub mod gradients;
 pub mod optimizer;
+pub mod inverse;
 pub mod ffi;
 
 pub use types::TheseusError;

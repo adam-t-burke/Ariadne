@@ -161,4 +161,20 @@ internal static class TheseusInterop
         IntPtr handle,
         double[] out_xyz, double[] out_lengths, double[] out_forces,
         double[] out_q, double[] out_reactions);
+
+    // ── Inverse solvers (experimental) ────────────────────────
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_solve_pseudoinverse(
+        IntPtr handle,
+        double[] target_free_xyz, double regularization,
+        double[] out_q, double[] out_xyz, double[] out_lengths,
+        double[] out_forces, double[] out_reactions);
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_solve_nnls(
+        IntPtr handle,
+        double[] target_free_xyz, nuint max_iter, double tol,
+        double[] out_q, double[] out_xyz, double[] out_lengths,
+        double[] out_forces, double[] out_reactions);
 }
