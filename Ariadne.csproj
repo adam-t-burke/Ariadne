@@ -17,9 +17,10 @@
     <GenerateErrorForMissingTargetingPacks>false</GenerateErrorForMissingTargetingPacks>
   </PropertyGroup>
 
-  <!-- Copy theseus.dll native library to output -->
+  <!-- Copy native theseus library to output (Windows, Mac) -->
   <ItemGroup>
     <None Include="Theseus\theseus.dll" Link="theseus.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Theseus\libtheseus.dylib" Link="libtheseus.dylib" CopyToOutputDirectory="PreserveNewest" Condition="Exists('Theseus\libtheseus.dylib')" />
   </ItemGroup>
   
   <ItemGroup>
