@@ -2,7 +2,7 @@
 	
   <PropertyGroup>
     <TargetFrameworks>net8.0</TargetFrameworks>
-    <Version>1.0.1</Version>
+    <Version>1.0.11-beta</Version>
     <Title>Ariadne</Title>
     <Description>Ariadne is the front-end counterpart to the inverse form finding tool Theseus.</Description>
 <TargetExt>.gha</TargetExt>
