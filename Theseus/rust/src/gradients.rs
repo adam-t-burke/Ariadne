@@ -297,9 +297,9 @@ pub(crate) fn grad_force_variation(
     }
 }
 
-/// SumForceLength:  L = w Σ ℓ_k · f_k = w Σ q_k ℓ_k²
-/// dL/dx̂ via ℓ_k:  2w q_k ℓ_k · dℓ_k/dx̂
-/// dL/dq_k = w ℓ_k²  (explicit)
+/// SumForceLength:  L = w Σ ℓ_k · |f_k| = w Σ |q_k| ℓ_k²
+/// dL/dx̂ via ℓ_k:  2w |q_k| ℓ_k · dℓ_k/dx̂
+/// dL/dq_k = w sign(q_k) ℓ_k²  (explicit)
 pub(crate) fn grad_sum_force_length(
     cache: &mut FdmCache,
     weight: f64,
@@ -309,11 +309,11 @@ pub(crate) fn grad_sum_force_length(
         let len = cache.member_lengths[k];
         let qk = cache.q[k];
 
-        // Explicit dJ/dq_k
-        cache.grad_q[k] += weight * len * len;
+        // Explicit dJ/dq_k = w * sign(q_k) * ℓ_k²
+        cache.grad_q[k] += weight * qk.signum() * len * len;
 
-        // dJ/dx̂ through ℓ_k
-        let scale = 2.0 * weight * qk;  // factor out ℓ_k/ℓ_k cancel with direction
+        // dJ/dx̂ through ℓ_k: dJ/dℓ_k = 2w * |q_k| * ℓ_k
+        let scale = 2.0 * weight * qk.abs();
         add_length_grad_to_x(cache, k, scale * len);
     }
 }

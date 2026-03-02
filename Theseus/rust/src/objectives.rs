@@ -223,11 +223,11 @@ fn force_variation_loss(forces: &[f64], edge_indices: &[usize], beta: f64) -> f6
     smooth_max(forces, edge_indices, beta) - smooth_min(forces, edge_indices, beta)
 }
 
-/// SumForceLength:  Σ_i ℓ_i · f_i  =  Σ_i q_i · ℓ_i²
+/// SumForceLength:  Σ_i ℓ_i · |f_i|  =  Σ_i |q_i| · ℓ_i²
 fn sum_force_length_loss(lengths: &[f64], forces: &[f64], edge_indices: &[usize]) -> f64 {
     let mut loss = 0.0;
     for &idx in edge_indices {
-        loss += lengths[idx] * forces[idx];
+        loss += lengths[idx] * forces[idx].abs();
     }
     loss
 }

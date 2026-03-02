@@ -832,6 +832,138 @@ pub unsafe extern "C" fn theseus_solve_forward(
 
 
 // ─────────────────────────────────────────────────────────────
+//  Inverse solvers  (experimental)
+// ─────────────────────────────────────────────────────────────
+
+/// Solve for force densities via pseudoinverse of the equilibrium system.
+///
+/// Given target free-node positions, finds q that best satisfies M q = p
+/// using Tikhonov-regularised sparse normal equations.  Then performs a
+/// forward FDM solve with the resulting q to produce final geometry.
+///
+/// `target_free_xyz` must point to `num_free * 3` doubles (row-major).
+///
+/// Returns 0 on success, -1 on error, -2 on internal panic.
+///
+/// # Safety
+/// Valid handle and output buffers.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_solve_pseudoinverse(
+    handle: *mut TheseusHandle,
+    target_free_xyz: *const f64,
+    regularization: f64,
+    out_q: *mut f64,
+    out_xyz: *mut f64,
+    out_lengths: *mut f64,
+    out_forces: *mut f64,
+    out_reactions: *mut f64,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let h = &mut *handle;
+        let nn_free = h.problem.topology.free_node_indices.len();
+        let nn = h.problem.topology.num_nodes;
+        let ne = h.problem.topology.num_edges;
+
+        let target = Array2::from_shape_vec(
+            (nn_free, 3),
+            slice::from_raw_parts(target_free_xyz, nn_free * 3).to_vec(),
+        ).map_err(|e| TheseusError::Shape(format!("target_free_xyz: {e}")))?;
+
+        let q = crate::inverse::solve_pseudoinverse(&h.problem, &target, regularization)?;
+
+        // Forward solve with the computed q
+        let mut cache = FdmCache::new(&h.problem)?;
+        let anchors = h.state.variable_anchor_positions.clone();
+        crate::fdm::solve_fdm(&mut cache, &q, &h.problem, &anchors, 1e-12)?;
+
+        // Copy outputs
+        slice::from_raw_parts_mut(out_q, ne).copy_from_slice(&q);
+
+        let xyz_out = slice::from_raw_parts_mut(out_xyz, nn * 3);
+        for i in 0..nn {
+            for d in 0..3 {
+                xyz_out[i * 3 + d] = cache.nf[[i, d]];
+            }
+        }
+        slice::from_raw_parts_mut(out_lengths, ne).copy_from_slice(&cache.member_lengths);
+        slice::from_raw_parts_mut(out_forces, ne).copy_from_slice(&cache.member_forces);
+
+        let r_out = slice::from_raw_parts_mut(out_reactions, nn * 3);
+        for i in 0..nn {
+            for d in 0..3 {
+                r_out[i * 3 + d] = cache.reactions[[i, d]];
+            }
+        }
+
+        Ok(())
+    }))
+}
+
+/// Solve for non-negative force densities via NNLS (spectral projected gradient).
+///
+/// Given target free-node positions, finds q ≥ 0 that minimises ‖Mq − p‖².
+/// Then performs a forward FDM solve with the resulting q.
+///
+/// `target_free_xyz` must point to `num_free * 3` doubles (row-major).
+///
+/// Returns 0 on success, -1 on error, -2 on internal panic.
+///
+/// # Safety
+/// Valid handle and output buffers.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_solve_nnls(
+    handle: *mut TheseusHandle,
+    target_free_xyz: *const f64,
+    max_iter: usize,
+    tol: f64,
+    out_q: *mut f64,
+    out_xyz: *mut f64,
+    out_lengths: *mut f64,
+    out_forces: *mut f64,
+    out_reactions: *mut f64,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let h = &mut *handle;
+        let nn_free = h.problem.topology.free_node_indices.len();
+        let nn = h.problem.topology.num_nodes;
+        let ne = h.problem.topology.num_edges;
+
+        let target = Array2::from_shape_vec(
+            (nn_free, 3),
+            slice::from_raw_parts(target_free_xyz, nn_free * 3).to_vec(),
+        ).map_err(|e| TheseusError::Shape(format!("target_free_xyz: {e}")))?;
+
+        let q = crate::inverse::solve_nnls(&h.problem, &target, max_iter, tol)?;
+
+        // Forward solve with the computed q
+        let mut cache = FdmCache::new(&h.problem)?;
+        let anchors = h.state.variable_anchor_positions.clone();
+        crate::fdm::solve_fdm(&mut cache, &q, &h.problem, &anchors, 1e-12)?;
+
+        // Copy outputs
+        slice::from_raw_parts_mut(out_q, ne).copy_from_slice(&q);
+
+        let xyz_out = slice::from_raw_parts_mut(out_xyz, nn * 3);
+        for i in 0..nn {
+            for d in 0..3 {
+                xyz_out[i * 3 + d] = cache.nf[[i, d]];
+            }
+        }
+        slice::from_raw_parts_mut(out_lengths, ne).copy_from_slice(&cache.member_lengths);
+        slice::from_raw_parts_mut(out_forces, ne).copy_from_slice(&cache.member_forces);
+
+        let r_out = slice::from_raw_parts_mut(out_reactions, nn * 3);
+        for i in 0..nn {
+            for d in 0..3 {
+                r_out[i * 3 + d] = cache.reactions[[i, d]];
+            }
+        }
+
+        Ok(())
+    }))
+}
+
+// ─────────────────────────────────────────────────────────────
 //  Helpers
 // ─────────────────────────────────────────────────────────────
 

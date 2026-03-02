@@ -314,6 +314,58 @@ public sealed class TheseusSolver : IDisposable
         };
     }
 
+    // ── Inverse solvers (experimental) ──────────────────────
+
+    public SolverResult SolvePseudoinverse(double[] targetFreeXyz, double regularization)
+    {
+        ThrowIfDisposed();
+        var q = new double[_numEdges];
+        var xyz = new double[_numNodes * 3];
+        var lengths = new double[_numEdges];
+        var forces = new double[_numEdges];
+        var reactions = new double[_numNodes * 3];
+
+        Check(TheseusInterop.theseus_solve_pseudoinverse(
+            _handle, targetFreeXyz, regularization,
+            q, xyz, lengths, forces, reactions));
+
+        return new SolverResult
+        {
+            Xyz = xyz,
+            MemberLengths = lengths,
+            MemberForces = forces,
+            ForceDensities = q,
+            Reactions = reactions,
+            Iterations = 1,
+            Converged = true,
+        };
+    }
+
+    public SolverResult SolveNnls(double[] targetFreeXyz, int maxIter, double tol)
+    {
+        ThrowIfDisposed();
+        var q = new double[_numEdges];
+        var xyz = new double[_numNodes * 3];
+        var lengths = new double[_numEdges];
+        var forces = new double[_numEdges];
+        var reactions = new double[_numNodes * 3];
+
+        Check(TheseusInterop.theseus_solve_nnls(
+            _handle, targetFreeXyz, (nuint)maxIter, tol,
+            q, xyz, lengths, forces, reactions));
+
+        return new SolverResult
+        {
+            Xyz = xyz,
+            MemberLengths = lengths,
+            MemberForces = forces,
+            ForceDensities = q,
+            Reactions = reactions,
+            Iterations = maxIter,
+            Converged = true,
+        };
+    }
+
     // ── IDisposable ──────────────────────────────────────────
 
     public void Dispose()
