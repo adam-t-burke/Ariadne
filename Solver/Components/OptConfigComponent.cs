@@ -2,12 +2,16 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using Grasshopper.Kernel;
+using Grasshopper.Kernel.Data;
+using Grasshopper.Kernel.Types;
+using Objective = Ariadne.Solver.Objective;
 
 namespace Ariadne.Solver.Components;
 
 /// <summary>
 /// Grasshopper component that bundles optimization settings into an
 /// <see cref="OptimizationConfig"/> object for the Theseus Solve component.
+/// Objectives are always flattened so a single solve runs (avoids multiple concurrent solves from tree branches).
 /// </summary>
 public class OptConfigComponent : GH_Component
 {
@@ -19,7 +23,7 @@ public class OptConfigComponent : GH_Component
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)
     {
-        pManager.AddGenericParameter("Objectives", "OBJ", "Objective functions to minimize", GH_ParamAccess.list);
+        pManager.AddGenericParameter("Objectives", "OBJ", "Objective functions to minimize (flattened automatically)", GH_ParamAccess.tree);
         pManager.AddNumberParameter("Lower Bounds", "qMin", "Lower bounds on force densities", GH_ParamAccess.list, 0.1);
         pManager.AddNumberParameter("Upper Bounds", "qMax", "Upper bounds on force densities", GH_ParamAccess.list, 100.0);
         pManager.AddIntegerParameter("Max Iterations", "MaxIter", "Maximum solver iterations", GH_ParamAccess.item, 500);
@@ -51,7 +55,19 @@ public class OptConfigComponent : GH_Component
         bool run = false;
         bool streamPreview = true;
 
-        if (!DA.GetDataList(0, objectives)) return;
+        // Flatten objectives tree so we always get one list — avoids multiple concurrent solves when branches are not flattened
+        var objTree = new GH_Structure<IGH_Goo>();
+        if (!DA.GetDataTree(0, out objTree)) return;
+        objTree.Flatten();
+        objectives.Clear();
+        foreach (var branch in objTree.Branches)
+        {
+            foreach (var goo in branch)
+            {
+                if (goo?.ScriptVariable() is Objective obj)
+                    objectives.Add(obj);
+            }
+        }
         DA.GetDataList(1, lb);
         DA.GetDataList(2, ub);
         DA.GetData(3, ref maxIter);
