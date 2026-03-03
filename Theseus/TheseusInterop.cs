@@ -168,6 +168,7 @@ internal static class TheseusInterop
     public static extern int theseus_solve_pseudoinverse(
         IntPtr handle,
         double[] target_free_xyz, double regularization,
+        int use_l2, nuint max_l1_iter, int use_augmented,
         double[] out_q, double[] out_xyz, double[] out_lengths,
         double[] out_forces, double[] out_reactions);
 

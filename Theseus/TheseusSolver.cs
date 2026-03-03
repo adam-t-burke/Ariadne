@@ -316,7 +316,9 @@ public sealed class TheseusSolver : IDisposable
 
     // ── Inverse solvers (experimental) ──────────────────────
 
-    public SolverResult SolvePseudoinverse(double[] targetFreeXyz, double regularization)
+    public SolverResult SolvePseudoinverse(
+        double[] targetFreeXyz, double regularization,
+        bool useL2 = true, int maxL1Iter = 20, bool useAugmented = false)
     {
         ThrowIfDisposed();
         var q = new double[_numEdges];
@@ -327,6 +329,7 @@ public sealed class TheseusSolver : IDisposable
 
         Check(TheseusInterop.theseus_solve_pseudoinverse(
             _handle, targetFreeXyz, regularization,
+            useL2 ? 1 : 0, (nuint)maxL1Iter, useAugmented ? 1 : 0,
             q, xyz, lengths, forces, reactions));
 
         return new SolverResult

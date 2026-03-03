@@ -837,9 +837,16 @@ pub unsafe extern "C" fn theseus_solve_forward(
 
 /// Solve for force densities via pseudoinverse of the equilibrium system.
 ///
-/// Given target free-node positions, finds q that best satisfies M q = p
-/// using Tikhonov-regularised sparse normal equations.  Then performs a
-/// forward FDM solve with the resulting q to produce final geometry.
+/// Given target free-node positions, finds q that best satisfies M q = p.
+/// When `use_l2` is non-zero, uses L2 (least-squares) via Tikhonov-regularised
+/// normal equations (single solve).  When zero, uses L1 (sum of absolute
+/// residuals) via IRLS for up to `max_l1_iter` iterations.
+///
+/// When `use_augmented` is non-zero, uses the augmented saddle-point system
+/// instead of forming M^T M.  This avoids fill-in explosion and is faster
+/// for large meshes (>50k edges).  Requires `regularization > 0`.
+///
+/// Then performs a forward FDM solve with the resulting q to produce final geometry.
 ///
 /// `target_free_xyz` must point to `num_free * 3` doubles (row-major).
 ///
@@ -852,6 +859,9 @@ pub unsafe extern "C" fn theseus_solve_pseudoinverse(
     handle: *mut TheseusHandle,
     target_free_xyz: *const f64,
     regularization: f64,
+    use_l2: i32,
+    max_l1_iter: usize,
+    use_augmented: i32,
     out_q: *mut f64,
     out_xyz: *mut f64,
     out_lengths: *mut f64,
@@ -869,7 +879,10 @@ pub unsafe extern "C" fn theseus_solve_pseudoinverse(
             slice::from_raw_parts(target_free_xyz, nn_free * 3).to_vec(),
         ).map_err(|e| TheseusError::Shape(format!("target_free_xyz: {e}")))?;
 
-        let q = crate::inverse::solve_pseudoinverse(&h.problem, &target, regularization)?;
+        let q = crate::inverse::solve_pseudoinverse_dispatch(
+            &h.problem, &target, regularization, use_l2 != 0, max_l1_iter,
+            use_augmented != 0,
+        )?;
 
         // Forward solve with the computed q
         let mut cache = FdmCache::new(&h.problem)?;
