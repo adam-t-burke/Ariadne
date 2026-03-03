@@ -26,10 +26,10 @@
 //!     by Rust via `theseus_free`.
 //!   - No JSON, no WebSocket — pure value types over the boundary.
 
+use crate::sparse::SparseColMatOwned;
 use crate::types::*;
 use crate::optimizer;
 use ndarray::Array2;
-use sprs::{CsMat, TriMat};
 use std::cell::RefCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
@@ -200,14 +200,16 @@ unsafe fn create_inner(
     let ub_slice = slice::from_raw_parts(upper_bounds, num_edges);
 
     // Build incidence matrix from COO
-    let mut tri = TriMat::new((num_edges, num_nodes));
-    for i in 0..coo_nnz {
-        tri.add_triplet(rows[i], cols[i], vals[i]);
-    }
-    let incidence = tri.to_csc();
+    let incidence = SparseColMatOwned::from_coo(
+        num_edges,
+        num_nodes,
+        rows,
+        cols,
+        vals,
+    ).map_err(|e| TheseusError::Shape(e))?;
 
-    let free_inc = extract_columns(&incidence, &free_idx);
-    let fixed_inc = extract_columns(&incidence, &fixed_idx);
+    let free_inc = incidence.extract_columns(&free_idx);
+    let fixed_inc = incidence.extract_columns(&fixed_idx);
 
     let topology = NetworkTopology {
         incidence,
@@ -976,24 +978,3 @@ pub unsafe extern "C" fn theseus_solve_nnls(
     }))
 }
 
-// ─────────────────────────────────────────────────────────────
-//  Helpers
-// ─────────────────────────────────────────────────────────────
-
-/// Extract columns from a CSC matrix by index.
-fn extract_columns(mat: &CsMat<f64>, cols: &[usize]) -> CsMat<f64> {
-    let nrows = mat.rows();
-    let ncols = cols.len();
-    let mut tri = TriMat::new((nrows, ncols));
-
-    let mat_csc = mat.to_csc();
-    for (new_col, &old_col) in cols.iter().enumerate() {
-        let start = mat_csc.indptr().raw_storage()[old_col];
-        let end_ = mat_csc.indptr().raw_storage()[old_col + 1];
-        for nz in start..end_ {
-            tri.add_triplet(mat_csc.indices()[nz], new_col, mat_csc.data()[nz]);
-        }
-    }
-
-    tri.to_csc()
-}

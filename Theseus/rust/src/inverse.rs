@@ -19,10 +19,9 @@
 //!   - **NNLS** (spectral projected gradient):
 //!       min ‖Mq − p‖²  s.t. q ≥ 0   →  sparse matvecs only
 
-use crate::types::{Problem, TheseusError};
+use crate::sparse::SparseColMatOwned;
+use crate::types::{Factorization, FactorizationStrategy, Problem, TheseusError};
 use ndarray::Array2;
-use sprs::{CsMat, TriMat};
-use sprs_ldl::Ldl;
 
 // ─────────────────────────────────────────────────────────────
 //  Target member vectors
@@ -54,14 +53,14 @@ fn compute_target_member_vectors(
     }
 
     // u = C * N  via incidence (CSC)
-    let inc = topo.incidence.to_csc();
+    let inc = &topo.incidence;
     let mut u = Array2::<f64>::zeros((ne, 3));
     for col in 0..nn {
-        let start = inc.indptr().raw_storage()[col];
-        let end_ = inc.indptr().raw_storage()[col + 1];
+        let start = inc.col_ptrs[col] as usize;
+        let end_ = inc.col_ptrs[col + 1] as usize;
         for nz in start..end_ {
-            let row = inc.indices()[nz];
-            let val = inc.data()[nz];
+            let row = inc.row_indices[nz] as usize;
+            let val = inc.values[nz];
             for d in 0..3 {
                 u[[row, d]] += val * nf[[col, d]];
             }
@@ -81,18 +80,16 @@ fn compute_target_member_vectors(
 fn build_equilibrium_matrix(
     problem: &Problem,
     u: &Array2<f64>,
-) -> (CsMat<f64>, Vec<f64>) {
+) -> (SparseColMatOwned, Vec<f64>) {
     let topo = &problem.topology;
     let ne = topo.num_edges;
     let nn_free = topo.free_node_indices.len();
     let m_rows = 3 * nn_free;
 
     // Cn is (ne × nn_free).  Cn^T is (nn_free × ne).
-    let cn_t = topo.free_incidence.transpose_view().to_csc();
+    let cn_t = topo.free_incidence.transpose();
 
-    let mut tri = TriMat::new((m_rows, ne));
-
-    // For each dimension d, M_d = Cn^T · diag(u_d): column j of Cn^T scaled by u[j,d]
+    let mut triplets: Vec<(u32, u32, f64)> = Vec::new();
     for d in 0..3usize {
         let row_offset = d * nn_free;
         for col in 0..ne {
@@ -100,17 +97,18 @@ fn build_equilibrium_matrix(
             if scale == 0.0 {
                 continue;
             }
-            let start = cn_t.indptr().raw_storage()[col];
-            let end_ = cn_t.indptr().raw_storage()[col + 1];
+            let start = cn_t.col_ptrs[col] as usize;
+            let end_ = cn_t.col_ptrs[col + 1] as usize;
             for nz in start..end_ {
-                let row = cn_t.indices()[nz];
-                let val = cn_t.data()[nz];
-                tri.add_triplet(row_offset + row, col, val * scale);
+                let row = cn_t.row_indices[nz] as usize;
+                let val = cn_t.values[nz];
+                triplets.push(((row_offset + row) as u32, col as u32, val * scale));
             }
         }
     }
 
-    let m_mat = tri.to_csc();
+    let m_mat = SparseColMatOwned::from_triplets(m_rows, ne, &triplets)
+        .expect("build_equilibrium_matrix");
 
     // p = [Pn_x; Pn_y; Pn_z]
     let loads = &problem.free_node_loads;
@@ -143,43 +141,40 @@ fn build_equilibrium_matrix(
 ///
 /// Returns `(K, rhs)` where K is CSC and `rhs = [rhs_top; 0]`.
 fn build_augmented_system(
-    m_mat: &CsMat<f64>,
+    m_mat: &SparseColMatOwned,
     rhs_top: &[f64],
     regularization: f64,
-) -> (CsMat<f64>, Vec<f64>) {
-    let m = m_mat.rows();
-    let n = m_mat.cols();
+) -> (SparseColMatOwned, Vec<f64>) {
+    let m = m_mat.nrows;
+    let n = m_mat.ncols;
     let total = m + n;
 
-    let m_csc = m_mat.to_csc();
-    let nnz_m = m_csc.nnz();
-    let estimated_nnz = m + 2 * nnz_m + n;
-
-    let mut tri = TriMat::with_capacity((total, total), estimated_nnz);
+    let mut triplets: Vec<(u32, u32, f64)> = Vec::new();
 
     // Top-left: I  (m × m)
     for i in 0..m {
-        tri.add_triplet(i, i, 1.0);
+        triplets.push((i as u32, i as u32, 1.0));
     }
 
     // Upper-right: M  and  lower-left: M^T  (symmetric pair)
-    let indptr = m_csc.indptr();
-    let raw = indptr.raw_storage();
     for col in 0..n {
-        for nz in raw[col]..raw[col + 1] {
-            let row = m_csc.indices()[nz];
-            let val = m_csc.data()[nz];
-            tri.add_triplet(row, m + col, val);
-            tri.add_triplet(m + col, row, val);
+        let start = m_mat.col_ptrs[col] as usize;
+        let end_ = m_mat.col_ptrs[col + 1] as usize;
+        for nz in start..end_ {
+            let row = m_mat.row_indices[nz] as usize;
+            let val = m_mat.values[nz];
+            triplets.push((row as u32, (m + col) as u32, val));
+            triplets.push(((m + col) as u32, row as u32, val));
         }
     }
 
     // Bottom-right: -λI  (n × n)
     for j in 0..n {
-        tri.add_triplet(m + j, m + j, -regularization);
+        triplets.push(((m + j) as u32, (m + j) as u32, -regularization));
     }
 
-    let k_mat = tri.to_csc();
+    let k_mat = SparseColMatOwned::from_triplets(total, total, &triplets)
+        .expect("build_augmented_system");
 
     // RHS = [rhs_top; 0]
     let mut rhs = vec![0.0; total];
@@ -195,24 +190,22 @@ fn build_augmented_system(
 /// Compute r = M·q  without forming M.
 ///
 /// r_d = Cn^T · (u_d ⊙ q)  for each dimension d, concatenated.
-fn apply_m(cn_t_csc: &CsMat<f64>, u: &Array2<f64>, q: &[f64], nn_free: usize) -> Vec<f64> {
+fn apply_m(cn_t: &SparseColMatOwned, u: &Array2<f64>, q: &[f64], nn_free: usize) -> Vec<f64> {
     let ne = q.len();
     let mut r = vec![0.0; 3 * nn_free];
 
     for d in 0..3usize {
         let off = d * nn_free;
-        // w = u_d ⊙ q
-        // Cn^T · w  (Cn^T is nn_free × ne, CSC)
         for col in 0..ne {
             let w = u[[col, d]] * q[col];
             if w == 0.0 {
                 continue;
             }
-            let start = cn_t_csc.indptr().raw_storage()[col];
-            let end_ = cn_t_csc.indptr().raw_storage()[col + 1];
+            let start = cn_t.col_ptrs[col] as usize;
+            let end_ = cn_t.col_ptrs[col + 1] as usize;
             for nz in start..end_ {
-                let row = cn_t_csc.indices()[nz];
-                let val = cn_t_csc.data()[nz];
+                let row = cn_t.row_indices[nz] as usize;
+                let val = cn_t.values[nz];
                 r[off + row] += val * w;
             }
         }
@@ -223,7 +216,7 @@ fn apply_m(cn_t_csc: &CsMat<f64>, u: &Array2<f64>, q: &[f64], nn_free: usize) ->
 /// Compute g = M^T · r  without forming M.
 ///
 /// g_k = Σ_d  u[k,d] · (Cn · r_d)[k]
-fn apply_mt(cn_csc: &CsMat<f64>, u: &Array2<f64>, r: &[f64], nn_free: usize) -> Vec<f64> {
+fn apply_mt(cn: &SparseColMatOwned, u: &Array2<f64>, r: &[f64], nn_free: usize) -> Vec<f64> {
     let ne = u.nrows();
     let mut g = vec![0.0; ne];
 
@@ -231,18 +224,16 @@ fn apply_mt(cn_csc: &CsMat<f64>, u: &Array2<f64>, r: &[f64], nn_free: usize) -> 
         let off = d * nn_free;
         let r_d = &r[off..off + nn_free];
 
-        // v = Cn · r_d  (Cn is ne × nn_free, CSC)
-        // Then g_k += u[k,d] * v_k
         for col in 0..nn_free {
             let rd_val = r_d[col];
             if rd_val == 0.0 {
                 continue;
             }
-            let start = cn_csc.indptr().raw_storage()[col];
-            let end_ = cn_csc.indptr().raw_storage()[col + 1];
+            let start = cn.col_ptrs[col] as usize;
+            let end_ = cn.col_ptrs[col + 1] as usize;
             for nz in start..end_ {
-                let row = cn_csc.indices()[nz];
-                let val = cn_csc.data()[nz];
+                let row = cn.row_indices[nz] as usize;
+                let val = cn.values[nz];
                 g[row] += u[[row, d]] * val * rd_val;
             }
         }
@@ -268,26 +259,21 @@ pub fn solve_pseudoinverse(
     let (m_mat, p) = build_equilibrium_matrix(problem, &u);
 
     // G = M^T M  (ne × ne, sparse)
-    let m_t = m_mat.transpose_view().to_csc();
-    let m_csc = m_mat.to_csc();
-    let mut g: CsMat<f64> = (&m_t * &m_csc).to_csc();
+    let m_t = m_mat.transpose();
+    let mut g = SparseColMatOwned::sparse_times_sparse(&m_t, &m_mat)
+        .map_err(|e| TheseusError::Solver(e))?;
 
     // Add regularisation: G += λ I
     if regularization > 0.0 {
-        add_diagonal(&mut g, regularization);
+        g.add_diagonal(regularization);
     }
 
     // h = M^T p  (sparse-dense matvec)
-    let h = sparse_matvec(&m_t, &p);
+    let h = m_t.matvec(&p);
 
-    // Factorise G and solve
-    let ldl = Ldl::new()
-        .fill_in_reduction(sprs::FillInReduction::ReverseCuthillMcKee)
-        .check_symmetry(sprs::SymmetryCheck::DontCheckSymmetry)
-        .numeric(g.view())
-        .map_err(|e| TheseusError::Linalg(e))?;
-
-    let q = ldl.solve(&h);
+    // Factorise G and solve (LDL for normal equations)
+    let fac = Factorization::new(&g, FactorizationStrategy::LDL)?;
+    let q = fac.solve(&h);
 
     // Validate solution
     for (i, &v) in q.iter().enumerate() {
@@ -299,7 +285,6 @@ pub fn solve_pseudoinverse(
         }
     }
 
-    // Ensure correct length (should always match, but be safe)
     if q.len() != ne {
         return Err(TheseusError::Shape(format!(
             "pseudoinverse returned {} q values, expected {ne}",
@@ -343,13 +328,8 @@ pub fn solve_pseudoinverse_augmented(
 
     let (k_mat, rhs) = build_augmented_system(&m_mat, &p, regularization);
 
-    let ldl = Ldl::new()
-        .fill_in_reduction(sprs::FillInReduction::ReverseCuthillMcKee)
-        .check_symmetry(sprs::SymmetryCheck::DontCheckSymmetry)
-        .numeric(k_mat.view())
-        .map_err(|e| TheseusError::Linalg(e))?;
-
-    let sol = ldl.solve(&rhs);
+    let fac = Factorization::new(&k_mat, FactorizationStrategy::LDL)?;
+    let sol = fac.solve(&rhs);
 
     // q occupies the last ne entries of the solution vector
     let q: Vec<f64> = sol[m_rows..m_rows + ne].to_vec();
@@ -395,29 +375,25 @@ pub fn solve_pseudoinverse_l1(
     let u = compute_target_member_vectors(problem, target_free_xyz);
     let (m_mat, p) = build_equilibrium_matrix(problem, &u);
 
-    let m_t = m_mat.transpose_view().to_csc();
-    let m_csc = m_mat.to_csc();
+    let m_t = m_mat.transpose();
     let m_rows = p.len();
 
     // Warm-start: L2 solution  (M^T M + λI) q = M^T p
-    let mut g_l2: CsMat<f64> = (&m_t * &m_csc).to_csc();
+    let mut g_l2 = SparseColMatOwned::sparse_times_sparse(&m_t, &m_mat)
+        .map_err(|e| TheseusError::Solver(e))?;
     if regularization > 0.0 {
-        add_diagonal(&mut g_l2, regularization);
+        g_l2.add_diagonal(regularization);
     }
-    let h_l2 = sparse_matvec(&m_t, &p);
-    let ldl_l2 = Ldl::new()
-        .fill_in_reduction(sprs::FillInReduction::ReverseCuthillMcKee)
-        .check_symmetry(sprs::SymmetryCheck::DontCheckSymmetry)
-        .numeric(g_l2.view())
-        .map_err(|e| TheseusError::Linalg(e))?;
-    let mut q = ldl_l2.solve(&h_l2);
+    let h_l2 = m_t.matvec(&p);
+    let fac_l2 = Factorization::new(&g_l2, FactorizationStrategy::LDL)?;
+    let mut q = fac_l2.solve(&h_l2);
 
     const ABS_EPS: f64 = 1e-12;
     let mut prev_l1 = f64::MAX;
 
     for _ in 0..max_iter {
         // r = M*q − p
-        let mut r = sparse_matvec(&m_csc, &q);
+        let mut r = m_mat.matvec(&q);
         for (ri, &pi) in r.iter_mut().zip(p.iter()) {
             *ri -= pi;
         }
@@ -464,21 +440,17 @@ pub fn solve_pseudoinverse_l1(
         prev_l1 = l1_obj;
 
         // Weighted normal equations: G = M_w^T M_w + λ'I,  h = M^T W' p
-        let m_w = row_scaled_copy(&m_csc, &sqrt_w);
-        let m_w_t = m_w.transpose_view().to_csc();
-        let mut g: CsMat<f64> = (&m_w_t * &m_w).to_csc();
+        let m_w = row_scaled_copy(&m_mat, &sqrt_w);
+        let m_w_t = m_w.transpose();
+        let mut g = SparseColMatOwned::sparse_times_sparse(&m_w_t, &m_w)
+            .map_err(|e| TheseusError::Solver(e))?;
         if effective_reg > 0.0 {
-            add_diagonal(&mut g, effective_reg);
+            g.add_diagonal(effective_reg);
         }
-        let h = sparse_matvec(&m_t, &wp);
+        let h = m_t.matvec(&wp);
 
-        let ldl = Ldl::new()
-            .fill_in_reduction(sprs::FillInReduction::ReverseCuthillMcKee)
-            .check_symmetry(sprs::SymmetryCheck::DontCheckSymmetry)
-            .numeric(g.view())
-            .map_err(|e| TheseusError::Linalg(e))?;
-
-        q = ldl.solve(&h);
+        let fac = Factorization::new(&g, FactorizationStrategy::LDL)?;
+        q = fac.solve(&h);
     }
 
     // Validate solution
@@ -526,17 +498,12 @@ pub fn solve_pseudoinverse_l1_augmented(
     let u = compute_target_member_vectors(problem, target_free_xyz);
     let (m_mat, p) = build_equilibrium_matrix(problem, &u);
 
-    let m_csc = m_mat.to_csc();
     let m_rows = p.len();
 
     // Warm-start: L2 solution via augmented system
     let (k_l2, rhs_l2) = build_augmented_system(&m_mat, &p, regularization);
-    let ldl_l2 = Ldl::new()
-        .fill_in_reduction(sprs::FillInReduction::ReverseCuthillMcKee)
-        .check_symmetry(sprs::SymmetryCheck::DontCheckSymmetry)
-        .numeric(k_l2.view())
-        .map_err(|e| TheseusError::Linalg(e))?;
-    let sol_l2 = ldl_l2.solve(&rhs_l2);
+    let fac_l2 = Factorization::new(&k_l2, FactorizationStrategy::LDL)?;
+    let sol_l2 = fac_l2.solve(&rhs_l2);
     let mut q: Vec<f64> = sol_l2[m_rows..m_rows + ne].to_vec();
 
     const ABS_EPS: f64 = 1e-12;
@@ -544,7 +511,7 @@ pub fn solve_pseudoinverse_l1_augmented(
 
     for _ in 0..max_iter {
         // r = M*q − p
-        let mut r = sparse_matvec(&m_csc, &q);
+        let mut r = m_mat.matvec(&q);
         for (ri, &pi) in r.iter_mut().zip(p.iter()) {
             *ri -= pi;
         }
@@ -585,18 +552,13 @@ pub fn solve_pseudoinverse_l1_augmented(
 
         // Build M_w = diag(sqrt_w) * M, then augmented system with
         // RHS top = sqrt_w ⊙ p  (so that M_w^T * rhs_top = M^T W p).
-        let m_w = row_scaled_copy(&m_csc, &sqrt_w);
+        let m_w = row_scaled_copy(&m_mat, &sqrt_w);
         let rhs_top: Vec<f64> = (0..m_rows).map(|i| sqrt_w[i] * p[i]).collect();
 
         let (k_mat, rhs) = build_augmented_system(&m_w, &rhs_top, effective_reg);
 
-        let ldl = Ldl::new()
-            .fill_in_reduction(sprs::FillInReduction::ReverseCuthillMcKee)
-            .check_symmetry(sprs::SymmetryCheck::DontCheckSymmetry)
-            .numeric(k_mat.view())
-            .map_err(|e| TheseusError::Linalg(e))?;
-
-        let sol = ldl.solve(&rhs);
+        let fac = Factorization::new(&k_mat, FactorizationStrategy::LDL)?;
+        let sol = fac.solve(&rhs);
         q = sol[m_rows..m_rows + ne].to_vec();
     }
 
@@ -660,8 +622,8 @@ pub fn solve_nnls(
 
     let u = compute_target_member_vectors(problem, target_free_xyz);
 
-    let cn_t_csc = problem.topology.free_incidence.transpose_view().to_csc();
-    let cn_csc = problem.topology.free_incidence.to_csc();
+    let cn_t = problem.topology.free_incidence.transpose();
+    let cn = &problem.topology.free_incidence;
 
     // p = [Pn_x; Pn_y; Pn_z]
     let loads = &problem.free_node_loads;
@@ -682,13 +644,13 @@ pub fn solve_nnls(
 
     for iter in 0..max_iter {
         // r = M·q − p
-        let mut r = apply_m(&cn_t_csc, &u, &q, nn_free);
+        let mut r = apply_m(&cn_t, &u, &q, nn_free);
         for (ri, &pi) in r.iter_mut().zip(p.iter()) {
             *ri -= pi;
         }
 
         // g = M^T · r  (gradient of ½‖Mq−p‖²)
-        let g = apply_mt(&cn_csc, &u, &r, nn_free);
+        let g = apply_mt(cn, &u, &r, nn_free);
 
         // Barzilai-Borwein step size (after first iteration)
         if iter > 0 {
@@ -741,55 +703,15 @@ pub fn solve_nnls(
 // ─────────────────────────────────────────────────────────────
 
 /// Create a copy of a CSC matrix with each row `i` scaled by `row_scales[i]`.
-fn row_scaled_copy(mat: &CsMat<f64>, row_scales: &[f64]) -> CsMat<f64> {
+fn row_scaled_copy(mat: &SparseColMatOwned, row_scales: &[f64]) -> SparseColMatOwned {
     let mut scaled = mat.clone();
-    let indptr = scaled.indptr().to_owned();
-    let raw = indptr.raw_storage();
-    for col in 0..scaled.cols() {
-        for nz in raw[col]..raw[col + 1] {
-            let row = scaled.indices()[nz];
-            scaled.data_mut()[nz] *= row_scales[row];
+    for col in 0..scaled.ncols {
+        let start = scaled.col_ptrs[col] as usize;
+        let end_ = scaled.col_ptrs[col + 1] as usize;
+        for nz in start..end_ {
+            let row = scaled.row_indices[nz] as usize;
+            scaled.values[nz] *= row_scales[row];
         }
     }
     scaled
-}
-
-/// Add a scalar to every diagonal entry of a CSC matrix (in-place).
-fn add_diagonal(mat: &mut CsMat<f64>, value: f64) {
-    let n = mat.cols().min(mat.rows());
-    let indptr = mat.indptr().to_owned();
-    let raw = indptr.raw_storage();
-    for col in 0..n {
-        let start = raw[col];
-        let end_ = raw[col + 1];
-        for nz in start..end_ {
-            if mat.indices()[nz] == col {
-                mat.data_mut()[nz] += value;
-                break;
-            }
-        }
-    }
-}
-
-/// Sparse matrix × dense vector  (CSC layout).
-fn sparse_matvec(mat: &CsMat<f64>, x: &[f64]) -> Vec<f64> {
-    let nrows = mat.rows();
-    let ncols = mat.cols();
-    let mut y = vec![0.0; nrows];
-    let indptr = mat.indptr();
-    let raw = indptr.raw_storage();
-    for col in 0..ncols {
-        let xc = x[col];
-        if xc == 0.0 {
-            continue;
-        }
-        let start = raw[col];
-        let end_ = raw[col + 1];
-        for nz in start..end_ {
-            let row = mat.indices()[nz];
-            let val = mat.data()[nz];
-            y[row] += val * xc;
-        }
-    }
-    y
 }
