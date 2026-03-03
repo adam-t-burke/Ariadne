@@ -1,4 +1,6 @@
 using System;
+using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
 
 namespace Theseus.Interop;
@@ -13,6 +15,31 @@ namespace Theseus.Interop;
 internal static class TheseusInterop
 {
     const string DLL = "theseus";
+
+    static TheseusInterop()
+    {
+        NativeLibrary.SetDllImportResolver(typeof(TheseusInterop).Assembly, ResolveTheseus);
+    }
+
+    static IntPtr ResolveTheseus(string name, Assembly assembly, DllImportSearchPath? searchPath)
+    {
+        if (name != DLL)
+            return IntPtr.Zero;
+
+        string? dir = Path.GetDirectoryName(assembly.Location);
+        if (string.IsNullOrEmpty(dir))
+            return IntPtr.Zero;
+
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && !RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            return IntPtr.Zero;
+
+        string fileName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "theseus.dll" : "libtheseus.dylib";
+        string path = Path.Combine(dir, fileName);
+
+        if (NativeLibrary.TryLoad(path, assembly, searchPath, out IntPtr handle))
+            return handle;
+        return IntPtr.Zero;
+    }
 
     // ── Error reporting ──────────────────────────────────────
 

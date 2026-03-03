@@ -2,7 +2,7 @@
 	
   <PropertyGroup>
     <TargetFrameworks>net8.0</TargetFrameworks>
-    <Version>1.0.1</Version>
+    <Version>1.0.11-beta</Version>
     <Title>Ariadne</Title>
     <Description>Ariadne is the front-end counterpart to the inverse form finding tool Theseus.</Description>
 <TargetExt>.gha</TargetExt>
@@ -13,9 +13,14 @@
     <NoWarn>$(NoWarn);1591</NoWarn>
   </PropertyGroup>
 
-  <!-- Copy theseus.dll native library to output -->
+  <PropertyGroup Condition="!$([MSBuild]::IsOSPlatform('Windows'))">
+    <GenerateErrorForMissingTargetingPacks>false</GenerateErrorForMissingTargetingPacks>
+  </PropertyGroup>
+
+  <!-- Copy native theseus library to output (Windows, Mac) -->
   <ItemGroup>
     <None Include="Theseus\theseus.dll" Link="theseus.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Theseus\libtheseus.dylib" Link="libtheseus.dylib" CopyToOutputDirectory="PreserveNewest" Condition="Exists('Theseus\libtheseus.dylib')" />
   </ItemGroup>
   
   <ItemGroup>
