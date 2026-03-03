@@ -7,10 +7,14 @@
 //! where u_d = C · N_target are the target member coordinate differences.
 //! Stacking all 3 dimensions gives the sparse system  M q = p.
 //!
-//! Two solvers are provided:
+//! Three solvers are provided:
 //!
-//!   - **Pseudoinverse** (Tikhonov-regularised normal equations):
-//!       (M^T M + λI) q = M^T p    →  sparse LDL via `sprs-ldl`
+//!   - **Pseudoinverse L2** (Tikhonov-regularised normal equations):
+//!       min ‖Mq − p‖²  (+λ‖q‖²)   →  single sparse LDL via `sprs-ldl`
+//!
+//!   - **Pseudoinverse L1** (iteratively reweighted least squares):
+//!       min ‖Mq − p‖₁  (+λ‖q‖²)   →  IRLS: repeated weighted L2 solves
+//!       More robust than L2 when a few equilibrium equations are outliers.
 //!
 //!   - **NNLS** (spectral projected gradient):
 //!       min ‖Mq − p‖²  s.t. q ≥ 0   →  sparse matvecs only
@@ -119,6 +123,69 @@ fn build_equilibrium_matrix(
     }
 
     (m_mat, p)
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Augmented (saddle-point) system builder
+// ─────────────────────────────────────────────────────────────
+
+/// Build the augmented (saddle-point) system that avoids forming M^T M.
+///
+/// Instead of the normal equations `(M^T M + λI) q = M^T p`, assembles:
+///
+///   [ I    M  ] [r]   [rhs_top]
+///   [ M^T  -λI] [q] = [   0   ]
+///
+/// The augmented matrix is symmetric indefinite with size (m+n)×(m+n)
+/// where m = M.rows() and n = M.cols().  Non-zeros are O(nnz(M))
+/// rather than O(nnz(M^T M)), which avoids the fill-in explosion
+/// from the Gram product at large scales (>50k edges).
+///
+/// Returns `(K, rhs)` where K is CSC and `rhs = [rhs_top; 0]`.
+fn build_augmented_system(
+    m_mat: &CsMat<f64>,
+    rhs_top: &[f64],
+    regularization: f64,
+) -> (CsMat<f64>, Vec<f64>) {
+    let m = m_mat.rows();
+    let n = m_mat.cols();
+    let total = m + n;
+
+    let m_csc = m_mat.to_csc();
+    let nnz_m = m_csc.nnz();
+    let estimated_nnz = m + 2 * nnz_m + n;
+
+    let mut tri = TriMat::with_capacity((total, total), estimated_nnz);
+
+    // Top-left: I  (m × m)
+    for i in 0..m {
+        tri.add_triplet(i, i, 1.0);
+    }
+
+    // Upper-right: M  and  lower-left: M^T  (symmetric pair)
+    let indptr = m_csc.indptr();
+    let raw = indptr.raw_storage();
+    for col in 0..n {
+        for nz in raw[col]..raw[col + 1] {
+            let row = m_csc.indices()[nz];
+            let val = m_csc.data()[nz];
+            tri.add_triplet(row, m + col, val);
+            tri.add_triplet(m + col, row, val);
+        }
+    }
+
+    // Bottom-right: -λI  (n × n)
+    for j in 0..n {
+        tri.add_triplet(m + j, m + j, -regularization);
+    }
+
+    let k_mat = tri.to_csc();
+
+    // RHS = [rhs_top; 0]
+    let mut rhs = vec![0.0; total];
+    rhs[..m].copy_from_slice(rhs_top);
+
+    (k_mat, rhs)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -244,6 +311,338 @@ pub fn solve_pseudoinverse(
 }
 
 // ─────────────────────────────────────────────────────────────
+//  Pseudoinverse L2  (augmented saddle-point system)
+// ─────────────────────────────────────────────────────────────
+
+/// Find force densities via pseudoinverse using the augmented saddle-point system.
+///
+/// Mathematically equivalent to `solve_pseudoinverse` but avoids forming M^T M.
+/// Instead factorises the larger but much sparser augmented system:
+///
+///   [ I    M  ] [r]   [p]
+///   [ M^T  -λI] [q] = [0]
+///
+/// Asymptotically faster for large meshes (>50k edges) where the M^T M
+/// fill-in explosion dominates runtime.  Requires `λ > 0`.
+pub fn solve_pseudoinverse_augmented(
+    problem: &Problem,
+    target_free_xyz: &Array2<f64>,
+    regularization: f64,
+) -> Result<Vec<f64>, TheseusError> {
+    if regularization <= 0.0 {
+        return Err(TheseusError::Solver(
+            "augmented system requires regularization > 0".into(),
+        ));
+    }
+
+    let ne = problem.topology.num_edges;
+    let m_rows = 3 * problem.topology.free_node_indices.len();
+
+    let u = compute_target_member_vectors(problem, target_free_xyz);
+    let (m_mat, p) = build_equilibrium_matrix(problem, &u);
+
+    let (k_mat, rhs) = build_augmented_system(&m_mat, &p, regularization);
+
+    let ldl = Ldl::new()
+        .fill_in_reduction(sprs::FillInReduction::ReverseCuthillMcKee)
+        .check_symmetry(sprs::SymmetryCheck::DontCheckSymmetry)
+        .numeric(k_mat.view())
+        .map_err(|e| TheseusError::Linalg(e))?;
+
+    let sol = ldl.solve(&rhs);
+
+    // q occupies the last ne entries of the solution vector
+    let q: Vec<f64> = sol[m_rows..m_rows + ne].to_vec();
+
+    for (i, &v) in q.iter().enumerate() {
+        if !v.is_finite() {
+            return Err(TheseusError::Solver(format!(
+                "pseudoinverse (augmented) produced non-finite q at edge {i}; \
+                 increase regularisation or check target geometry",
+            )));
+        }
+    }
+
+    if q.len() != ne {
+        return Err(TheseusError::Shape(format!(
+            "pseudoinverse (augmented) returned {} q values, expected {ne}",
+            q.len()
+        )));
+    }
+
+    Ok(q)
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Pseudoinverse L1  (IRLS — iteratively reweighted least squares)
+// ─────────────────────────────────────────────────────────────
+
+/// Find force densities via L1-minimisation of the equilibrium residual.
+///
+/// Minimises `‖Mq − p‖₁` (sum of absolute residuals) using IRLS:
+/// each iteration solves a weighted least-squares problem
+/// `(M^T W M + λI) q = M^T W p` where `W = diag(1/max(|r_i|, ε))`.
+///
+/// Warm-starts from the L2 pseudoinverse solution for fast convergence.
+pub fn solve_pseudoinverse_l1(
+    problem: &Problem,
+    target_free_xyz: &Array2<f64>,
+    regularization: f64,
+    max_iter: usize,
+) -> Result<Vec<f64>, TheseusError> {
+    let ne = problem.topology.num_edges;
+
+    let u = compute_target_member_vectors(problem, target_free_xyz);
+    let (m_mat, p) = build_equilibrium_matrix(problem, &u);
+
+    let m_t = m_mat.transpose_view().to_csc();
+    let m_csc = m_mat.to_csc();
+    let m_rows = p.len();
+
+    // Warm-start: L2 solution  (M^T M + λI) q = M^T p
+    let mut g_l2: CsMat<f64> = (&m_t * &m_csc).to_csc();
+    if regularization > 0.0 {
+        add_diagonal(&mut g_l2, regularization);
+    }
+    let h_l2 = sparse_matvec(&m_t, &p);
+    let ldl_l2 = Ldl::new()
+        .fill_in_reduction(sprs::FillInReduction::ReverseCuthillMcKee)
+        .check_symmetry(sprs::SymmetryCheck::DontCheckSymmetry)
+        .numeric(g_l2.view())
+        .map_err(|e| TheseusError::Linalg(e))?;
+    let mut q = ldl_l2.solve(&h_l2);
+
+    const ABS_EPS: f64 = 1e-12;
+    let mut prev_l1 = f64::MAX;
+
+    for _ in 0..max_iter {
+        // r = M*q − p
+        let mut r = sparse_matvec(&m_csc, &q);
+        for (ri, &pi) in r.iter_mut().zip(p.iter()) {
+            *ri -= pi;
+        }
+
+        // Adaptive epsilon: proportional to the largest residual so that
+        // the weight ratio stays bounded (~1e4:1), preventing the weighted
+        // Gram matrix from becoming ill-conditioned.
+        let max_abs_r = r.iter().map(|ri| ri.abs()).fold(0.0_f64, f64::max);
+        let eps_iter = (1e-4 * max_abs_r).max(ABS_EPS);
+
+        // L1 objective and IRLS weights  (w_i = 1/max(|r_i|, eps))
+        let mut l1_obj = 0.0;
+        let mut sqrt_w = vec![0.0; m_rows];
+        let mut wp = vec![0.0; m_rows];
+        for i in 0..m_rows {
+            let abs_r = r[i].abs();
+            l1_obj += abs_r;
+            let w_i = 1.0 / abs_r.max(eps_iter);
+            sqrt_w[i] = w_i.sqrt();
+            wp[i] = w_i * p[i];
+        }
+
+        // Normalize weights so max(w) = 1, keeping M^T W M entries O(1).
+        // Divide regularisation by the same factor to preserve the solution.
+        let w_max = sqrt_w.iter().map(|s| s * s).fold(0.0_f64, f64::max);
+        let effective_reg = if w_max > 0.0 {
+            let inv_sqrt_wmax = 1.0 / w_max.sqrt();
+            for i in 0..m_rows {
+                sqrt_w[i] *= inv_sqrt_wmax;
+                wp[i] /= w_max;
+            }
+            regularization / w_max
+        } else {
+            regularization
+        };
+
+        // Convergence: relative change in L1 objective
+        if prev_l1 < f64::MAX {
+            let rel_change = (prev_l1 - l1_obj).abs() / (prev_l1 + ABS_EPS);
+            if rel_change < 1e-8 {
+                break;
+            }
+        }
+        prev_l1 = l1_obj;
+
+        // Weighted normal equations: G = M_w^T M_w + λ'I,  h = M^T W' p
+        let m_w = row_scaled_copy(&m_csc, &sqrt_w);
+        let m_w_t = m_w.transpose_view().to_csc();
+        let mut g: CsMat<f64> = (&m_w_t * &m_w).to_csc();
+        if effective_reg > 0.0 {
+            add_diagonal(&mut g, effective_reg);
+        }
+        let h = sparse_matvec(&m_t, &wp);
+
+        let ldl = Ldl::new()
+            .fill_in_reduction(sprs::FillInReduction::ReverseCuthillMcKee)
+            .check_symmetry(sprs::SymmetryCheck::DontCheckSymmetry)
+            .numeric(g.view())
+            .map_err(|e| TheseusError::Linalg(e))?;
+
+        q = ldl.solve(&h);
+    }
+
+    // Validate solution
+    for (i, &v) in q.iter().enumerate() {
+        if !v.is_finite() {
+            return Err(TheseusError::Solver(format!(
+                "pseudoinverse L1 produced non-finite q at edge {i}; \
+                 increase regularisation or check target geometry",
+            )));
+        }
+    }
+    if q.len() != ne {
+        return Err(TheseusError::Shape(format!(
+            "pseudoinverse L1 returned {} q values, expected {ne}",
+            q.len()
+        )));
+    }
+
+    Ok(q)
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Pseudoinverse L1  (augmented saddle-point IRLS)
+// ─────────────────────────────────────────────────────────────
+
+/// Find force densities via L1-minimisation using the augmented saddle-point system.
+///
+/// Equivalent to `solve_pseudoinverse_l1` but each IRLS iteration factorises
+/// the augmented system instead of forming M_w^T M_w.  Avoids fill-in explosion
+/// at large scales.  Requires `λ > 0`.
+pub fn solve_pseudoinverse_l1_augmented(
+    problem: &Problem,
+    target_free_xyz: &Array2<f64>,
+    regularization: f64,
+    max_iter: usize,
+) -> Result<Vec<f64>, TheseusError> {
+    if regularization <= 0.0 {
+        return Err(TheseusError::Solver(
+            "augmented system requires regularization > 0".into(),
+        ));
+    }
+
+    let ne = problem.topology.num_edges;
+
+    let u = compute_target_member_vectors(problem, target_free_xyz);
+    let (m_mat, p) = build_equilibrium_matrix(problem, &u);
+
+    let m_csc = m_mat.to_csc();
+    let m_rows = p.len();
+
+    // Warm-start: L2 solution via augmented system
+    let (k_l2, rhs_l2) = build_augmented_system(&m_mat, &p, regularization);
+    let ldl_l2 = Ldl::new()
+        .fill_in_reduction(sprs::FillInReduction::ReverseCuthillMcKee)
+        .check_symmetry(sprs::SymmetryCheck::DontCheckSymmetry)
+        .numeric(k_l2.view())
+        .map_err(|e| TheseusError::Linalg(e))?;
+    let sol_l2 = ldl_l2.solve(&rhs_l2);
+    let mut q: Vec<f64> = sol_l2[m_rows..m_rows + ne].to_vec();
+
+    const ABS_EPS: f64 = 1e-12;
+    let mut prev_l1 = f64::MAX;
+
+    for _ in 0..max_iter {
+        // r = M*q − p
+        let mut r = sparse_matvec(&m_csc, &q);
+        for (ri, &pi) in r.iter_mut().zip(p.iter()) {
+            *ri -= pi;
+        }
+
+        let max_abs_r = r.iter().map(|ri| ri.abs()).fold(0.0_f64, f64::max);
+        let eps_iter = (1e-4 * max_abs_r).max(ABS_EPS);
+
+        // L1 objective and IRLS weights
+        let mut l1_obj = 0.0;
+        let mut sqrt_w = vec![0.0; m_rows];
+        for i in 0..m_rows {
+            let abs_r = r[i].abs();
+            l1_obj += abs_r;
+            let w_i = 1.0 / abs_r.max(eps_iter);
+            sqrt_w[i] = w_i.sqrt();
+        }
+
+        // Normalize weights so max(w) = 1
+        let w_max = sqrt_w.iter().map(|s| s * s).fold(0.0_f64, f64::max);
+        let effective_reg = if w_max > 0.0 {
+            let inv_sqrt_wmax = 1.0 / w_max.sqrt();
+            for sw in sqrt_w.iter_mut() {
+                *sw *= inv_sqrt_wmax;
+            }
+            regularization / w_max
+        } else {
+            regularization
+        };
+
+        // Convergence: relative change in L1 objective
+        if prev_l1 < f64::MAX {
+            let rel_change = (prev_l1 - l1_obj).abs() / (prev_l1 + ABS_EPS);
+            if rel_change < 1e-8 {
+                break;
+            }
+        }
+        prev_l1 = l1_obj;
+
+        // Build M_w = diag(sqrt_w) * M, then augmented system with
+        // RHS top = sqrt_w ⊙ p  (so that M_w^T * rhs_top = M^T W p).
+        let m_w = row_scaled_copy(&m_csc, &sqrt_w);
+        let rhs_top: Vec<f64> = (0..m_rows).map(|i| sqrt_w[i] * p[i]).collect();
+
+        let (k_mat, rhs) = build_augmented_system(&m_w, &rhs_top, effective_reg);
+
+        let ldl = Ldl::new()
+            .fill_in_reduction(sprs::FillInReduction::ReverseCuthillMcKee)
+            .check_symmetry(sprs::SymmetryCheck::DontCheckSymmetry)
+            .numeric(k_mat.view())
+            .map_err(|e| TheseusError::Linalg(e))?;
+
+        let sol = ldl.solve(&rhs);
+        q = sol[m_rows..m_rows + ne].to_vec();
+    }
+
+    for (i, &v) in q.iter().enumerate() {
+        if !v.is_finite() {
+            return Err(TheseusError::Solver(format!(
+                "pseudoinverse L1 (augmented) produced non-finite q at edge {i}; \
+                 increase regularisation or check target geometry",
+            )));
+        }
+    }
+    if q.len() != ne {
+        return Err(TheseusError::Shape(format!(
+            "pseudoinverse L1 (augmented) returned {} q values, expected {ne}",
+            q.len()
+        )));
+    }
+
+    Ok(q)
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Pseudoinverse dispatcher
+// ─────────────────────────────────────────────────────────────
+
+/// Dispatch to L2 or L1 pseudoinverse, with normal-equations or augmented system.
+///
+/// The augmented path avoids forming M^T M and is faster for large meshes
+/// (>50k edges).  It requires `regularization > 0`.
+pub fn solve_pseudoinverse_dispatch(
+    problem: &Problem,
+    target_free_xyz: &Array2<f64>,
+    regularization: f64,
+    use_l2: bool,
+    max_l1_iter: usize,
+    use_augmented: bool,
+) -> Result<Vec<f64>, TheseusError> {
+    match (use_l2, use_augmented) {
+        (true, false) => solve_pseudoinverse(problem, target_free_xyz, regularization),
+        (true, true) => solve_pseudoinverse_augmented(problem, target_free_xyz, regularization),
+        (false, false) => solve_pseudoinverse_l1(problem, target_free_xyz, regularization, max_l1_iter),
+        (false, true) => solve_pseudoinverse_l1_augmented(problem, target_free_xyz, regularization, max_l1_iter),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
 //  NNLS  (spectral projected gradient)
 // ─────────────────────────────────────────────────────────────
 
@@ -340,6 +739,20 @@ pub fn solve_nnls(
 // ─────────────────────────────────────────────────────────────
 //  Sparse helpers
 // ─────────────────────────────────────────────────────────────
+
+/// Create a copy of a CSC matrix with each row `i` scaled by `row_scales[i]`.
+fn row_scaled_copy(mat: &CsMat<f64>, row_scales: &[f64]) -> CsMat<f64> {
+    let mut scaled = mat.clone();
+    let indptr = scaled.indptr().to_owned();
+    let raw = indptr.raw_storage();
+    for col in 0..scaled.cols() {
+        for nz in raw[col]..raw[col + 1] {
+            let row = scaled.indices()[nz];
+            scaled.data_mut()[nz] *= row_scales[row];
+        }
+    }
+    scaled
+}
 
 /// Add a scalar to every diagonal entry of a CSC matrix (in-place).
 fn add_diagonal(mat: &mut CsMat<f64>, value: f64) {

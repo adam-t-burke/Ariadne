@@ -95,7 +95,10 @@ public static class TheseusSolverService
         FDM_Network network,
         SolverInputs inputs,
         double[] targetFreeXyz,
-        double regularization = 1e-6)
+        double regularization = 1e-6,
+        bool useL2 = true,
+        int maxL1Iter = 20,
+        bool useAugmented = false)
     {
         ValidateCommon(network, inputs);
         var context = BuildContext(network);
@@ -108,7 +111,7 @@ public static class TheseusSolverService
             data.Loads, data.FixedPositions,
             data.QInit, data.LowerBounds, data.UpperBounds);
 
-        var result = solver.SolvePseudoinverse(targetFreeXyz, regularization);
+        var result = solver.SolvePseudoinverse(targetFreeXyz, regularization, useL2, maxL1Iter, useAugmented);
         return BuildResult(network, result, context);
     }
 

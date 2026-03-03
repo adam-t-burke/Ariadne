@@ -10,14 +10,17 @@ namespace Ariadne.Solver.Components.Experimental;
 /// <summary>
 /// Experimental: finds force densities via pseudoinverse of the FDM equilibrium
 /// system, then performs a forward solve to produce equilibrium geometry closest
-/// to the target shape.  Single-pass — no iterative optimisation.
+/// to the target shape.  Minimises the equilibrium residual (Mq = p).
+/// L2: sum of squared residuals (single solve, default).
+/// L1: sum of absolute residuals (iterative IRLS, more robust to outliers).
 /// </summary>
 public class PseudoinverseComponent : GH_Component
 {
     public PseudoinverseComponent()
         : base("Pseudoinverse Solve", "Pinv",
             "Find force densities via pseudoinverse of the equilibrium system, then forward-solve. " +
-            "Single-pass alternative to gradient-based optimisation.",
+            "L2 minimises squared residuals (single solve). " +
+            "L1 minimises absolute residuals (IRLS, more robust to outliers).",
             "Ariadne", "Experimental")
     { }
 
@@ -28,6 +31,12 @@ public class PseudoinverseComponent : GH_Component
         pManager.AddNumberParameter("Force Densities", "q", "Initial force densities (used for forward-solve bounds only)", GH_ParamAccess.list, 10.0);
         pManager.AddVectorParameter("Loads", "Loads", "Loads on free nodes", GH_ParamAccess.list, new Vector3d(0, 0, -1));
         pManager.AddNumberParameter("Regularization", "λ", "Tikhonov regularization parameter (larger = more stable, smaller = closer fit)", GH_ParamAccess.item, 1e-6);
+        pManager.AddPointParameter("Load Nodes", "LN", "Nodes to apply loads to (optional; if empty, loads apply to all free nodes)", GH_ParamAccess.list);
+        pManager.AddBooleanParameter("L2", "L2", "True = L2 (least-squares), False = L1 (absolute residuals). L1 is more robust when a few equations are inconsistent.", GH_ParamAccess.item, true);
+        pManager.AddIntegerParameter("L1 Iterations", "L1Iter", "Maximum IRLS iterations for L1 mode (ignored when L2 is selected)", GH_ParamAccess.item, 20);
+        pManager.AddBooleanParameter("Augmented", "Aug", "Use the augmented saddle-point system instead of forming M^T M. Faster for large meshes (>50k edges). Requires λ > 0.", GH_ParamAccess.item, false);
+
+        pManager[5].Optional = true;
     }
 
     protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -47,12 +56,20 @@ public class PseudoinverseComponent : GH_Component
         List<double> q = [];
         List<Vector3d> loads = [];
         double regularization = 1e-6;
+        List<Point3d> loadNodes = [];
+        bool useL2 = true;
+        int maxL1Iter = 20;
+        bool useAugmented = false;
 
         if (!DA.GetData(0, ref network)) return;
         if (!DA.GetDataList(1, targetPoints)) return;
         DA.GetDataList(2, q);
         DA.GetDataList(3, loads);
         DA.GetData(4, ref regularization);
+        DA.GetDataList(5, loadNodes);
+        DA.GetData(6, ref useL2);
+        DA.GetData(7, ref maxL1Iter);
+        DA.GetData(8, ref useAugmented);
 
         if (network == null || !network.Valid)
         {
@@ -77,16 +94,21 @@ public class PseudoinverseComponent : GH_Component
             targetFreeXyz[i * 3 + 2] = targetPoints[i].Z;
         }
 
+        var loadNodeIndices = loadNodes.Count > 0
+            ? TheseusSolverService.ResolveLoadNodeIndices(network, loadNodes)
+            : null;
+
         var inputs = new SolverInputs
         {
             QInit = q,
             Loads = loads,
+            LoadNodeIndices = loadNodeIndices,
         };
 
         try
         {
             var result = TheseusSolverService.SolvePseudoinverse(
-                network, inputs, targetFreeXyz, regularization);
+                network, inputs, targetFreeXyz, regularization, useL2, maxL1Iter, useAugmented);
 
             DA.SetData(0, result.Network);
             DA.SetDataList(1, result.NodePositions);
