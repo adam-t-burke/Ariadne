@@ -1,0 +1,1027 @@
+//! Objective loss functions — pure ℝ → ℝ math, no AD.
+//!
+//! Each function computes a scalar loss from the current geometry snapshot.
+//! The corresponding hand-coded gradients live in `gradients.rs`.
+
+use crate::gradients;
+use crate::types::{
+    FdmCache, ForceVarianceNormalizationStrategy, ForceVariation, GeometrySnapshot,
+    LengthVarianceNormalizationStrategy, LengthVariation, MaxForce, MaxLength, MinForce, MinLength,
+    ObjectiveTrait, PlanarConstraintAlongDirection, Problem, ReactionDirection,
+    ReactionDirectionMagnitude, ReactionMagnitude, ReactionMagnitudeBehavior,
+    ReactionMagnitudeSign, RigidSetCompare, SumForceLength, TargetForce, TargetGeometryReduction,
+    TargetLength, TargetPlane, TargetXY, TargetXYZ, TheseusError,
+};
+use ndarray::Array2;
+use rayon::prelude::*;
+
+// ─────────────────────────────────────────────────────────────
+//  Softplus barrier
+// ─────────────────────────────────────────────────────────────
+
+/// Numerically stable log(1 + exp(z)).
+#[inline]
+fn log1pexp(z: f64) -> f64 {
+    if z > 0.0 {
+        z + (-z).exp().ln_1p()
+    } else {
+        z.exp().ln_1p()
+    }
+}
+
+/// Smooth one-sided barrier.
+/// `k < 0` ⟹  penalise x < b  (min barrier).
+/// `k > 0` ⟹  penalise x > b  (max barrier).
+#[inline]
+pub fn softplus(x: f64, b: f64, k: f64) -> f64 {
+    let z = -k * (b - x) - 1.0;
+    log1pexp(z)
+}
+
+/// Derivative of `softplus` w.r.t. `x`.
+/// d/dx softplus = k · σ(z)  where z = −k(b−x)−1 and σ is the logistic fn.
+#[inline]
+pub fn softplus_grad(x: f64, b: f64, k: f64) -> f64 {
+    let z = -k * (b - x) - 1.0;
+    let sigma = 1.0 / (1.0 + (-z).exp());
+    k * sigma
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Bound penalties  (barrier on the packed θ vector)
+// ─────────────────────────────────────────────────────────────
+
+/// Smooth barrier loss for lower and upper bounds on θ.
+pub fn bounds_penalty(
+    theta: &[f64],
+    lb: &[f64],
+    ub: &[f64],
+    lb_idx: &[usize],
+    ub_idx: &[usize],
+    sharpness: f64,
+) -> f64 {
+    let mut loss = 0.0;
+    for &i in lb_idx {
+        if lb[i].is_finite() {
+            loss += softplus(theta[i], lb[i], -sharpness);
+        }
+    }
+    for &i in ub_idx {
+        if ub[i].is_finite() {
+            loss += softplus(theta[i], ub[i], sharpness);
+        }
+    }
+    loss
+}
+
+/// Gradient of `bounds_penalty` w.r.t. θ.  Accumulates into `grad`.
+pub fn bounds_penalty_grad(
+    grad: &mut [f64],
+    theta: &[f64],
+    lb: &[f64],
+    ub: &[f64],
+    lb_idx: &[usize],
+    ub_idx: &[usize],
+    sharpness: f64,
+    barrier_weight: f64,
+) {
+    for &i in lb_idx {
+        if lb[i].is_finite() {
+            grad[i] += barrier_weight * softplus_grad(theta[i], lb[i], -sharpness);
+        }
+    }
+    for &i in ub_idx {
+        if ub[i].is_finite() {
+            grad[i] += barrier_weight * softplus_grad(theta[i], ub[i], sharpness);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Individual objective losses
+// ─────────────────────────────────────────────────────────────
+
+/// Reduce a sum of per-node squared residuals according to the selected mode.
+pub fn apply_target_geometry_reduction(
+    sse: f64,
+    count: usize,
+    reduction: TargetGeometryReduction,
+) -> f64 {
+    if count == 0 {
+        return 0.0;
+    }
+    let n = count as f64;
+    match reduction {
+        TargetGeometryReduction::Sse => sse,
+        TargetGeometryReduction::Mse => sse / n,
+        TargetGeometryReduction::Rmse => (sse / n).sqrt(),
+    }
+}
+
+/// Scale factor to apply to an SSE-form gradient (`d(w·SSE)/dx`) so that it
+/// matches `d(w·reduced)/dx`.
+pub fn target_geometry_reduction_grad_scale(
+    sse: f64,
+    count: usize,
+    reduction: TargetGeometryReduction,
+) -> f64 {
+    if count == 0 {
+        return 0.0;
+    }
+    let n = count as f64;
+    match reduction {
+        TargetGeometryReduction::Sse => 1.0,
+        TargetGeometryReduction::Mse => 1.0 / n,
+        TargetGeometryReduction::Rmse => {
+            let rmse = (sse / n).sqrt();
+            if rmse <= 0.0 {
+                0.0
+            } else {
+                0.5 / (n * rmse)
+            }
+        }
+    }
+}
+
+/// TargetXYZ:  Σ_i ‖xyz[idx_i] − target_i‖²
+fn target_xyz_loss(xyz: &Array2<f64>, node_indices: &[usize], target: &Array2<f64>) -> f64 {
+    let mut loss = 0.0;
+    for (i, &idx) in node_indices.iter().enumerate() {
+        for d in 0..3 {
+            let diff = xyz[[idx, d]] - target[[i, d]];
+            loss += diff * diff;
+        }
+    }
+    loss
+}
+
+/// TargetXY:  Σ_i (Δx² + Δy²)
+fn target_xy_loss(xyz: &Array2<f64>, node_indices: &[usize], target: &Array2<f64>) -> f64 {
+    let mut loss = 0.0;
+    for (i, &idx) in node_indices.iter().enumerate() {
+        for d in 0..2 {
+            let diff = xyz[[idx, d]] - target[[i, d]];
+            loss += diff * diff;
+        }
+    }
+    loss
+}
+
+/// TargetPlane:  Σ_i ((u_p − u_t)² + (v_p − v_t)²) in plane coords.
+/// u = (p − origin)·x_axis, v = (p − origin)·y_axis.
+fn target_plane_loss(
+    xyz: &Array2<f64>,
+    node_indices: &[usize],
+    target: &Array2<f64>,
+    origin: &[f64; 3],
+    x_axis: &[f64; 3],
+    y_axis: &[f64; 3],
+) -> f64 {
+    let mut loss = 0.0;
+    for (i, &idx) in node_indices.iter().enumerate() {
+        let u_p = (xyz[[idx, 0]] - origin[0]) * x_axis[0]
+            + (xyz[[idx, 1]] - origin[1]) * x_axis[1]
+            + (xyz[[idx, 2]] - origin[2]) * x_axis[2];
+        let v_p = (xyz[[idx, 0]] - origin[0]) * y_axis[0]
+            + (xyz[[idx, 1]] - origin[1]) * y_axis[1]
+            + (xyz[[idx, 2]] - origin[2]) * y_axis[2];
+        let u_t = (target[[i, 0]] - origin[0]) * x_axis[0]
+            + (target[[i, 1]] - origin[1]) * x_axis[1]
+            + (target[[i, 2]] - origin[2]) * x_axis[2];
+        let v_t = (target[[i, 0]] - origin[0]) * y_axis[0]
+            + (target[[i, 1]] - origin[1]) * y_axis[1]
+            + (target[[i, 2]] - origin[2]) * y_axis[2];
+        let du = u_p - u_t;
+        let dv = v_p - v_t;
+        loss += du * du + dv * dv;
+    }
+    loss
+}
+
+/// PlanarConstraintAlongDirection:  Σ_i t_i²  where t = n·(O−P)/(n·d).
+pub(crate) const PLANAR_DEGENERACY_TOL: f64 = 1e-12;
+
+/// Plane normal dotted with constraint direction; errors if degenerate.
+pub fn planar_constraint_n_dot_d(
+    x_axis: &[f64; 3],
+    y_axis: &[f64; 3],
+    direction: &[f64; 3],
+) -> Result<f64, TheseusError> {
+    let nx = x_axis[1] * y_axis[2] - x_axis[2] * y_axis[1];
+    let ny = x_axis[2] * y_axis[0] - x_axis[0] * y_axis[2];
+    let nz = x_axis[0] * y_axis[1] - x_axis[1] * y_axis[0];
+    let n_dot_d = nx * direction[0] + ny * direction[1] + nz * direction[2];
+    if n_dot_d.abs() < PLANAR_DEGENERACY_TOL {
+        return Err(TheseusError::Shape(
+            "planar constraint is degenerate: constraint direction is parallel to the plane (n·d ≈ 0)"
+                .into(),
+        ));
+    }
+    Ok(n_dot_d)
+}
+
+fn planar_constraint_along_direction_loss(
+    xyz: &Array2<f64>,
+    node_indices: &[usize],
+    origin: &[f64; 3],
+    x_axis: &[f64; 3],
+    y_axis: &[f64; 3],
+    direction: &[f64; 3],
+) -> f64 {
+    let Ok(n_dot_d) = planar_constraint_n_dot_d(x_axis, y_axis, direction) else {
+        return 0.0;
+    };
+    let nx = x_axis[1] * y_axis[2] - x_axis[2] * y_axis[1];
+    let ny = x_axis[2] * y_axis[0] - x_axis[0] * y_axis[2];
+    let nz = x_axis[0] * y_axis[1] - x_axis[1] * y_axis[0];
+    let mut loss = 0.0;
+    for &idx in node_indices {
+        let n_dot_op = nx * (origin[0] - xyz[[idx, 0]])
+            + ny * (origin[1] - xyz[[idx, 1]])
+            + nz * (origin[2] - xyz[[idx, 2]]);
+        let t = n_dot_op / n_dot_d;
+        loss += t * t;
+    }
+    loss
+}
+
+/// TargetLength:  Σ_i (ℓ[idx_i] − target_i)²
+fn target_length_loss(lengths: &[f64], edge_indices: &[usize], target: &[f64]) -> f64 {
+    let mut loss = 0.0;
+    for (i, &idx) in edge_indices.iter().enumerate() {
+        let diff = lengths[idx] - target[i];
+        loss += diff * diff;
+    }
+    loss
+}
+
+/// TargetForce:  Σ_i (f[idx_i] − target_i)²
+fn target_force_loss(forces: &[f64], edge_indices: &[usize], target: &[f64]) -> f64 {
+    let mut loss = 0.0;
+    for (i, &idx) in edge_indices.iter().enumerate() {
+        let diff = forces[idx] - target[i];
+        loss += diff * diff;
+    }
+    loss
+}
+
+/// Numerically stable log-sum-exp smooth maximum:
+///   smooth_max_β(v) = m + (1/β) ln Σ exp(β(v_i − m)),  m = max(v)
+/// As β → ∞ this converges to the true max.
+fn smooth_max(values: &[f64], indices: &[usize], beta: f64) -> f64 {
+    let m = indices
+        .iter()
+        .map(|&i| values[i])
+        .fold(f64::NEG_INFINITY, f64::max);
+    let sum: f64 = indices
+        .iter()
+        .map(|&i| ((values[i] - m) * beta).exp())
+        .sum();
+    m + sum.ln() / beta
+}
+
+/// Numerically stable log-sum-exp smooth minimum:
+///   smooth_min_β(v) = −smooth_max_β(−v)
+fn smooth_min(values: &[f64], indices: &[usize], beta: f64) -> f64 {
+    let m = indices
+        .iter()
+        .map(|&i| values[i])
+        .fold(f64::INFINITY, f64::min);
+    let sum: f64 = indices
+        .iter()
+        .map(|&i| ((m - values[i]) * beta).exp())
+        .sum();
+    m - sum.ln() / beta
+}
+
+/// Minimum sharpness to avoid division-by-zero in smooth_max/smooth_min (1/β term).
+const MIN_VARIATION_SHARPNESS: f64 = 1e-10;
+const NORMALIZED_VARIANCE_EPSILON: f64 = 1e-12;
+
+fn variance_loss(values: &[f64], edge_indices: &[usize]) -> f64 {
+    if edge_indices.is_empty() {
+        return 0.0;
+    }
+
+    let n = edge_indices.len() as f64;
+    let mean = edge_indices.iter().map(|&i| values[i]).sum::<f64>() / n;
+    edge_indices
+        .iter()
+        .map(|&i| {
+            let diff = values[i] - mean;
+            diff * diff
+        })
+        .sum::<f64>()
+        / n
+}
+
+/// Dimensionless variation metric: variance(values) / (mean(values)^2 + epsilon).
+fn normalized_variance_loss(values: &[f64], edge_indices: &[usize]) -> f64 {
+    if edge_indices.is_empty() {
+        return 0.0;
+    }
+
+    let n = edge_indices.len() as f64;
+    let mean = edge_indices.iter().map(|&i| values[i]).sum::<f64>() / n;
+    let variance = variance_loss(values, edge_indices);
+    variance / (mean * mean + NORMALIZED_VARIANCE_EPSILON)
+}
+
+/// Magnitude-normalized variance: variance(values) / (mean(abs(values))^2 + epsilon).
+fn absolute_normalized_variance_loss(values: &[f64], edge_indices: &[usize]) -> f64 {
+    if edge_indices.is_empty() {
+        return 0.0;
+    }
+
+    let n = edge_indices.len() as f64;
+    let abs_mean = edge_indices.iter().map(|&i| values[i].abs()).sum::<f64>() / n;
+    let variance = variance_loss(values, edge_indices);
+    variance / (abs_mean * abs_mean + NORMALIZED_VARIANCE_EPSILON)
+}
+
+/// LengthVariation:  smooth_max(ℓ) − smooth_min(ℓ)  over selected edges.
+fn length_variation_loss(lengths: &[f64], edge_indices: &[usize], beta: f64) -> f64 {
+    if edge_indices.is_empty() {
+        return 0.0;
+    }
+    let beta = beta.abs().max(MIN_VARIATION_SHARPNESS);
+    smooth_max(lengths, edge_indices, beta) - smooth_min(lengths, edge_indices, beta)
+}
+
+/// ForceVariation:  smooth_max(f) − smooth_min(f)  over selected edges.
+fn force_variation_loss(forces: &[f64], edge_indices: &[usize], beta: f64) -> f64 {
+    if edge_indices.is_empty() {
+        return 0.0;
+    }
+    let beta = beta.abs().max(MIN_VARIATION_SHARPNESS);
+    smooth_max(forces, edge_indices, beta) - smooth_min(forces, edge_indices, beta)
+}
+
+/// SumForceLength:  Σ_i ℓ_i · |f_i|  =  Σ_i |q_i| · ℓ_i²
+fn sum_force_length_loss(lengths: &[f64], forces: &[f64], edge_indices: &[usize]) -> f64 {
+    let mut loss = 0.0;
+    for &idx in edge_indices {
+        loss += lengths[idx] * forces[idx].abs();
+    }
+    loss
+}
+
+/// MinLength / MinForce barrier:  Σ softplus(x_i, threshold_i, −k)
+fn min_penalty(values: &[f64], edge_indices: &[usize], threshold: &[f64], k: f64) -> f64 {
+    let mut loss = 0.0;
+    for (i, &idx) in edge_indices.iter().enumerate() {
+        if threshold[i].is_finite() {
+            loss += softplus(values[idx], threshold[i], -k);
+        }
+    }
+    loss
+}
+
+/// MaxLength / MaxForce barrier:  Σ softplus(x_i, threshold_i, +k)
+fn max_penalty(values: &[f64], edge_indices: &[usize], threshold: &[f64], k: f64) -> f64 {
+    let mut loss = 0.0;
+    for (i, &idx) in edge_indices.iter().enumerate() {
+        if threshold[i].is_finite() {
+            loss += softplus(values[idx], threshold[i], k);
+        }
+    }
+    loss
+}
+
+/// RigidSetCompare: Σ_{i<j} (d_target − d_network)²
+/// Uses max(0, …) before sqrt to avoid NaN from floating-point negative squared distance.
+fn rigid_set_compare_loss(xyz: &Array2<f64>, node_indices: &[usize], target: &Array2<f64>) -> f64 {
+    let n = node_indices.len();
+    let mut loss = 0.0;
+    for i in 0..n {
+        let idx_i = node_indices[i];
+        for j in 0..i {
+            let idx_j = node_indices[j];
+
+            let dx = xyz[[idx_i, 0]] - xyz[[idx_j, 0]];
+            let dy = xyz[[idx_i, 1]] - xyz[[idx_j, 1]];
+            let dz = xyz[[idx_i, 2]] - xyz[[idx_j, 2]];
+            let d_net = (dx * dx + dy * dy + dz * dz).max(0.0).sqrt();
+
+            let tx = target[[i, 0]] - target[[j, 0]];
+            let ty = target[[i, 1]] - target[[j, 1]];
+            let tz = target[[i, 2]] - target[[j, 2]];
+            let d_tgt = (tx * tx + ty * ty + tz * tz).max(0.0).sqrt();
+
+            let diff = d_tgt - d_net;
+            loss += diff * diff;
+        }
+    }
+    loss
+}
+
+/// Cosine-based misalignment:  1 − (r̂ · d̂).
+/// Returns 1.0 for zero reaction (full penalty).
+#[inline]
+fn direction_misalignment(reaction: [f64; 3], target_dir: [f64; 3]) -> f64 {
+    let r_norm = (reaction[0].powi(2) + reaction[1].powi(2) + reaction[2].powi(2)).sqrt();
+    if r_norm < f64::EPSILON {
+        return 1.0;
+    }
+    let dot: f64 = (0..3).map(|d| reaction[d] * target_dir[d]).sum();
+    let cos = (dot / r_norm).clamp(-1.0, 1.0);
+    1.0 - cos
+}
+
+/// ReactionDirection:  Σ_i  (1 − r̂_i · d̂_i)
+fn reaction_direction_loss(
+    reactions: &Array2<f64>,
+    anchor_indices: &[usize],
+    target_directions: &Array2<f64>,
+) -> f64 {
+    let mut total = 0.0;
+    for (row, &node) in anchor_indices.iter().enumerate() {
+        let r = [
+            reactions[[node, 0]],
+            reactions[[node, 1]],
+            reactions[[node, 2]],
+        ];
+        let d = [
+            target_directions[[row, 0]],
+            target_directions[[row, 1]],
+            target_directions[[row, 2]],
+        ];
+        total += direction_misalignment(r, d);
+    }
+    total
+}
+
+fn reaction_magnitude_scalar(
+    reaction: [f64; 3],
+    target_dir: [f64; 3],
+    sign: ReactionMagnitudeSign,
+) -> f64 {
+    match sign {
+        ReactionMagnitudeSign::Unsigned => {
+            (reaction[0].powi(2) + reaction[1].powi(2) + reaction[2].powi(2)).sqrt()
+        }
+        ReactionMagnitudeSign::SignedProjected => {
+            let d_norm =
+                (target_dir[0].powi(2) + target_dir[1].powi(2) + target_dir[2].powi(2)).sqrt();
+            if d_norm < f64::EPSILON {
+                return 0.0;
+            }
+            (0..3).map(|i| reaction[i] * target_dir[i] / d_norm).sum()
+        }
+    }
+}
+
+fn reaction_magnitude_term(scalar: f64, target: f64, behavior: ReactionMagnitudeBehavior) -> f64 {
+    match behavior {
+        ReactionMagnitudeBehavior::Target => {
+            let diff = scalar - target;
+            diff * diff
+        }
+        ReactionMagnitudeBehavior::Max => (scalar - target).max(0.0),
+        ReactionMagnitudeBehavior::Min => (target - scalar).max(0.0),
+    }
+}
+
+/// ReactionMagnitude:  scalar magnitude term only, using configured behavior/sign semantics.
+fn reaction_magnitude_loss(
+    reactions: &Array2<f64>,
+    anchor_indices: &[usize],
+    target_directions: &Array2<f64>,
+    target_magnitudes: &[f64],
+    behavior: ReactionMagnitudeBehavior,
+    sign: ReactionMagnitudeSign,
+) -> f64 {
+    let mut total = 0.0;
+    for (row, &node) in anchor_indices.iter().enumerate() {
+        let r = [
+            reactions[[node, 0]],
+            reactions[[node, 1]],
+            reactions[[node, 2]],
+        ];
+        let d = [
+            target_directions[[row, 0]],
+            target_directions[[row, 1]],
+            target_directions[[row, 2]],
+        ];
+        let scalar = reaction_magnitude_scalar(r, d, sign);
+        total += reaction_magnitude_term(scalar, target_magnitudes[row], behavior);
+    }
+    total
+}
+
+/// ReactionDirectionMagnitude: direction term plus configured magnitude term.
+fn reaction_direction_magnitude_loss(
+    reactions: &Array2<f64>,
+    anchor_indices: &[usize],
+    target_directions: &Array2<f64>,
+    target_magnitudes: &[f64],
+    behavior: ReactionMagnitudeBehavior,
+    sign: ReactionMagnitudeSign,
+) -> f64 {
+    reaction_direction_loss(reactions, anchor_indices, target_directions)
+        + reaction_magnitude_loss(
+            reactions,
+            anchor_indices,
+            target_directions,
+            target_magnitudes,
+            behavior,
+            sign,
+        )
+}
+
+// ─────────────────────────────────────────────────────────────
+//  ObjectiveTrait implementations for all 13 built-in types
+// ─────────────────────────────────────────────────────────────
+
+impl ObjectiveTrait for TargetXYZ {
+    fn loss(&self, snap: &GeometrySnapshot) -> f64 {
+        let sse = target_xyz_loss(snap.xyz_full, &self.node_indices, &self.target);
+        self.weight * apply_target_geometry_reduction(sse, self.node_indices.len(), self.reduction)
+    }
+    fn accumulate_gradient(&self, cache: &mut FdmCache, problem: &Problem) {
+        let sse = target_xyz_loss(&cache.nf, &self.node_indices, &self.target);
+        let scale =
+            target_geometry_reduction_grad_scale(sse, self.node_indices.len(), self.reduction);
+        gradients::grad_target_xyz(
+            cache,
+            self.weight * scale,
+            &self.node_indices,
+            &self.target,
+            &problem.topology.free_node_indices,
+        );
+    }
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+}
+
+impl ObjectiveTrait for TargetXY {
+    fn loss(&self, snap: &GeometrySnapshot) -> f64 {
+        let sse = target_xy_loss(snap.xyz_full, &self.node_indices, &self.target);
+        self.weight * apply_target_geometry_reduction(sse, self.node_indices.len(), self.reduction)
+    }
+    fn accumulate_gradient(&self, cache: &mut FdmCache, problem: &Problem) {
+        let sse = target_xy_loss(&cache.nf, &self.node_indices, &self.target);
+        let scale =
+            target_geometry_reduction_grad_scale(sse, self.node_indices.len(), self.reduction);
+        gradients::grad_target_xy(
+            cache,
+            self.weight * scale,
+            &self.node_indices,
+            &self.target,
+            &problem.topology.free_node_indices,
+        );
+    }
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+}
+
+impl ObjectiveTrait for TargetPlane {
+    fn loss(&self, snap: &GeometrySnapshot) -> f64 {
+        let sse = target_plane_loss(
+            snap.xyz_full,
+            &self.node_indices,
+            &self.target,
+            &self.origin,
+            &self.x_axis,
+            &self.y_axis,
+        );
+        self.weight * apply_target_geometry_reduction(sse, self.node_indices.len(), self.reduction)
+    }
+    fn accumulate_gradient(&self, cache: &mut FdmCache, problem: &Problem) {
+        let sse = target_plane_loss(
+            &cache.nf,
+            &self.node_indices,
+            &self.target,
+            &self.origin,
+            &self.x_axis,
+            &self.y_axis,
+        );
+        let scale =
+            target_geometry_reduction_grad_scale(sse, self.node_indices.len(), self.reduction);
+        gradients::grad_target_plane(
+            cache,
+            self.weight * scale,
+            &self.node_indices,
+            &self.target,
+            &self.origin,
+            &self.x_axis,
+            &self.y_axis,
+            &problem.topology.free_node_indices,
+        );
+    }
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+}
+
+impl ObjectiveTrait for PlanarConstraintAlongDirection {
+    fn loss(&self, snap: &GeometrySnapshot) -> f64 {
+        self.weight
+            * planar_constraint_along_direction_loss(
+                snap.xyz_full,
+                &self.node_indices,
+                &self.origin,
+                &self.x_axis,
+                &self.y_axis,
+                &self.direction,
+            )
+    }
+    fn accumulate_gradient(&self, cache: &mut FdmCache, problem: &Problem) {
+        if let Err(e) = gradients::grad_planar_constraint_along_direction(
+            cache,
+            self.weight,
+            &self.node_indices,
+            &self.origin,
+            &self.x_axis,
+            &self.y_axis,
+            &self.direction,
+            &problem.topology.free_node_indices,
+        ) {
+            panic!("planar constraint gradient after validation: {e}");
+        }
+    }
+    fn validate(&self) -> Result<(), TheseusError> {
+        planar_constraint_n_dot_d(&self.x_axis, &self.y_axis, &self.direction)?;
+        Ok(())
+    }
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+}
+
+impl ObjectiveTrait for TargetLength {
+    fn loss(&self, snap: &GeometrySnapshot) -> f64 {
+        self.weight * target_length_loss(snap.member_lengths, &self.edge_indices, &self.target)
+    }
+    fn accumulate_gradient(&self, cache: &mut FdmCache, _problem: &Problem) {
+        gradients::grad_target_length(cache, self.weight, &self.edge_indices, &self.target);
+    }
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+}
+
+impl ObjectiveTrait for TargetForce {
+    fn loss(&self, snap: &GeometrySnapshot) -> f64 {
+        self.weight * target_force_loss(snap.member_forces, &self.edge_indices, &self.target)
+    }
+    fn accumulate_gradient(&self, cache: &mut FdmCache, _problem: &Problem) {
+        gradients::grad_target_force(cache, self.weight, &self.edge_indices, &self.target);
+    }
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+}
+
+impl ObjectiveTrait for LengthVariation {
+    fn loss(&self, snap: &GeometrySnapshot) -> f64 {
+        if self.use_normalized_variance {
+            let loss = match self.normalization_strategy {
+                LengthVarianceNormalizationStrategy::SquaredMean => {
+                    normalized_variance_loss(snap.member_lengths, &self.edge_indices)
+                }
+                LengthVarianceNormalizationStrategy::None => {
+                    variance_loss(snap.member_lengths, &self.edge_indices)
+                }
+            };
+            self.weight * loss
+        } else {
+            self.weight
+                * length_variation_loss(snap.member_lengths, &self.edge_indices, self.sharpness)
+        }
+    }
+    fn accumulate_gradient(&self, cache: &mut FdmCache, _problem: &Problem) {
+        gradients::grad_length_variation(
+            cache,
+            self.weight,
+            &self.edge_indices,
+            self.sharpness,
+            self.use_normalized_variance,
+            self.normalization_strategy,
+        );
+    }
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+}
+
+impl ObjectiveTrait for ForceVariation {
+    fn loss(&self, snap: &GeometrySnapshot) -> f64 {
+        if self.use_normalized_variance {
+            let loss = match self.normalization_strategy {
+                ForceVarianceNormalizationStrategy::SquaredMean => {
+                    normalized_variance_loss(snap.member_forces, &self.edge_indices)
+                }
+                ForceVarianceNormalizationStrategy::AbsoluteSquaredMean => {
+                    absolute_normalized_variance_loss(snap.member_forces, &self.edge_indices)
+                }
+                ForceVarianceNormalizationStrategy::None => {
+                    variance_loss(snap.member_forces, &self.edge_indices)
+                }
+            };
+            self.weight * loss
+        } else {
+            self.weight
+                * force_variation_loss(snap.member_forces, &self.edge_indices, self.sharpness)
+        }
+    }
+    fn accumulate_gradient(&self, cache: &mut FdmCache, _problem: &Problem) {
+        gradients::grad_force_variation(
+            cache,
+            self.weight,
+            &self.edge_indices,
+            self.sharpness,
+            self.use_normalized_variance,
+            self.normalization_strategy,
+        );
+    }
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+}
+
+impl ObjectiveTrait for SumForceLength {
+    fn loss(&self, snap: &GeometrySnapshot) -> f64 {
+        self.weight
+            * sum_force_length_loss(snap.member_lengths, snap.member_forces, &self.edge_indices)
+    }
+    fn accumulate_gradient(&self, cache: &mut FdmCache, _problem: &Problem) {
+        gradients::grad_sum_force_length(cache, self.weight, &self.edge_indices);
+    }
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+}
+
+impl ObjectiveTrait for MinLength {
+    fn loss(&self, snap: &GeometrySnapshot) -> f64 {
+        self.weight
+            * min_penalty(
+                snap.member_lengths,
+                &self.edge_indices,
+                &self.threshold,
+                self.sharpness,
+            )
+    }
+    fn accumulate_gradient(&self, cache: &mut FdmCache, _problem: &Problem) {
+        gradients::grad_min_length(
+            cache,
+            self.weight,
+            &self.edge_indices,
+            &self.threshold,
+            self.sharpness,
+        );
+    }
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+}
+
+impl ObjectiveTrait for MaxLength {
+    fn loss(&self, snap: &GeometrySnapshot) -> f64 {
+        self.weight
+            * max_penalty(
+                snap.member_lengths,
+                &self.edge_indices,
+                &self.threshold,
+                self.sharpness,
+            )
+    }
+    fn accumulate_gradient(&self, cache: &mut FdmCache, _problem: &Problem) {
+        gradients::grad_max_length(
+            cache,
+            self.weight,
+            &self.edge_indices,
+            &self.threshold,
+            self.sharpness,
+        );
+    }
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+}
+
+impl ObjectiveTrait for MinForce {
+    fn loss(&self, snap: &GeometrySnapshot) -> f64 {
+        self.weight
+            * min_penalty(
+                snap.member_forces,
+                &self.edge_indices,
+                &self.threshold,
+                self.sharpness,
+            )
+    }
+    fn accumulate_gradient(&self, cache: &mut FdmCache, _problem: &Problem) {
+        gradients::grad_min_force(
+            cache,
+            self.weight,
+            &self.edge_indices,
+            &self.threshold,
+            self.sharpness,
+        );
+    }
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+}
+
+impl ObjectiveTrait for MaxForce {
+    fn loss(&self, snap: &GeometrySnapshot) -> f64 {
+        self.weight
+            * max_penalty(
+                snap.member_forces,
+                &self.edge_indices,
+                &self.threshold,
+                self.sharpness,
+            )
+    }
+    fn accumulate_gradient(&self, cache: &mut FdmCache, _problem: &Problem) {
+        gradients::grad_max_force(
+            cache,
+            self.weight,
+            &self.edge_indices,
+            &self.threshold,
+            self.sharpness,
+        );
+    }
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+}
+
+impl ObjectiveTrait for RigidSetCompare {
+    fn loss(&self, snap: &GeometrySnapshot) -> f64 {
+        self.weight * rigid_set_compare_loss(snap.xyz_full, &self.node_indices, &self.target)
+    }
+    fn accumulate_gradient(&self, cache: &mut FdmCache, problem: &Problem) {
+        gradients::grad_rigid_set_compare(
+            cache,
+            self.weight,
+            &self.node_indices,
+            &self.target,
+            &problem.topology.free_node_indices,
+        );
+    }
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+}
+
+impl ObjectiveTrait for ReactionDirection {
+    fn loss(&self, snap: &GeometrySnapshot) -> f64 {
+        self.weight
+            * reaction_direction_loss(
+                snap.reactions,
+                &self.anchor_indices,
+                &self.target_directions,
+            )
+    }
+    fn accumulate_gradient(&self, cache: &mut FdmCache, problem: &Problem) {
+        gradients::grad_reaction_direction(
+            cache,
+            problem,
+            self.weight,
+            &self.anchor_indices,
+            &self.target_directions,
+        );
+    }
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+}
+
+impl ObjectiveTrait for ReactionMagnitude {
+    fn loss(&self, snap: &GeometrySnapshot) -> f64 {
+        self.weight
+            * reaction_magnitude_loss(
+                snap.reactions,
+                &self.anchor_indices,
+                &self.target_directions,
+                &self.target_magnitudes,
+                self.behavior,
+                self.sign,
+            )
+    }
+    fn accumulate_gradient(&self, cache: &mut FdmCache, problem: &Problem) {
+        gradients::grad_reaction_magnitude(
+            cache,
+            problem,
+            self.weight,
+            &self.anchor_indices,
+            &self.target_directions,
+            &self.target_magnitudes,
+            self.behavior,
+            self.sign,
+        );
+    }
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+}
+
+impl ObjectiveTrait for ReactionDirectionMagnitude {
+    fn loss(&self, snap: &GeometrySnapshot) -> f64 {
+        self.weight
+            * reaction_direction_magnitude_loss(
+                snap.reactions,
+                &self.anchor_indices,
+                &self.target_directions,
+                &self.target_magnitudes,
+                self.behavior,
+                self.sign,
+            )
+    }
+    fn accumulate_gradient(&self, cache: &mut FdmCache, problem: &Problem) {
+        gradients::grad_reaction_direction_magnitude(
+            cache,
+            problem,
+            self.weight,
+            &self.anchor_indices,
+            &self.target_directions,
+            &self.target_magnitudes,
+            self.behavior,
+            self.sign,
+        );
+    }
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Dispatch:  trait-based total loss
+// ─────────────────────────────────────────────────────────────
+
+/// Evaluate total geometric loss (sum of all objectives).
+pub fn total_loss(objectives: &[Box<dyn ObjectiveTrait>], snap: &GeometrySnapshot) -> f64 {
+    objectives.par_iter().map(|obj| obj.loss(snap)).sum()
+}
+
+/// Validate all objective configurations before a solve.
+pub fn validate_objectives(objectives: &[Box<dyn ObjectiveTrait>]) -> Result<(), TheseusError> {
+    for obj in objectives {
+        obj.validate()?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod reduction_tests {
+    use super::*;
+    use crate::types::TargetGeometryReduction;
+
+    #[test]
+    fn mse_is_sse_over_n() {
+        assert_eq!(
+            apply_target_geometry_reduction(8.0, 4, TargetGeometryReduction::Mse),
+            2.0
+        );
+    }
+
+    #[test]
+    fn rmse_is_sqrt_mse() {
+        assert_eq!(
+            apply_target_geometry_reduction(8.0, 2, TargetGeometryReduction::Rmse),
+            2.0
+        );
+    }
+
+    #[test]
+    fn sse_is_unchanged() {
+        assert_eq!(
+            apply_target_geometry_reduction(8.0, 4, TargetGeometryReduction::Sse),
+            8.0
+        );
+    }
+
+    #[test]
+    fn empty_count_is_zero() {
+        assert_eq!(
+            apply_target_geometry_reduction(8.0, 0, TargetGeometryReduction::Rmse),
+            0.0
+        );
+        assert_eq!(
+            target_geometry_reduction_grad_scale(8.0, 0, TargetGeometryReduction::Mse),
+            0.0
+        );
+    }
+
+    #[test]
+    fn rmse_gradient_scale_matches_chain_rule() {
+        let sse = 8.0;
+        let n = 2usize;
+        let rmse = (sse / n as f64).sqrt(); // 2.0
+        let scale = target_geometry_reduction_grad_scale(sse, n, TargetGeometryReduction::Rmse);
+        assert!((scale - 0.5 / (n as f64 * rmse)).abs() < 1e-15);
+    }
+
+    #[test]
+    fn rmse_zero_residual_has_zero_gradient_scale() {
+        assert_eq!(
+            target_geometry_reduction_grad_scale(0.0, 4, TargetGeometryReduction::Rmse),
+            0.0
+        );
+    }
+}

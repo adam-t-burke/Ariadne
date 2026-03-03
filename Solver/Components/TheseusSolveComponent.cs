@@ -1,21 +1,24 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Grasshopper.Kernel;
+using Grasshopper.Kernel.Data;
+using Grasshopper.Kernel.Types;
 using Rhino.Geometry;
 using Ariadne.FDM;
 using Ariadne.Graphs;
+using Theseus.Interop;
 
 namespace Ariadne.Solver;
 
 /// <summary>
 /// Grasshopper component that solves FDM networks using the Theseus optimization engine.
 /// Uses a manual async state machine (not GH_TaskCapableComponent) so the UI thread
-/// is never blocked during long-running optimizations. Forward solves run synchronously.
+/// is never blocked during long-running optimizations or forward solves.
 /// Intermediate optimization results are streamed as real component outputs via
 /// coalesced ExpireSolution calls, so downstream components receive live data.
 /// </summary>
@@ -31,16 +34,30 @@ public class TheseusSolveComponent : GH_Component
     private bool _lastWasOptimization;
 
     private bool _prevRunInput;
+    private bool _prevResetCacheInput;
     private int _triggerGeneration;
     private int _consumedGeneration;
     private int _lastInputHash;
+    private bool _hasLastInputHash;
+    private int _lastResultInputHash;
+    private bool _hasLastResultInputHash;
 
+    private readonly object _cancellationLock = new();
+    // Native sparse factorization is not interruptible. Serialize generations
+    // so a replacement solve waits for the cancelled solve's current boundary.
+    private readonly SemaphoreSlim _solveGate = new(1, 1);
     private CancellationTokenSource? _cts;
     private SynchronizationContext? _uiContext;
+    private readonly Dictionary<EdgeKey, double> _qCache = [];
+    private PendingCacheUpdate? _pendingCacheUpdate;
 
     private readonly object _intermediateLock = new();
     private IntermediateOutput? _intermediateOutput;
+    private List<double> _intermediateLossTrace = [];
     private volatile bool _expirePending;
+    private long _lastPreviewTicks;
+    private int _lastPreviewIteration;
+    private const int PreviewMinIntervalMs = 200;
 
     private record IntermediateOutput(
         List<Point3d> Nodes,
@@ -48,7 +65,14 @@ public class TheseusSolveComponent : GH_Component
         List<double> Q,
         List<double> Forces,
         List<double> Lengths,
-        int EvalCount);
+        int Iterations,
+        List<double> LossTrace,
+        double FinalLoss);
+
+    private sealed record PendingCacheUpdate(
+        bool CacheQ,
+        EdgeKey[]? EdgeKeys,
+        HashSet<EdgeKey>? AmbiguousKeys);
 
     public TheseusSolveComponent()
         : base("Theseus Solve", "Theseus",
@@ -59,13 +83,19 @@ public class TheseusSolveComponent : GH_Component
     protected override void RegisterInputParams(GH_InputParamManager pManager)
     {
         pManager.AddGenericParameter("Network", "Network", "FDM Network to solve", GH_ParamAccess.item);
-        pManager.AddNumberParameter("Force Densities", "q", "Initial force densities", GH_ParamAccess.list, 10.0);
+        pManager.AddNumberParameter("Force Densities", "q", "Initial force densities", GH_ParamAccess.tree, 10.0);
+        pManager.AddBooleanParameter("Cache Q", "CacheQ", "Reuse optimized q values for matching edges across solves/topology rebuilds; unmatched edges use input q", GH_ParamAccess.item, false);
+        pManager.AddBooleanParameter("Reset Cache", "ResetQ", "Button input that clears stored q values on the rising edge", GH_ParamAccess.item, false);
         pManager.AddVectorParameter("Loads", "Loads", "Loads on free nodes", GH_ParamAccess.list, new Vector3d(0, 0, -1));
         pManager.AddPointParameter("Load Nodes", "LN", "Nodes to apply loads to (optional; if empty, loads apply to all free nodes)", GH_ParamAccess.list);
         pManager.AddGenericParameter("Opt Config", "OptConfig", "Optimization configuration (optional, connect for optimization)", GH_ParamAccess.item);
+        pManager.AddGenericParameter("Self-Weight", "SW", "Self-weight configuration (optional)", GH_ParamAccess.item);
+        pManager.AddGenericParameter("Pressure", "Press", "Pressure load configuration (optional)", GH_ParamAccess.item);
 
-        pManager[3].Optional = true;
-        pManager[4].Optional = true;
+        pManager[5].Optional = true;
+        pManager[6].Optional = true;
+        pManager[7].Optional = true;
+        pManager[8].Optional = true;
     }
 
     protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -78,31 +108,85 @@ public class TheseusSolveComponent : GH_Component
         pManager.AddNumberParameter("Member Lengths", "Lengths", "Member lengths", GH_ParamAccess.list);
         pManager.AddIntegerParameter("Iterations", "Iter", "Number of solver iterations", GH_ParamAccess.item);
         pManager.AddBooleanParameter("Converged", "Conv", "Did the solver converge?", GH_ParamAccess.item);
+        pManager.AddNumberParameter("Loss Trace", "Loss", "Optimization loss values recorded during the solve", GH_ParamAccess.list);
+        pManager.AddNumberParameter("Final Loss", "FinalLoss", "Final optimization loss value", GH_ParamAccess.item);
+        pManager.AddTextParameter("Termination Reason", "Reason", "Native optimizer termination reason", GH_ParamAccess.item);
     }
 
     protected override void SolveInstance(IGH_DataAccess DA)
     {
+        DA.DisableGapLogic();
         _uiContext ??= SynchronizationContext.Current;
 
         // ── Gather inputs (always, so edge detection stays in sync) ──
         FDM_Network? network = null;
         List<double> q = [];
+        var qTree = new GH_Structure<GH_Number>();
+        bool cacheQ = false;
+        bool resetCache = false;
         List<Vector3d> loads = [];
         List<Point3d> loadNodes = [];
         OptimizationConfig? config = null;
+        List<double>? lowerBounds = null;
+        List<double>? upperBounds = null;
+        SelfWeightConfig? selfWeight = null;
+        PressureConfig? pressure = null;
 
         if (_state != SolverState.Done)
         {
             if (!DA.GetData(0, ref network)) return;
-            DA.GetDataList(1, q);
-            DA.GetDataList(2, loads);
-            DA.GetDataList(3, loadNodes);
-            DA.GetData(4, ref config);
+            if (!DA.GetDataTree(1, out qTree)) return;
+            DA.GetData(2, ref cacheQ);
+            DA.GetData(3, ref resetCache);
+            DA.GetDataList(4, loads);
+            DA.GetDataList(5, loadNodes);
+            DA.GetData(6, ref config);
+            DA.GetData(7, ref selfWeight);
+            DA.GetData(8, ref pressure);
 
             if (network == null || !network.Valid)
             {
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Invalid or null network");
                 return;
+            }
+
+            var qMapping = QTreeMapper.Map(qTree, network.Graph.EdgeInputPaths);
+            if (!qMapping.Success)
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Error, qMapping.Error!);
+                return;
+            }
+
+            q = qMapping.Values!.ToList();
+            if (qMapping.Warning is not null)
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, qMapping.Warning);
+
+            if (config is not null)
+            {
+                var lowerMapping = QTreeMapper.Map(
+                    config.LowerBounds, network.Graph.EdgeInputPaths, "qMin");
+                var upperMapping = QTreeMapper.Map(
+                    config.UpperBounds, network.Graph.EdgeInputPaths, "qMax");
+                if (!lowerMapping.Success || !upperMapping.Success)
+                {
+                    AddRuntimeMessage(
+                        GH_RuntimeMessageLevel.Error,
+                        lowerMapping.Error ?? upperMapping.Error!);
+                    return;
+                }
+
+                lowerBounds = lowerMapping.Values!.ToList();
+                upperBounds = upperMapping.Values!.ToList();
+                if (lowerMapping.Warning is not null)
+                    AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, lowerMapping.Warning);
+                if (upperMapping.Warning is not null)
+                    AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, upperMapping.Warning);
+                if (lowerBounds.Where((bound, i) => bound > upperBounds[i]).Any())
+                {
+                    AddRuntimeMessage(
+                        GH_RuntimeMessageLevel.Warning,
+                        "Lower bound (qMin) > upper bound (qMax) for some edges; infeasible bounds can cause solver errors.");
+                }
             }
         }
 
@@ -121,20 +205,50 @@ public class TheseusSolveComponent : GH_Component
             _triggerGeneration++;
         _prevRunInput = currentRun;
 
-        // ── No config -> forward solve ───────────────────────────
+        bool resetTriggered = resetCache && !_prevResetCacheInput;
+        if (resetTriggered)
+        {
+            _qCache.Clear();
+            _cachedResult = null;
+            _hasLastInputHash = false;
+            _hasLastResultInputHash = false;
+            if (currentRun)
+                _triggerGeneration++;
+            Message = cacheQ ? "q cache reset" : "";
+        }
+        _prevResetCacheInput = resetCache;
+
+        int inputHash = ComputeInputHash(
+            network!, q, cacheQ, loads, loadNodes, config, lowerBounds, upperBounds, selfWeight, pressure);
+
+        // ── No config -> forward solve (async) ───────────────────
         if (config == null)
         {
             if (_state == SolverState.Running)
             {
-                CancelAndDisposeCts();
-                _state = SolverState.Idle;
-                Message = "";
+                if (_lastWasOptimization)
+                {
+                    CancelCurrentSolve();
+                    _state = SolverState.Idle;
+                    Message = "";
+                }
+                else
+                {
+                    OutputIntermediateOrCached(DA);
+                    return;
+                }
             }
+
+            if (IsKnownInputHash(inputHash))
+            {
+                OutputIntermediateOrCached(DA);
+                return;
+            }
+
             _lastWasOptimization = false;
-            var snap = new SolveSnapshot(network!, q.AsReadOnly(), loads.AsReadOnly(), loadNodes.AsReadOnly(), null);
-            var result = RunSolve(snap, null);
-            _cachedResult = result;
-            OutputResult(DA, result);
+            var snap = CreateSnapshot(network!, q, cacheQ, loads, loadNodes, null, null, null, selfWeight, pressure);
+            StartAsyncSolve(snap, streamPreview: false, inputHash);
+            OutputIntermediateOrCached(DA);
             return;
         }
 
@@ -142,14 +256,14 @@ public class TheseusSolveComponent : GH_Component
         if (_state == SolverState.Running)
         {
             bool newTrigger = _triggerGeneration != _consumedGeneration;
-            int inputHash = ComputeInputHash(network!, q, loads, loadNodes, config);
-            bool inputsChanged = inputHash != _lastInputHash;
+            bool inputsChanged = !_hasLastInputHash || inputHash != _lastInputHash;
 
             if (newTrigger || (currentRun && inputsChanged))
             {
                 _consumedGeneration = _triggerGeneration;
-                _lastInputHash = inputHash;
-                StartOptimization(network!, q, loads, loadNodes, config);
+                StartOptimization(
+                    network!, q, cacheQ, loads, loadNodes, config,
+                    lowerBounds!, upperBounds!, selfWeight, pressure, inputHash);
             }
 
             OutputIntermediateOrCached(DA);
@@ -167,81 +281,125 @@ public class TheseusSolveComponent : GH_Component
 
         if (config.Objectives.Count == 0)
         {
+            if (IsKnownInputHash(inputHash))
+            {
+                OutputIntermediateOrCached(DA);
+                return;
+            }
+
             AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
                 "No objectives provided. Falling back to forward solve.");
             _lastWasOptimization = false;
-            var snap = new SolveSnapshot(network!, q.AsReadOnly(), loads.AsReadOnly(), loadNodes.AsReadOnly(), null);
-            var result = RunSolve(snap, null);
-            _cachedResult = result;
-            OutputResult(DA, result);
+            var snap = CreateSnapshot(
+                network!, q, cacheQ, loads, loadNodes, config,
+                lowerBounds, upperBounds, selfWeight, pressure);
+            StartAsyncSolve(snap, streamPreview: false, inputHash);
+            OutputIntermediateOrCached(DA);
             return;
         }
 
         if (_triggerGeneration == _consumedGeneration)
         {
-            int inputHash = ComputeInputHash(network!, q, loads, loadNodes, config);
-            if (inputHash == _lastInputHash)
+            if (IsKnownInputHash(inputHash))
             {
                 if (_cachedResult != null)
                     OutputResult(DA, _cachedResult);
                 return;
             }
-            _lastInputHash = inputHash;
         }
         else
         {
             _consumedGeneration = _triggerGeneration;
-            _lastInputHash = ComputeInputHash(network!, q, loads, loadNodes, config);
         }
 
         // ── Start background optimization ────────────────────────
-        StartOptimization(network!, q, loads, loadNodes, config);
+        StartAsyncSolve(
+            CreateSnapshot(
+                network!, q, cacheQ, loads, loadNodes, config,
+                lowerBounds, upperBounds, selfWeight, pressure),
+            streamPreview: config.StreamPreview,
+            inputHash);
         OutputIntermediateOrCached(DA);
     }
 
-    // ── Async optimization lifecycle ─────────────────────────────────
+    // ── Async solve lifecycle ─────────────────────────────────
 
-    private void StartOptimization(
-        FDM_Network network, List<double> q, List<Vector3d> loads, List<Point3d> loadNodes, OptimizationConfig config)
+    private void StartAsyncSolve(SolveSnapshot snap, bool streamPreview, int inputHash)
     {
-        CancelAndDisposeCts();
+        CancelCurrentSolve();
         _expirePending = false;
-        _lastWasOptimization = true;
+        _lastPreviewTicks = 0;
+        _lastPreviewIteration = 0;
         _pendingResult = null;
         _pendingError = null;
+        _pendingCacheUpdate = null;
+        _lastInputHash = inputHash;
+        _hasLastInputHash = true;
+        _hasLastResultInputHash = false;
 
         lock (_intermediateLock)
+        {
             _intermediateOutput = null;
+            _intermediateLossTrace = [];
+        }
 
-        _cts = new CancellationTokenSource();
-        var token = _cts.Token;
+        var cts = new CancellationTokenSource();
+        lock (_cancellationLock)
+            _cts = cts;
+        var token = cts.Token;
         var generation = ++_solveGeneration;
 
-        var edgeIndices = BuildEdgeIndexPairs(network);
-        bool stream = config.StreamPreview;
+        bool isOptimization = snap.Config is { Objectives.Count: > 0 };
+        _lastWasOptimization = isOptimization;
 
-        Func<int, double, double[], double[], bool> callback = (iter, loss, xyz, qVals) =>
+        Func<int, double, double[], double[], bool>? callback = null;
+        (int start, int end)[]? edgeIndices = null;
+        if (isOptimization)
         {
-            if (token.IsCancellationRequested) return false;
-            if (stream)
-                OnProgress(iter, loss, xyz, qVals, edgeIndices);
-            return true;
-        };
-
-        var snap = new SolveSnapshot(network, q.AsReadOnly(), loads.AsReadOnly(), loadNodes.AsReadOnly(), config);
+            edgeIndices = BuildEdgeIndexPairs(snap.Network);
+            bool stream = streamPreview;
+            callback = (iter, loss, xyz, qVals) =>
+            {
+                if (token.IsCancellationRequested) return false;
+                if (stream)
+                    OnProgress(iter, loss, xyz, qVals, edgeIndices);
+                return true;
+            };
+        }
 
         _state = SolverState.Running;
         Message = "Solving...";
 
         Task.Run(() =>
         {
+            bool enteredSolveGate = false;
             try
             {
-                var result = RunSolve(snap, callback);
+                _solveGate.Wait(token);
+                enteredSolveGate = true;
+                var result = RunSolve(snap, callback, token);
+                int resultInputHash = ComputeInputHash(
+                    snap.Network,
+                    snap.Q,
+                    snap.CacheQ,
+                    snap.Loads,
+                    snap.LoadNodes,
+                    snap.Config,
+                    snap.LowerBounds,
+                    snap.UpperBounds,
+                    snap.SelfWeight,
+                    snap.Pressure);
+
                 if (token.IsCancellationRequested || generation != _solveGeneration)
                     return;
 
                 _pendingResult = result;
+                _pendingCacheUpdate = new PendingCacheUpdate(
+                    snap.CacheQ,
+                    snap.EdgeKeys,
+                    snap.AmbiguousKeys);
+                _lastResultInputHash = resultInputHash;
+                _hasLastResultInputHash = true;
                 _state = SolverState.Done;
                 _uiContext?.Post(_ => ExpireSolution(true), null);
             }
@@ -254,21 +412,52 @@ public class TheseusSolveComponent : GH_Component
                 _state = SolverState.Done;
                 _uiContext?.Post(_ => ExpireSolution(true), null);
             }
+            finally
+            {
+                if (enteredSolveGate)
+                    _solveGate.Release();
+                lock (_cancellationLock)
+                {
+                    if (ReferenceEquals(_cts, cts))
+                        _cts = null;
+                    cts.Dispose();
+                }
+            }
         });
+    }
+
+    private void StartOptimization(
+        FDM_Network network, List<double> q, bool cacheQ, List<Vector3d> loads, List<Point3d> loadNodes,
+        OptimizationConfig config, IReadOnlyList<double> lowerBounds, IReadOnlyList<double> upperBounds,
+        SelfWeightConfig? selfWeight, PressureConfig? pressure, int inputHash)
+    {
+        StartAsyncSolve(
+            CreateSnapshot(
+                network, q, cacheQ, loads, loadNodes, config,
+                lowerBounds, upperBounds, selfWeight, pressure),
+            streamPreview: config.StreamPreview,
+            inputHash);
     }
 
     private void HarvestResult(IGH_DataAccess DA)
     {
         lock (_intermediateLock)
+        {
             _intermediateOutput = null;
+            _intermediateLossTrace = [];
+        }
 
         _state = SolverState.Idle;
         Message = "";
 
         if (_pendingError != null)
         {
-            AddRuntimeMessage(GH_RuntimeMessageLevel.Error, _pendingError.Message);
+            var ex = _pendingError;
             _pendingError = null;
+            string message = ex is TheseusException tex && tex.NativeCode != 0
+                ? $"{ex.Message} (native code {tex.NativeCode})"
+                : ex.Message;
+            AddRuntimeMessage(GH_RuntimeMessageLevel.Error, message);
             if (_cachedResult != null)
                 OutputResult(DA, _cachedResult);
             return;
@@ -278,6 +467,8 @@ public class TheseusSolveComponent : GH_Component
         {
             _cachedResult = _pendingResult;
             _pendingResult = null;
+            UpdateQCacheIfNeeded(_cachedResult, _pendingCacheUpdate);
+            _pendingCacheUpdate = null;
             OutputResult(DA, _cachedResult);
 
             if (_lastWasOptimization)
@@ -289,8 +480,11 @@ public class TheseusSolveComponent : GH_Component
                 }
                 else
                 {
+                    var reason = string.IsNullOrWhiteSpace(_cachedResult.TerminationReason)
+                        ? ""
+                        : $": {_cachedResult.TerminationReason}";
                     AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
-                        $"Did not converge after {_cachedResult.Iterations} iterations");
+                        $"Did not converge after {_cachedResult.Iterations} iterations{reason}");
                 }
             }
             return;
@@ -302,8 +496,17 @@ public class TheseusSolveComponent : GH_Component
 
     // ── Progress callback ────────────────────────────────────────────
 
-    private void OnProgress(int evalCount, double loss, double[] xyz, double[] qVals, (int start, int end)[] edgeIndices)
+    private void OnProgress(int iteration, double loss, double[] xyz, double[] qVals, (int start, int end)[] edgeIndices)
     {
+        long now = Stopwatch.GetTimestamp();
+        double elapsedMs = (now - _lastPreviewTicks) * 1000.0 / Stopwatch.Frequency;
+        if (_lastPreviewTicks != 0
+            && elapsedMs < PreviewMinIntervalMs
+            && iteration - _lastPreviewIteration < 1)
+            return;
+
+        _lastPreviewTicks = now;
+        _lastPreviewIteration = iteration;
         int nn = xyz.Length / 3;
         var nodes = new List<Point3d>(nn);
         for (int i = 0; i < nn; i++)
@@ -325,10 +528,21 @@ public class TheseusSolveComponent : GH_Component
             forces.Add(i < qVals.Length ? qVals[i] * len : 0.0);
         }
 
-        var intermediate = new IntermediateOutput(nodes, edges, qList, forces, lengths, evalCount);
-
         lock (_intermediateLock)
+        {
+            _intermediateLossTrace.Add(loss);
+            var lossTrace = _intermediateLossTrace.ToList();
+            var intermediate = new IntermediateOutput(
+                nodes,
+                edges,
+                qList,
+                forces,
+                lengths,
+                iteration,
+                lossTrace,
+                loss);
             _intermediateOutput = intermediate;
+        }
 
         if (!_expirePending)
         {
@@ -356,8 +570,11 @@ public class TheseusSolveComponent : GH_Component
             DA.SetDataList(3, intermediate.Q);
             DA.SetDataList(4, intermediate.Forces);
             DA.SetDataList(5, intermediate.Lengths);
-            DA.SetData(6, intermediate.EvalCount);
+            DA.SetData(6, intermediate.Iterations);
             DA.SetData(7, false);
+            DA.SetDataList(8, intermediate.LossTrace);
+            DA.SetData(9, intermediate.FinalLoss);
+            DA.SetData(10, "running");
         }
         else if (_cachedResult != null)
         {
@@ -365,32 +582,121 @@ public class TheseusSolveComponent : GH_Component
         }
     }
 
-    private void CancelAndDisposeCts()
+    private void CancelCurrentSolve()
     {
-        _cts?.Cancel();
-        _cts?.Dispose();
-        _cts = null;
+        lock (_cancellationLock)
+        {
+            _cts?.Cancel();
+            _cts = null;
+        }
     }
 
     private static int ComputeInputHash(
-        FDM_Network network, List<double> q, List<Vector3d> loads, List<Point3d> loadNodes, OptimizationConfig config)
+        FDM_Network network,
+        IReadOnlyList<double> q,
+        bool cacheQ,
+        IReadOnlyList<Vector3d> loads,
+        IReadOnlyList<Point3d> loadNodes,
+        OptimizationConfig? config,
+        IReadOnlyList<double>? lowerBounds,
+        IReadOnlyList<double>? upperBounds,
+        SelfWeightConfig? selfWeight,
+        PressureConfig? pressure)
     {
         var hash = new HashCode();
-        hash.Add(RuntimeHelpers.GetHashCode(network));
+        hash.Add(network.GetTopologyHashCode());
+        hash.Add(cacheQ);
         foreach (var v in q) hash.Add(v);
         foreach (var l in loads) { hash.Add(l.X); hash.Add(l.Y); hash.Add(l.Z); }
         foreach (var ln in loadNodes) { hash.Add(ln.X); hash.Add(ln.Y); hash.Add(ln.Z); }
-        hash.Add(config.MaxIterations);
-        hash.Add(config.AbsTol);
-        hash.Add(config.RelTol);
-        hash.Add(config.BarrierWeight);
-        hash.Add(config.BarrierSharpness);
-        foreach (var obj in config.Objectives)
-            hash.Add(obj.GetContentHashCode());
-        foreach (var lb in config.LowerBounds) hash.Add(lb);
-        foreach (var ub in config.UpperBounds) hash.Add(ub);
+        hash.Add(config is not null);
+        if (config is not null)
+        {
+            hash.Add(config.MaxIterations);
+            hash.Add(config.AbsTol);
+            hash.Add(config.RelTol);
+            hash.Add(config.BarrierWeight);
+            hash.Add(config.BarrierSharpness);
+            hash.Add(config.ReportFrequency);
+            hash.Add(config.QParameterizationMode);
+            hash.Add(config.StreamPreview);
+            foreach (var obj in config.Objectives)
+                hash.Add(obj.GetContentHashCode());
+            foreach (var support in config.VariableSupports)
+                hash.Add(support.GetContentHashCode());
+            foreach (var lb in lowerBounds!) hash.Add(lb);
+            foreach (var ub in upperBounds!) hash.Add(ub);
+        }
+        hash.Add(selfWeight?.GetContentHashCode() ?? 0);
+        hash.Add(pressure?.GetContentHashCode() ?? 0);
         return hash.ToHashCode();
     }
+
+    private SolveSnapshot CreateSnapshot(
+        FDM_Network network,
+        IReadOnlyList<double> inputQ,
+        bool cacheQ,
+        IReadOnlyList<Vector3d> loads,
+        IReadOnlyList<Point3d> loadNodes,
+        OptimizationConfig? config,
+        IReadOnlyList<double>? lowerBounds,
+        IReadOnlyList<double>? upperBounds,
+        SelfWeightConfig? selfWeight,
+        PressureConfig? pressure)
+    {
+        var resolvedQ = inputQ.ToList();
+        EdgeKey[]? edgeKeys = null;
+        HashSet<EdgeKey>? ambiguousKeys = null;
+
+        if (cacheQ)
+        {
+            var keySet = EdgeIdentity.BuildKeys(network);
+            edgeKeys = keySet.Keys;
+            ambiguousKeys = keySet.AmbiguousKeys;
+            for (int i = 0; i < edgeKeys.Length; i++)
+            {
+                var key = edgeKeys[i];
+                if (!ambiguousKeys.Contains(key) && _qCache.TryGetValue(key, out double cachedQ))
+                    resolvedQ[i] = cachedQ;
+            }
+
+            if (ambiguousKeys.Count > 0)
+            {
+                AddRuntimeMessage(
+                    GH_RuntimeMessageLevel.Warning,
+                    $"{ambiguousKeys.Count} ambiguous edge identity key(s); input q was used for those edges.");
+            }
+        }
+
+        return new SolveSnapshot(
+            network,
+            resolvedQ.AsReadOnly(),
+            loads.ToList().AsReadOnly(),
+            loadNodes.ToList().AsReadOnly(),
+            config,
+            lowerBounds?.ToList().AsReadOnly(),
+            upperBounds?.ToList().AsReadOnly(),
+            cacheQ,
+            edgeKeys,
+            ambiguousKeys,
+            selfWeight,
+            pressure);
+    }
+
+    private void UpdateQCacheIfNeeded(SolveResult result, PendingCacheUpdate? update)
+    {
+        if (update is not { CacheQ: true, EdgeKeys: { } keys })
+            return;
+
+        var ambiguous = update.AmbiguousKeys ?? [];
+        QCacheUpdater.Apply(_qCache, keys, result.ForceDensities, ambiguous);
+
+        Message = $"q cache: {_qCache.Count}";
+    }
+
+    private bool IsKnownInputHash(int inputHash) =>
+        (_hasLastInputHash && inputHash == _lastInputHash)
+        || (_hasLastResultInputHash && inputHash == _lastResultInputHash);
 
     private static (int start, int end)[] BuildEdgeIndexPairs(FDM_Network network)
     {
@@ -410,7 +716,10 @@ public class TheseusSolveComponent : GH_Component
 
     // ── Solve logic ─────────────────────────────────────────────────
 
-    private static SolveResult RunSolve(SolveSnapshot snap, Func<int, double, double[], double[], bool>? callback)
+    private static SolveResult RunSolve(
+        SolveSnapshot snap,
+        Func<int, double, double[], double[], bool>? callback,
+        CancellationToken cancellationToken)
     {
         var loadNodeIndices = snap.LoadNodes.Count > 0
             ? TheseusSolverService.ResolveLoadNodeIndices(snap.Network, snap.LoadNodes)
@@ -423,20 +732,17 @@ public class TheseusSolveComponent : GH_Component
                 QInit = snap.Q.ToList(),
                 Loads = snap.Loads.ToList(),
                 LoadNodeIndices = loadNodeIndices,
-                LowerBounds = cfg.LowerBounds.ToList(),
-                UpperBounds = cfg.UpperBounds.ToList(),
+                LowerBounds = snap.LowerBounds!.ToList(),
+                UpperBounds = snap.UpperBounds!.ToList(),
                 Objectives = cfg.Objectives.ToList(),
+                QParameterizationMode = cfg.QParameterizationMode,
+                SelfWeight = snap.SelfWeight,
+                Pressure = snap.Pressure,
+                VariableSupports = cfg.VariableSupports.ToList(),
             };
-            var options = new SolverOptions
-            {
-                MaxIterations = cfg.MaxIterations,
-                AbsTol = cfg.AbsTol,
-                RelTol = cfg.RelTol,
-                BarrierWeight = cfg.BarrierWeight,
-                BarrierSharpness = cfg.BarrierSharpness,
-                ReportFrequency = cfg.ReportFrequency,
-            };
-            return TheseusSolverService.Solve(snap.Network, inputs, options, callback);
+            var options = cfg.ToSolverOptions();
+            return TheseusSolverService.Solve(
+                snap.Network, inputs, options, callback, cancellationToken);
         }
 
         var fwdInputs = new SolverInputs
@@ -444,8 +750,11 @@ public class TheseusSolveComponent : GH_Component
             QInit = snap.Q.ToList(),
             Loads = snap.Loads.ToList(),
             LoadNodeIndices = loadNodeIndices,
+            SelfWeight = snap.SelfWeight,
+            Pressure = snap.Pressure,
         };
-        return TheseusSolverService.SolveForward(snap.Network, fwdInputs);
+        return TheseusSolverService.SolveForward(
+            snap.Network, fwdInputs, cancellationToken);
     }
 
     private static void OutputResult(IGH_DataAccess DA, SolveResult result)
@@ -458,15 +767,22 @@ public class TheseusSolveComponent : GH_Component
         DA.SetDataList(5, result.MemberLengths);
         DA.SetData(6, result.Iterations);
         DA.SetData(7, result.Converged);
+        DA.SetDataList(8, result.LossTrace);
+        if (result.LossTrace.Length > 0)
+            DA.SetData(9, result.FinalLoss);
+        DA.SetData(10, result.TerminationReason);
     }
 
     // ── Cleanup ─────────────────────────────────────────────────────
 
     public override void RemovedFromDocument(GH_Document document)
     {
-        CancelAndDisposeCts();
+        CancelCurrentSolve();
         lock (_intermediateLock)
+        {
             _intermediateOutput = null;
+            _intermediateLossTrace = [];
+        }
         _state = SolverState.Idle;
         base.RemovedFromDocument(document);
     }
@@ -485,4 +801,11 @@ internal sealed record SolveSnapshot(
     IReadOnlyList<double> Q,
     IReadOnlyList<Vector3d> Loads,
     IReadOnlyList<Point3d> LoadNodes,
-    OptimizationConfig? Config);
+    OptimizationConfig? Config,
+    IReadOnlyList<double>? LowerBounds,
+    IReadOnlyList<double>? UpperBounds,
+    bool CacheQ,
+    EdgeKey[]? EdgeKeys = null,
+    HashSet<EdgeKey>? AmbiguousKeys = null,
+    SelfWeightConfig? SelfWeight = null,
+    PressureConfig? Pressure = null);

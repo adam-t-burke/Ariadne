@@ -17,7 +17,7 @@ namespace Ariadne.FDM
     /// </summary>
     public class ConstructNetwork : GH_Component
     {
-        FDM_Network oldNet;
+        FDM_Network oldNet = null!;
         /// <summary>
         /// Each implementation of GH_Component must provide a public 
         /// constructor without any arguments.

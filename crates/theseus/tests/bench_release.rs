@@ -1,0 +1,377 @@
+//! Release-mode benchmarks for the Theseus solver.
+//!
+//! Run with:   cargo test --release --test bench_release -- --ignored --nocapture
+//!
+//! These benchmarks are marked `#[ignore]` so they are skipped in CI.
+//! Record before/after timings here when validating hot-path changes.
+//!
+//! Baseline notes (pre Phase 2 hot-path refactor, release build):
+//!   - Forward solve and value+gradient scale roughly linearly with edge count.
+//!   - Full L-BFGS runs are dominated by value+gradient eval cost.
+//!   - Re-run after refactors and update this header with measured deltas.
+
+use ndarray::Array2;
+use std::sync::atomic::AtomicBool;
+use std::time::Instant;
+use theseus::sparse::SparseColMatOwned;
+use theseus::types::*;
+
+// ─────────────────────────────────────────────────────────────
+//  Helpers
+// ─────────────────────────────────────────────────────────────
+
+fn build_incidence(edges: &[(usize, usize)], num_nodes: usize) -> SparseColMatOwned {
+    let ne = edges.len();
+    let mut rows = Vec::with_capacity(ne * 2);
+    let mut cols = Vec::with_capacity(ne * 2);
+    let mut vals = Vec::with_capacity(ne * 2);
+    for (e, &(s, t)) in edges.iter().enumerate() {
+        rows.push(e);
+        cols.push(s);
+        vals.push(-1.0);
+        rows.push(e);
+        cols.push(t);
+        vals.push(1.0);
+    }
+    SparseColMatOwned::from_coo(ne, num_nodes, &rows, &cols, &vals).unwrap()
+}
+
+fn extract_columns(mat: &SparseColMatOwned, cols: &[usize]) -> SparseColMatOwned {
+    mat.extract_columns(cols)
+}
+
+/// Build a larger grid network for benchmarking.
+///
+/// `n` × `n` grid of nodes, 4 corner nodes are fixed anchors.
+/// Horizontal + vertical edges.
+fn make_grid_problem(n: usize) -> Problem {
+    let num_nodes = n * n;
+    let mut edges = Vec::new();
+
+    // Horizontal edges
+    for row in 0..n {
+        for col in 0..(n - 1) {
+            edges.push((row * n + col, row * n + col + 1));
+        }
+    }
+    // Vertical edges
+    for row in 0..(n - 1) {
+        for col in 0..n {
+            edges.push((row * n + col, (row + 1) * n + col));
+        }
+    }
+
+    let num_edges = edges.len();
+
+    // Fixed: 4 corners
+    let fixed_idx: Vec<usize> = vec![0, n - 1, n * (n - 1), n * n - 1];
+    let free_idx: Vec<usize> = (0..num_nodes).filter(|i| !fixed_idx.contains(i)).collect();
+    let nn_free = free_idx.len();
+
+    let incidence = build_incidence(&edges, num_nodes);
+    let free_inc = extract_columns(&incidence, &free_idx);
+    let fixed_inc = extract_columns(&incidence, &fixed_idx);
+
+    let topology = NetworkTopology {
+        incidence,
+        free_incidence: free_inc,
+        fixed_incidence: fixed_inc,
+        num_edges,
+        num_nodes,
+        free_node_indices: free_idx,
+        fixed_node_indices: fixed_idx,
+    };
+
+    // Loads: uniform downward
+    let mut loads_data = vec![0.0; nn_free * 3];
+    for i in 0..nn_free {
+        loads_data[i * 3 + 2] = -1.0; // z = -1
+    }
+    let free_node_loads = Array2::from_shape_vec((nn_free, 3), loads_data).unwrap();
+
+    // Fixed positions at grid corners
+    let fixed_node_positions = Array2::from_shape_vec(
+        (4, 3),
+        vec![
+            0.0,
+            0.0,
+            0.0,
+            (n - 1) as f64,
+            0.0,
+            0.0,
+            0.0,
+            (n - 1) as f64,
+            0.0,
+            (n - 1) as f64,
+            (n - 1) as f64,
+            0.0,
+        ],
+    )
+    .unwrap();
+
+    let anchors = AnchorInfo::all_fixed(fixed_node_positions.clone());
+
+    // Target: nodes at grid positions with slight sag in z
+    let target_nodes: Vec<usize> = topology.free_node_indices.clone();
+    let mut target_data = vec![0.0; nn_free * 3];
+    for (i, &node) in target_nodes.iter().enumerate() {
+        let row = node / n;
+        let col = node % n;
+        target_data[i * 3] = col as f64;
+        target_data[i * 3 + 1] = row as f64;
+        target_data[i * 3 + 2] = -0.2; // slight sag
+    }
+    let target = Array2::from_shape_vec((nn_free, 3), target_data).unwrap();
+
+    let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(TargetXYZ {
+        weight: 1.0,
+        node_indices: target_nodes,
+        target,
+        reduction: TargetGeometryReduction::Sse,
+    })];
+
+    let bounds = Bounds {
+        lower: vec![0.1; num_edges],
+        upper: vec![f64::INFINITY; num_edges],
+    };
+
+    Problem {
+        topology,
+        free_node_loads,
+        fixed_node_positions,
+        anchors,
+        objectives,
+        bounds,
+        solver: SolverOptions {
+            max_iterations: 200,
+            ..SolverOptions::default()
+        },
+        self_weight: None,
+        pressure: None,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Scaling sweep helpers
+// ─────────────────────────────────────────────────────────────
+
+/// Grid sizes to test.  n×n grid → 2·n·(n-1) edges.
+///   10  →     180 edges
+///   32  →   1,984 edges
+const GRID_SIZES: &[(usize, &str)] = &[(10, "10×10"), (32, "32×32")];
+
+fn fmt_count(n: usize) -> String {
+    if n >= 1_000_000 {
+        format!("{:.2}M", n as f64 / 1e6)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1e3)
+    } else {
+        format!("{}", n)
+    }
+}
+
+fn fmt_time(us: f64) -> String {
+    if us >= 1_000_000.0 {
+        format!("{:.2} s", us / 1e6)
+    } else if us >= 1_000.0 {
+        format!("{:.2} ms", us / 1e3)
+    } else {
+        format!("{:.1} μs", us)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Benchmarks
+// ─────────────────────────────────────────────────────────────
+
+#[test]
+#[ignore = "manual release benchmark — run with --ignored"]
+fn bench_forward_solve_scaling() {
+    eprintln!("\n┌─────────────────────────────────────────────────────────────────┐");
+    eprintln!("│                 FORWARD SOLVE  (factor + triangular solve)      │");
+    eprintln!("├──────────┬──────────┬───────────┬──────────────────────────── ───┤");
+    eprintln!("│  grid    │  edges   │  per-solve│  total (iters)                │");
+    eprintln!("├──────────┼──────────┼───────────┼───────────────────────────────┤");
+
+    for &(n, label) in GRID_SIZES {
+        let problem = make_grid_problem(n);
+        let ne = problem.topology.num_edges;
+        let q = vec![1.0; ne];
+        let anchors = Array2::zeros((0, 3));
+
+        // Warm-up
+        let mut cache = FdmCache::new(&problem).unwrap();
+        theseus::fdm::solve_fdm(&mut cache, &q, &problem, &anchors, 1e-12).unwrap();
+
+        // Adaptive iteration count: keep total time ~1-3s per size
+        let iters: usize = if ne < 1_000 {
+            5000
+        } else if ne < 20_000 {
+            500
+        } else if ne < 200_000 {
+            50
+        } else if ne < 600_000 {
+            10
+        } else {
+            3
+        };
+
+        let start = Instant::now();
+        for _ in 0..iters {
+            cache.factorization = None; // force re-factor
+            theseus::fdm::solve_fdm(&mut cache, &q, &problem, &anchors, 1e-12).unwrap();
+        }
+        let elapsed = start.elapsed();
+        let per_us = elapsed.as_micros() as f64 / iters as f64;
+
+        eprintln!(
+            "│  {:<7} │ {:>8} │ {:>9} │  {:.2} ms  ({} iters){}│",
+            label,
+            fmt_count(ne),
+            fmt_time(per_us),
+            elapsed.as_secs_f64() * 1000.0,
+            iters,
+            " ".repeat(3usize.saturating_sub(format!("{}", iters).len())),
+        );
+    }
+    eprintln!("└──────────┴──────────┴───────────┴───────────────────────────────┘\n");
+}
+
+#[test]
+#[ignore = "manual release benchmark — run with --ignored"]
+fn bench_value_and_gradient_scaling() {
+    eprintln!("\n┌─────────────────────────────────────────────────────────────────┐");
+    eprintln!("│             VALUE + GRADIENT  (forward + adjoint + explicit)    │");
+    eprintln!("├──────────┬──────────┬───────────┬───────────────────────────────┤");
+    eprintln!("│  grid    │  edges   │  per-eval │  total (iters)                │");
+    eprintln!("├──────────┼──────────┼───────────┼───────────────────────────────┤");
+
+    for &(n, label) in GRID_SIZES {
+        let problem = make_grid_problem(n);
+        let ne = problem.topology.num_edges;
+        let theta = vec![1.0; ne];
+
+        let lb = problem.bounds.lower.clone();
+        let ub = problem.bounds.upper.clone();
+        let lb_idx: Vec<usize> = (0..ne).filter(|&i| lb[i].is_finite()).collect();
+        let ub_idx: Vec<usize> = (0..ne).filter(|&i| ub[i].is_finite()).collect();
+
+        // Warm-up
+        let mut cache = FdmCache::new(&problem).unwrap();
+        let mut grad = vec![0.0; ne];
+        theseus::gradients::value_and_gradient(
+            &mut cache, &problem, &theta, &mut grad, &lb, &ub, &lb_idx, &ub_idx,
+        )
+        .unwrap();
+
+        let iters: usize = if ne < 1_000 {
+            3000
+        } else if ne < 20_000 {
+            300
+        } else if ne < 200_000 {
+            30
+        } else if ne < 600_000 {
+            5
+        } else {
+            2
+        };
+
+        let start = Instant::now();
+        for _ in 0..iters {
+            cache.factorization = None;
+            grad.fill(0.0);
+            theseus::gradients::value_and_gradient(
+                &mut cache, &problem, &theta, &mut grad, &lb, &ub, &lb_idx, &ub_idx,
+            )
+            .unwrap();
+        }
+        let elapsed = start.elapsed();
+        let per_us = elapsed.as_micros() as f64 / iters as f64;
+
+        eprintln!(
+            "│  {:<7} │ {:>8} │ {:>9} │  {:.2} ms  ({} iters){}│",
+            label,
+            fmt_count(ne),
+            fmt_time(per_us),
+            elapsed.as_secs_f64() * 1000.0,
+            iters,
+            " ".repeat(3usize.saturating_sub(format!("{}", iters).len())),
+        );
+    }
+    eprintln!("└──────────┴──────────┴───────────┴───────────────────────────────┘\n");
+}
+
+#[test]
+#[ignore = "manual release benchmark — run with --ignored"]
+fn bench_full_optimize_scaling() {
+    let opt_sizes: &[(usize, &str)] = &[(10, "10×10"), (32, "32×32")];
+
+    eprintln!("\n┌─────────────────────────────────────────────────────────────────┐");
+    eprintln!("│               FULL L-BFGS OPTIMIZE  (≤200 iters)               │");
+    eprintln!("├──────────┬──────────┬───────────┬───────────────────────────────┤");
+    eprintln!("│  grid    │  edges   │  per-run  │  total (runs)                 │");
+    eprintln!("├──────────┼──────────┼───────────┼───────────────────────────────┤");
+
+    for &(n, label) in opt_sizes {
+        let problem = make_grid_problem(n);
+        let ne = problem.topology.num_edges;
+
+        let runs: usize = if ne < 1_000 {
+            20
+        } else if ne < 20_000 {
+            5
+        } else if ne < 200_000 {
+            2
+        } else {
+            1
+        };
+
+        let start = Instant::now();
+        let cancel = AtomicBool::new(false);
+        for _ in 0..runs {
+            let mut state = OptimizationState::new(vec![1.0; ne], Array2::zeros((0, 3)));
+            let result =
+                theseus::optimizer::optimize(&problem, &mut state, None, 1, &cancel).unwrap();
+            let _ = std::hint::black_box(result);
+        }
+        let elapsed = start.elapsed();
+        let per_us = elapsed.as_micros() as f64 / runs as f64;
+
+        eprintln!(
+            "│  {:<7} │ {:>8} │ {:>9} │  {:.2} ms  ({} runs){}│",
+            label,
+            fmt_count(ne),
+            fmt_time(per_us),
+            elapsed.as_secs_f64() * 1000.0,
+            runs,
+            " ".repeat(4usize.saturating_sub(format!("{}", runs).len())),
+        );
+    }
+    eprintln!("└──────────┴──────────┴───────────┴───────────────────────────────┘\n");
+}
+
+#[test]
+#[ignore = "manual release benchmark — run with --ignored"]
+fn bench_direct_box_bounds_48() {
+    const GRID: usize = 48;
+    let mut problem = make_grid_problem(GRID);
+    problem.bounds.upper.fill(10.0);
+    problem.solver.q_parameterization_mode = QParameterizationMode::DirectBoxBounds;
+    let ne = problem.topology.num_edges;
+    let cancel = AtomicBool::new(false);
+
+    let run = || {
+        let mut state = OptimizationState::new(vec![1.0; ne], Array2::zeros((0, 3)));
+        std::hint::black_box(
+            theseus::optimizer::optimize(&problem, &mut state, None, 1, &cancel).unwrap(),
+        );
+    };
+    run();
+    let start = Instant::now();
+    run();
+    eprintln!(
+        "DirectBoxBounds,48×48,{} edges,{:.3} ms/run",
+        ne,
+        start.elapsed().as_secs_f64() * 1.0e3,
+    );
+}

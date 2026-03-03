@@ -8,14 +8,28 @@ using Rhino.Geometry;
 using Theseus.Interop;
 
 /// <summary>
+/// How per-node target-geometry residuals are reduced to a scalar.
+/// Residuals are per-node squared Euclidean (or in-plane) distances.
+/// </summary>
+public enum TargetGeometryReduction
+{
+    Sse = 0,
+    Mse = 1,
+    Rmse = 2,
+}
+
+/// <summary>
 /// Minimize XY deviation from initial node positions (TNA-like behavior).
 /// </summary>
 public sealed class TargetXYObjective : NodeObjective
 {
-    public TargetXYObjective(double weight, List<Node>? nodes = null)
+    public TargetGeometryReduction Reduction { get; }
+
+    public TargetXYObjective(double weight, List<Node>? nodes = null, TargetGeometryReduction reduction = TargetGeometryReduction.Sse)
     {
         Weight = weight;
         TargetNodes = nodes;
+        Reduction = reduction;
     }
 
     public override void ApplyTo(TheseusSolver solver, SolverContext context)
@@ -32,7 +46,15 @@ public sealed class TargetXYObjective : NodeObjective
             targetXy[i * 3 + 2] = pos.Z;
         }
 
-        solver.AddTargetXy(Weight, indices, targetXy);
+        solver.AddTargetXy(Weight, indices, targetXy, (int)Reduction);
+    }
+
+    public override int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(base.GetContentHashCode());
+        h.Add(Reduction);
+        return h.ToHashCode();
     }
 }
 
@@ -41,10 +63,13 @@ public sealed class TargetXYObjective : NodeObjective
 /// </summary>
 public sealed class TargetXYZObjective : NodeObjective
 {
-    public TargetXYZObjective(double weight, List<Node>? nodes = null)
+    public TargetGeometryReduction Reduction { get; }
+
+    public TargetXYZObjective(double weight, List<Node>? nodes = null, TargetGeometryReduction reduction = TargetGeometryReduction.Sse)
     {
         Weight = weight;
         TargetNodes = nodes;
+        Reduction = reduction;
     }
 
     public override void ApplyTo(TheseusSolver solver, SolverContext context)
@@ -60,7 +85,15 @@ public sealed class TargetXYZObjective : NodeObjective
             targetXyz[i * 3 + 2] = pos.Z;
         }
 
-        solver.AddTargetXyz(Weight, indices, targetXyz);
+        solver.AddTargetXyz(Weight, indices, targetXyz, (int)Reduction);
+    }
+
+    public override int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(base.GetContentHashCode());
+        h.Add(Reduction);
+        return h.ToHashCode();
     }
 }
 
@@ -72,12 +105,14 @@ public sealed class TargetPlaneObjective : NodeObjective
 {
     /// <summary>Plane to project target positions onto; null uses world XY.</summary>
     public Plane? Plane { get; }
+    public TargetGeometryReduction Reduction { get; }
 
-    public TargetPlaneObjective(double weight, List<Node>? nodes = null, Plane? plane = null)
+    public TargetPlaneObjective(double weight, List<Node>? nodes = null, Plane? plane = null, TargetGeometryReduction reduction = TargetGeometryReduction.Sse)
     {
         Weight = weight;
         TargetNodes = nodes;
         Plane = plane;
+        Reduction = reduction;
     }
 
     public override void ApplyTo(TheseusSolver solver, SolverContext context)
@@ -98,13 +133,14 @@ public sealed class TargetPlaneObjective : NodeObjective
         double[] xAxis = { plane.XAxis.X, plane.XAxis.Y, plane.XAxis.Z };
         double[] yAxis = { plane.YAxis.X, plane.YAxis.Y, plane.YAxis.Z };
 
-        solver.AddTargetPlane(Weight, indices, targetXyz, origin, xAxis, yAxis);
+        solver.AddTargetPlane(Weight, indices, targetXyz, origin, xAxis, yAxis, (int)Reduction);
     }
 
     public override int GetContentHashCode()
     {
         var h = new HashCode();
         h.Add(base.GetContentHashCode());
+        h.Add(Reduction);
         if (Plane is { } p)
         {
             h.Add(p.Origin.X); h.Add(p.Origin.Y); h.Add(p.Origin.Z);
@@ -211,48 +247,109 @@ public sealed class RigidPointSetObjective : NodeObjective
 /// Align anchor reaction force directions with target directions,
 /// optionally also matching target magnitudes.
 /// </summary>
+public enum ReactionMagnitudeBehavior
+{
+    Target = 0,
+    Max = 1,
+    Min = 2,
+}
+
+public enum ReactionMagnitudeSign
+{
+    Unsigned = 0,
+    SignedProjected = 1,
+}
+
 public sealed class ReactionObjective : NodeObjective
 {
     public List<Vector3d> TargetDirections { get; init; }
     public List<double>? TargetMagnitudes { get; init; }
+    public bool IncludeDirection { get; init; }
     public bool IncludeMagnitude { get; init; }
+    public ReactionMagnitudeBehavior MagnitudeBehavior { get; init; }
+    public ReactionMagnitudeSign MagnitudeSign { get; init; }
 
     public ReactionObjective(
         double weight,
         List<Node> anchorNodes,
         List<Vector3d> targetDirections,
+        bool includeDirection = true,
         bool includeMagnitude = false,
-        List<double>? targetMagnitudes = null)
+        List<double>? targetMagnitudes = null,
+        ReactionMagnitudeBehavior magnitudeBehavior = ReactionMagnitudeBehavior.Max,
+        ReactionMagnitudeSign magnitudeSign = ReactionMagnitudeSign.Unsigned)
     {
         Weight = weight;
         TargetNodes = anchorNodes;
         TargetDirections = targetDirections;
+        IncludeDirection = includeDirection;
         IncludeMagnitude = includeMagnitude;
         TargetMagnitudes = targetMagnitudes;
+        MagnitudeBehavior = magnitudeBehavior;
+        MagnitudeSign = magnitudeSign;
     }
 
     public override void ApplyTo(TheseusSolver solver, SolverContext context)
     {
         if (TargetNodes == null || TargetNodes.Count == 0) return;
+        if (!IncludeDirection && !IncludeMagnitude) return;
+        if (IncludeDirection && TargetDirections.Count == 0)
+        {
+            IsValid = false;
+            return;
+        }
+        if (IncludeMagnitude && TargetMagnitudes is not { Count: > 0 })
+        {
+            IsValid = false;
+            return;
+        }
 
         int[] indices = TargetNodes.Select(n => context.NodeIndexMap[n]).ToArray();
 
         double[] targetDirs = new double[indices.Length * 3];
         for (int i = 0; i < indices.Length; i++)
         {
-            var dir = i < TargetDirections.Count ? TargetDirections[i] : TargetDirections[^1];
+            var dir = TargetDirections.Count > 0
+                ? (i < TargetDirections.Count ? TargetDirections[i] : TargetDirections[^1])
+                : Vector3d.XAxis;
             targetDirs[i * 3 + 0] = dir.X;
             targetDirs[i * 3 + 1] = dir.Y;
             targetDirs[i * 3 + 2] = dir.Z;
         }
 
-        if (IncludeMagnitude && TargetMagnitudes is { Count: > 0 })
+        if (MagnitudeSign == ReactionMagnitudeSign.SignedProjected && !HasUsableDirections(targetDirs))
         {
+            IsValid = false;
+            return;
+        }
+
+        if (IncludeMagnitude)
+        {
+            var magnitudes = TargetMagnitudes!;
             double[] targetMags = new double[indices.Length];
             for (int i = 0; i < indices.Length; i++)
-                targetMags[i] = i < TargetMagnitudes.Count ? TargetMagnitudes[i] : TargetMagnitudes[^1];
+                targetMags[i] = i < magnitudes.Count ? magnitudes[i] : magnitudes[^1];
 
-            solver.AddReactionDirectionMagnitude(Weight, indices, targetDirs, targetMags);
+            if (IncludeDirection)
+            {
+                solver.AddReactionDirectionMagnitude(
+                    Weight,
+                    indices,
+                    targetDirs,
+                    targetMags,
+                    (int)MagnitudeBehavior,
+                    (int)MagnitudeSign);
+            }
+            else
+            {
+                solver.AddReactionMagnitude(
+                    Weight,
+                    indices,
+                    targetDirs,
+                    targetMags,
+                    (int)MagnitudeBehavior,
+                    (int)MagnitudeSign);
+            }
         }
         else
         {
@@ -264,7 +361,10 @@ public sealed class ReactionObjective : NodeObjective
     {
         var h = new HashCode();
         h.Add(base.GetContentHashCode());
+        h.Add(IncludeDirection);
         h.Add(IncludeMagnitude);
+        h.Add(MagnitudeBehavior);
+        h.Add(MagnitudeSign);
         if (TargetDirections != null)
             foreach (var d in TargetDirections)
             { h.Add(d.X); h.Add(d.Y); h.Add(d.Z); }
@@ -272,5 +372,19 @@ public sealed class ReactionObjective : NodeObjective
             foreach (var m in TargetMagnitudes)
                 h.Add(m);
         return h.ToHashCode();
+    }
+
+    private static bool HasUsableDirections(double[] targetDirs)
+    {
+        for (int i = 0; i < targetDirs.Length; i += 3)
+        {
+            double norm = Math.Sqrt(
+                targetDirs[i + 0] * targetDirs[i + 0] +
+                targetDirs[i + 1] * targetDirs[i + 1] +
+                targetDirs[i + 2] * targetDirs[i + 2]);
+            if (norm < 1e-10)
+                return false;
+        }
+        return true;
     }
 }

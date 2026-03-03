@@ -2,7 +2,7 @@
 	
   <PropertyGroup>
     <TargetFrameworks>net8.0</TargetFrameworks>
-    <Version>1.0.1</Version>
+    <Version>1.0.11-beta</Version>
     <Title>Ariadne</Title>
     <Description>Ariadne is the front-end counterpart to the inverse form finding tool Theseus.</Description>
 <TargetExt>.gha</TargetExt>
@@ -13,9 +13,19 @@
     <NoWarn>$(NoWarn);1591</NoWarn>
   </PropertyGroup>
 
-  <!-- Copy theseus.dll native library to output -->
+  <PropertyGroup Condition="!$([MSBuild]::IsOSPlatform('Windows'))">
+    <GenerateErrorForMissingTargetingPacks>false</GenerateErrorForMissingTargetingPacks>
+  </PropertyGroup>
+
+  <!-- Copy native theseus library to output (Windows, Mac) -->
   <ItemGroup>
     <None Include="Theseus\theseus.dll" Link="theseus.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Theseus\libtheseus.dylib" Link="libtheseus.dylib" CopyToOutputDirectory="PreserveNewest" Condition="Exists('Theseus\libtheseus.dylib')" />
+    <None Update="LICENSE.txt" Link="Ariadne-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="crates\lbfgsb\LICENSE" Link="ariadne-lbfgsb-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="crates\lbfgsb\UPSTREAM_LICENSE.txt" Link="ariadne-lbfgsb-UPSTREAM_LICENSE.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="crates\lbfgsb\THIRD_PARTY_NOTICES.md" Link="ariadne-lbfgsb-THIRD_PARTY_NOTICES.md" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Theseus\NATIVE_ARTIFACTS.md" Link="NATIVE_ARTIFACTS.md" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   
   <ItemGroup>
@@ -41,6 +51,14 @@
       <Generator>ResXFileCodeGenerator</Generator>
     <LastGenOutput>Resources.Designer.cs</LastGenOutput>
     </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="Ariadne.Tests/**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Ariadne.Tests" />
   </ItemGroup>
 
 </Project>

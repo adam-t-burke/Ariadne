@@ -19,11 +19,12 @@ namespace Ariadne.Utilities
     /// </summary>
     public class UpdateRefs : GH_Component
     {
-        FDM_Network oldNet;
-        FDM_Network newNet;
-        RhinoDoc doc;
+        FDM_Network oldNet = null!;
+        FDM_Network newNet = null!;
+        RhinoDoc doc = null!;
         GH_RhinoScriptInterface rs = new();
-        GH_Document gh_doc;
+        GH_Document gh_doc = null!;
+        private bool _prevUpdateInput;
 
 
         /// <summary>
@@ -71,7 +72,10 @@ namespace Ariadne.Utilities
             if (!DA.GetData(1, ref oldNet)) return;
             if (!DA.GetData(2, ref newNet)) return;
 
-            if (update)
+            bool updateTriggered = update && !_prevUpdateInput;
+            _prevUpdateInput = update;
+
+            if (updateTriggered)
             {
                 try
                 {                    
