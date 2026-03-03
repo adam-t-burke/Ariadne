@@ -4,7 +4,6 @@
 
 use crate::types::{FdmCache, Factorization, FactorizationStrategy, Problem, TheseusError};
 use ndarray::Array2;
-use sprs::CsMat;
 
 // ─────────────────────────────────────────────────────────────
 //  Fixed-node position assembly
@@ -47,12 +46,13 @@ pub fn update_fixed_positions(cache: &mut FdmCache, problem: &Problem, anchor_po
 /// Zero-allocation in-place update of A's values from current q.
 /// A = Cn^T diag(q) Cn  via the precomputed `q_to_nz` mapping.
 pub fn assemble_a(cache: &mut FdmCache) {
-    let data = cache.a_matrix.data_mut();
-    data.fill(0.0);
+    for v in cache.a_matrix.values.iter_mut() {
+        *v = 0.0;
+    }
     for (k, entries) in cache.q_to_nz.entries.iter().enumerate() {
         let qk = cache.q[k];
         for &(nz_idx, coeff) in entries {
-            data[nz_idx] += qk * coeff;
+            cache.a_matrix.values[nz_idx] += qk * coeff;
         }
     }
 }
@@ -79,8 +79,7 @@ pub fn assemble_rhs(cache: &mut FdmCache, problem: &Problem) {
     }
 
     // 2. cf_nf = Cf * nf_fixed   (sparse × dense, column by column)
-    let cf_csc = cache.cf.to_csc();
-    spmm_into(&cf_csc, &cache.nf_fixed, &mut cache.cf_nf);
+    spmm_into(&cache.cf, &cache.nf_fixed, &mut cache.cf_nf);
 
     // 3. q_cf_nf = diag(q) * cf_nf
     let ne = cache.q.len();
@@ -93,10 +92,8 @@ pub fn assemble_rhs(cache: &mut FdmCache, problem: &Problem) {
 
     // 4. rhs = Pn − Cn^T * q_cf_nf
     cache.rhs.assign(&cache.pn);
-    let cn_t = cache.cn.transpose_view();
-    let cn_t_csc = cn_t.to_csc();
-    // rhs -= Cn^T * q_cf_nf
-    spmm_sub_into(&cn_t_csc, &cache.q_cf_nf, &mut cache.rhs);
+    let cn_t = cache.cn.transpose();
+    spmm_sub_into(&cn_t, &cache.q_cf_nf, &mut cache.rhs);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -115,25 +112,15 @@ pub fn assemble_rhs(cache: &mut FdmCache, problem: &Problem) {
 pub fn factor_and_solve(cache: &mut FdmCache, perturbation: f64) -> Result<(), TheseusError> {
     // Add diagonal perturbation if requested
     if perturbation > 0.0 {
-        let n = cache.a_matrix.cols();
-        let diag_indices: Vec<usize> = (0..n).filter_map(|col| {
-            let start = cache.a_matrix.indptr().raw_storage()[col];
-            let end = cache.a_matrix.indptr().raw_storage()[col + 1];
-            (start..end).find(|&nz| cache.a_matrix.indices()[nz] == col)
-        }).collect();
-        let data = cache.a_matrix.data_mut();
-        for nz in diag_indices {
-            data[nz] += perturbation;
-        }
+        cache.a_matrix.add_diagonal(perturbation);
     }
 
     // Try the current factorization, falling back to LDL on Cholesky failure.
-    let a_view = cache.a_matrix.view();
     let mut need_ldl_fallback = false;
 
     match &mut cache.factorization {
         Some(fac) => {
-            if let Err(_e) = fac.update(a_view) {
+            if let Err(_e) = fac.update(&cache.a_matrix) {
                 if fac.strategy() == FactorizationStrategy::Cholesky {
                     need_ldl_fallback = true;
                 } else {
@@ -142,8 +129,7 @@ pub fn factor_and_solve(cache: &mut FdmCache, perturbation: f64) -> Result<(), T
             }
         }
         None => {
-            let a_view = cache.a_matrix.view();
-            match Factorization::new(a_view, cache.strategy) {
+            match Factorization::new(&cache.a_matrix, cache.strategy) {
                 Ok(fac) => {
                     cache.factorization = Some(fac);
                 }
@@ -158,21 +144,24 @@ pub fn factor_and_solve(cache: &mut FdmCache, perturbation: f64) -> Result<(), T
     if need_ldl_fallback {
         cache.strategy = FactorizationStrategy::LDL;
         cache.factorization = None;
-        let a_view = cache.a_matrix.view();
-        cache.factorization = Some(Factorization::new(a_view, FactorizationStrategy::LDL)?);
+        cache.factorization = Some(Factorization::new(&cache.a_matrix, FactorizationStrategy::LDL)?);
     }
 
-    // Solve for each coordinate column
+    // Batch solve for all 3 coordinate columns
+    let n = cache.a_matrix.nrows;
+    let mut rhs_flat = Vec::with_capacity(n * 3);
+    for d in 0..3 {
+        for i in 0..n {
+            rhs_flat.push(cache.rhs[[i, d]]);
+        }
+    }
     let fac = cache.factorization.as_ref()
         .ok_or(TheseusError::MissingFactorization)?;
-    let n = cache.a_matrix.cols();
-    for d in 0..3 {
-        let rhs: Vec<f64> = (0..n).map(|i| cache.rhs[[i, d]]).collect();
-        let x = fac.solve(&rhs);
+    let solutions = fac.solve_batch(&rhs_flat, 3);
+    for (d, x) in solutions.into_iter().enumerate() {
         for i in 0..n {
             cache.x[[i, d]] = x[i];
         }
-        // Catch singular/ill-conditioned systems: solution can be NaN/Inf
         if x.iter().any(|v| !v.is_finite()) {
             return Err(TheseusError::Solver(
                 "FDM linear solve produced non-finite solution (singular or ill-conditioned equilibrium matrix). \
@@ -286,16 +275,18 @@ pub fn compute_geometry(cache: &mut FdmCache, problem: &Problem) {
 //  Sparse × dense helpers
 // ─────────────────────────────────────────────────────────────
 
+use crate::sparse::SparseColMatOwned;
+
 /// out = A * B   where A is CSC (m × k), B is dense (k × 3), out is dense (m × 3).
-fn spmm_into(a: &CsMat<f64>, b: &Array2<f64>, out: &mut Array2<f64>) {
+fn spmm_into(a: &SparseColMatOwned, b: &Array2<f64>, out: &mut Array2<f64>) {
     out.fill(0.0);
-    let ncols_a = a.cols();
+    let ncols_a = a.ncols;
     for col in 0..ncols_a {
-        let start = a.indptr().raw_storage()[col];
-        let end_ = a.indptr().raw_storage()[col + 1];
+        let start = a.col_ptrs[col] as usize;
+        let end_ = a.col_ptrs[col + 1] as usize;
         for nz in start..end_ {
-            let row = a.indices()[nz];
-            let val = a.data()[nz];
+            let row = a.row_indices[nz] as usize;
+            let val = a.values[nz];
             for d in 0..3 {
                 out[[row, d]] += val * b[[col, d]];
             }
@@ -304,14 +295,14 @@ fn spmm_into(a: &CsMat<f64>, b: &Array2<f64>, out: &mut Array2<f64>) {
 }
 
 /// out -= A * B   (subtract sparse-dense product from existing out).
-fn spmm_sub_into(a: &CsMat<f64>, b: &Array2<f64>, out: &mut Array2<f64>) {
-    let ncols_a = a.cols();
+fn spmm_sub_into(a: &SparseColMatOwned, b: &Array2<f64>, out: &mut Array2<f64>) {
+    let ncols_a = a.ncols;
     for col in 0..ncols_a {
-        let start = a.indptr().raw_storage()[col];
-        let end_ = a.indptr().raw_storage()[col + 1];
+        let start = a.col_ptrs[col] as usize;
+        let end_ = a.col_ptrs[col + 1] as usize;
         for nz in start..end_ {
-            let row = a.indices()[nz];
-            let val = a.data()[nz];
+            let row = a.row_indices[nz] as usize;
+            let val = a.values[nz];
             for d in 0..3 {
                 out[[row, d]] -= val * b[[col, d]];
             }

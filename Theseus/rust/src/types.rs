@@ -1,6 +1,5 @@
+use crate::sparse::SparseColMatOwned;
 use ndarray::Array2;
-use sprs::{CsMat, FillInReduction, SymmetryCheck};
-use sprs_ldl::{Ldl, LdlNumeric};
 use std::fmt;
 use std::fmt::Debug;
 
@@ -16,7 +15,7 @@ use std::fmt::Debug;
 #[derive(Debug)]
 pub enum TheseusError {
     /// Linear algebra failure (singular / not-SPD matrix, etc.).
-    Linalg(sprs::errors::LinalgError),
+    Linalg(String),
     /// Sparsity pattern is inconsistent (should never happen after
     /// a correct `FdmCache::new`).
     SparsityMismatch { edge: usize, row: usize, col: usize },
@@ -45,18 +44,17 @@ impl fmt::Display for TheseusError {
     }
 }
 
-impl std::error::Error for TheseusError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Linalg(e) => Some(e),
-            _ => None,
-        }
+impl std::error::Error for TheseusError {}
+
+impl From<faer_sparse::cholesky::CholeskyError> for TheseusError {
+    fn from(e: faer_sparse::cholesky::CholeskyError) -> Self {
+        Self::Linalg(format!("{:?}", e))
     }
 }
 
-impl From<sprs::errors::LinalgError> for TheseusError {
-    fn from(e: sprs::errors::LinalgError) -> Self {
-        Self::Linalg(e)
+impl From<faer_sparse::FaerError> for TheseusError {
+    fn from(e: faer_sparse::FaerError) -> Self {
+        Self::Linalg(e.to_string())
     }
 }
 
@@ -275,11 +273,11 @@ impl Default for SolverOptions {
 #[derive(Debug, Clone)]
 pub struct NetworkTopology {
     /// Full incidence matrix  (ne × nn)  with ±1 entries.
-    pub incidence: CsMat<f64>,
+    pub incidence: SparseColMatOwned,
     /// Free-node incidence    (ne × nn_free)
-    pub free_incidence: CsMat<f64>,
+    pub free_incidence: SparseColMatOwned,
     /// Fixed-node incidence   (ne × nn_fixed)
-    pub fixed_incidence: CsMat<f64>,
+    pub fixed_incidence: SparseColMatOwned,
     pub num_edges: usize,
     pub num_nodes: usize,
     pub free_node_indices: Vec<usize>,
@@ -367,93 +365,182 @@ impl FactorizationStrategy {
 
 /// Holds a numeric LDL^T (or Cholesky) factorization.
 ///
-/// Both variants use `sprs-ldl`'s `LdlNumeric` internally.
+/// Both variants use faer-sparse internally.
 /// The Cholesky path uses AMD fill-in reduction and validates D > 0.
 /// The LDL path allows indefinite D.
 pub enum Factorization {
     /// SPD path: AMD-ordered, D > 0 validated
-    Cholesky(LdlNumeric<f64, usize>),
+    Cholesky {
+        symbolic: faer_sparse::cholesky::SymbolicCholesky<u32>,
+        l_values: Vec<f64>,
+    },
     /// Indefinite path: no sign constraint on D
-    Ldl(LdlNumeric<f64, usize>),
+    Ldl {
+        symbolic: faer_sparse::cholesky::SymbolicCholesky<u32>,
+        l_values: Vec<f64>,
+    },
 }
 
 impl std::fmt::Debug for Factorization {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Cholesky(_) => write!(f, "Factorization::Cholesky(...)"),
-            Self::Ldl(_) => write!(f, "Factorization::Ldl(...)"),
+            Self::Cholesky { .. } => write!(f, "Factorization::Cholesky(...)"),
+            Self::Ldl { .. } => write!(f, "Factorization::Ldl(...)"),
         }
     }
 }
 
 impl Factorization {
     /// Create an initial factorization from A and the chosen strategy.
-    pub fn new(a: sprs::CsMatView<f64>, strategy: FactorizationStrategy) -> Result<Self, sprs::errors::LinalgError> {
+    pub fn new(
+        a: &SparseColMatOwned,
+        strategy: FactorizationStrategy,
+    ) -> Result<Self, TheseusError> {
+        use faer_core::{Parallelism, Side};
+        use faer_sparse::cholesky::{factorize_symbolic_cholesky, CholeskySymbolicParams, LdltRegularization, LltRegularization};
+        use dyn_stack::PodStack;
+
+        let a_ref = a.as_faer_ref();
+        let symbolic = factorize_symbolic_cholesky(
+            a_ref.symbolic(),
+            Side::Upper,
+            CholeskySymbolicParams::default(),
+        ).map_err(TheseusError::from)?;
+
+        let _n = a.nrows;
+        let len_values = symbolic.len_values();
+        let mut l_values = vec![0.0; len_values];
+
         match strategy {
             FactorizationStrategy::Cholesky => {
-                let ldl = Ldl::new()
-                    .fill_in_reduction(FillInReduction::ReverseCuthillMcKee)
-                    .check_symmetry(SymmetryCheck::DontCheckSymmetry)
-                    .numeric(a)?;
-                // Validate positive-definiteness: all diagonal D entries > 0
-                for (i, &di) in ldl.d().iter().enumerate() {
-                    if di <= 0.0 {
-                        return Err(sprs::errors::LinalgError::SingularMatrix(
-                            sprs::errors::SingularMatrixInfo {
-                                index: i,
-                                reason: "D <= 0 in Cholesky factorization (not SPD)",
-                            },
-                        ));
-                    }
-                }
-                Ok(Self::Cholesky(ldl))
+                let mut stack = dyn_stack::GlobalPodBuffer::new(
+                    symbolic.factorize_numeric_llt_req::<f64>(Parallelism::Rayon(0)).unwrap(),
+                );
+                let _llt = symbolic.factorize_numeric_llt(
+                    l_values.as_mut_slice(),
+                    a_ref,
+                    Side::Upper,
+                    LltRegularization::default(),
+                    Parallelism::Rayon(0),
+                    PodStack::new(&mut stack),
+                )?;
+                // For Cholesky we don't need to validate D - LLT fails if not SPD
+                Ok(Self::Cholesky {
+                    symbolic,
+                    l_values,
+                })
             }
             FactorizationStrategy::LDL => {
-                let ldl = Ldl::new()
-                    .fill_in_reduction(FillInReduction::ReverseCuthillMcKee)
-                    .check_symmetry(SymmetryCheck::DontCheckSymmetry)
-                    .numeric(a)?;
-                Ok(Self::Ldl(ldl))
+                let mut stack = dyn_stack::GlobalPodBuffer::new(
+                    symbolic.factorize_numeric_ldlt_req::<f64>(false, Parallelism::Rayon(0)).unwrap(),
+                );
+                symbolic.factorize_numeric_ldlt(
+                    l_values.as_mut_slice(),
+                    a_ref,
+                    Side::Upper,
+                    LdltRegularization::default(),
+                    Parallelism::Rayon(0),
+                    PodStack::new(&mut stack),
+                );
+                Ok(Self::Ldl {
+                    symbolic,
+                    l_values,
+                })
             }
         }
     }
 
     /// Re-factor with updated numeric values (same sparsity pattern).
-    pub fn update(&mut self, a: sprs::CsMatView<f64>) -> Result<(), sprs::errors::LinalgError> {
+    pub fn update(&mut self, a: &SparseColMatOwned) -> Result<(), TheseusError> {
+        use faer_core::{Parallelism, Side};
+        use faer_sparse::cholesky::{LdltRegularization, LltRegularization};
+        use dyn_stack::PodStack;
+
+        let a_ref = a.as_faer_ref();
+
         match self {
-            Self::Cholesky(ldl) => {
-                ldl.update(a)?;
-                for (i, &di) in ldl.d().iter().enumerate() {
-                    if di <= 0.0 {
-                        return Err(sprs::errors::LinalgError::SingularMatrix(
-                            sprs::errors::SingularMatrixInfo {
-                                index: i,
-                                reason: "D <= 0 in Cholesky re-factor (not SPD)",
-                            },
-                        ));
-                    }
-                }
+            Self::Cholesky { symbolic, l_values } => {
+                let mut stack = dyn_stack::GlobalPodBuffer::new(
+                    symbolic.factorize_numeric_llt_req::<f64>(Parallelism::Rayon(0)).unwrap(),
+                );
+                symbolic.factorize_numeric_llt(
+                    l_values.as_mut_slice(),
+                    a_ref,
+                    Side::Upper,
+                    LltRegularization::default(),
+                    Parallelism::Rayon(0),
+                    PodStack::new(&mut stack),
+                )?;
                 Ok(())
             }
-            Self::Ldl(ldl) => {
-                ldl.update(a)?;
+            Self::Ldl { symbolic, l_values } => {
+                let mut stack = dyn_stack::GlobalPodBuffer::new(
+                    symbolic.factorize_numeric_ldlt_req::<f64>(false, Parallelism::Rayon(0)).unwrap(),
+                );
+                symbolic.factorize_numeric_ldlt(
+                    l_values.as_mut_slice(),
+                    a_ref,
+                    Side::Upper,
+                    LdltRegularization::default(),
+                    Parallelism::Rayon(0),
+                    PodStack::new(&mut stack),
+                );
                 Ok(())
             }
         }
     }
 
-    /// Solve A x = rhs using the stored factorization.
+    /// Solve A x = rhs for a single RHS column.
     pub fn solve(&self, rhs: &[f64]) -> Vec<f64> {
+        self.solve_batch(rhs, 1).into_iter().next().unwrap()
+    }
+
+    /// Solve A X = B for multiple RHS columns. Returns one vec per column.
+    pub fn solve_batch(&self, rhs: &[f64], ncols: usize) -> Vec<Vec<f64>> {
+        use faer_core::{Conj, Mat, Parallelism};
+        use faer_sparse::cholesky::{LdltRef, LltRef};
+        use dyn_stack::PodStack;
+
+        let n = rhs.len() / ncols;
+        assert_eq!(rhs.len(), n * ncols);
+
+        let mut x = Mat::from_fn(n, ncols, |i, j| rhs[i + j * n]);
+        let mut stack = dyn_stack::GlobalPodBuffer::new(
+            match self {
+                Self::Cholesky { symbolic, .. } => symbolic.solve_in_place_req::<f64>(ncols).unwrap(),
+                Self::Ldl { symbolic, .. } => symbolic.solve_in_place_req::<f64>(ncols).unwrap(),
+            },
+        );
+
         match self {
-            Self::Cholesky(ldl) | Self::Ldl(ldl) => ldl.solve(rhs),
+            Self::Cholesky { symbolic, l_values } => {
+                let llt = LltRef::new(symbolic, l_values.as_slice());
+                llt.solve_in_place_with_conj(
+                    Conj::No,
+                    x.as_mut(),
+                    Parallelism::Rayon(0),
+                    PodStack::new(&mut stack),
+                );
+            }
+            Self::Ldl { symbolic, l_values } => {
+                let ldlt = LdltRef::new(symbolic, l_values.as_slice());
+                ldlt.solve_in_place_with_conj(
+                    Conj::No,
+                    x.as_mut(),
+                    Parallelism::Rayon(0),
+                    PodStack::new(&mut stack),
+                );
+            }
         }
+
+        (0..ncols).map(|j| (0..n).map(|i| x.read(i, j)).collect()).collect()
     }
 
     /// The strategy this factorization was built with.
     pub fn strategy(&self) -> FactorizationStrategy {
         match self {
-            Self::Cholesky(_) => FactorizationStrategy::Cholesky,
-            Self::Ldl(_) => FactorizationStrategy::LDL,
+            Self::Cholesky { .. } => FactorizationStrategy::Cholesky,
+            Self::Ldl { .. } => FactorizationStrategy::LDL,
         }
     }
 }
@@ -469,7 +556,7 @@ pub struct FdmCache {
     // ── Sparse system ──────────────────────────────────────
     /// System matrix A = Cn^T diag(q) Cn  (CSC, nn_free × nn_free).
     /// Sparsity pattern is fixed; values are updated in-place each iteration.
-    pub a_matrix: CsMat<f64>,
+    pub a_matrix: SparseColMatOwned,
 
     /// Numeric factorization — Cholesky (SPD) or LDL (indefinite).
     /// Created on first factor, reused via `.update()` thereafter.
@@ -484,8 +571,8 @@ pub struct FdmCache {
     pub node_to_free_idx: Vec<Option<usize>>,
 
     /// Cn  (ne × nn_free)  and  Cf  (ne × nn_fixed)  stored as CSC
-    pub cn: CsMat<f64>,
-    pub cf: CsMat<f64>,
+    pub cn: SparseColMatOwned,
+    pub cf: SparseColMatOwned,
 
     // ── Primal buffers ─────────────────────────────────────
     /// Free-node positions         (nn_free × 3, column-major)
@@ -533,23 +620,20 @@ impl FdmCache {
 
         // ── 1. Build A's sparsity pattern from Cn^T * Cn ──
         let cn = &topo.free_incidence; // ne × nn_free
-        let cn_t = cn.transpose_view().to_csc();
-        // Symbolic Cn^T * Cn to get the pattern
-        let a_template = &cn_t * cn;
-        let a_matrix = a_template.to_csc();
+        let cn_t = cn.transpose();
+        let a_matrix = SparseColMatOwned::sparse_times_sparse(&cn_t, cn)
+            .map_err(|e| TheseusError::Solver(e))?;
 
         // ── 2. Build q_to_nz mapping ──────────────────────
         // For each edge k, find which free nodes it touches in Cn,
-        // then map those (n1, n2) pairs to indices in a_matrix.data().
+        // then map those (n1, n2) pairs to indices in a_matrix.values.
         let mut edge_to_free_nodes: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ne];
-        // Iterate columns of Cn (CSC: each column = a free node)
-        let cn_csc = cn.to_csc();
         for col in 0..nn_free {
-            let start = cn_csc.indptr().raw_storage()[col];
-            let end_ = cn_csc.indptr().raw_storage()[col + 1];
+            let start = cn.col_ptrs[col] as usize;
+            let end_ = cn.col_ptrs[col + 1] as usize;
             for idx in start..end_ {
-                let row = cn_csc.indices()[idx]; // edge index
-                let val = cn_csc.data()[idx];
+                let row = cn.row_indices[idx] as usize;
+                let val = cn.values[idx];
                 edge_to_free_nodes[row].push((col, val));
             }
         }
@@ -559,10 +643,13 @@ impl FdmCache {
             let nodes = &edge_to_free_nodes[k];
             for &(n1, v1) in nodes {
                 for &(n2, v2) in nodes {
-                    // Find nz index of (n1, n2) in CSC  [row=n1, col=n2]
-                    let indptr = a_matrix.indptr();
-                    let nz_idx = find_nz_index(indptr.raw_storage(), a_matrix.indices(), n1, n2)
-                        .ok_or(TheseusError::SparsityMismatch { edge: k, row: n1, col: n2 })?;
+                    let nz_idx = find_nz_index(
+                        &a_matrix.col_ptrs,
+                        &a_matrix.row_indices,
+                        n1,
+                        n2,
+                    )
+                    .ok_or(TheseusError::SparsityMismatch { edge: k, row: n1, col: n2 })?;
                     q_to_nz_entries[k].push((nz_idx, v1 * v2));
                 }
             }
@@ -572,13 +659,12 @@ impl FdmCache {
         let mut edge_starts = vec![0usize; ne];
         let mut edge_ends = vec![0usize; ne];
         let inc = &topo.incidence;
-        let inc_csc = inc.to_csc();
         for col in 0..nn {
-            let start = inc_csc.indptr().raw_storage()[col];
-            let end_ = inc_csc.indptr().raw_storage()[col + 1];
+            let start = inc.col_ptrs[col] as usize;
+            let end_ = inc.col_ptrs[col + 1] as usize;
             for idx in start..end_ {
-                let row = inc_csc.indices()[idx];
-                let val = inc_csc.data()[idx];
+                let row = inc.row_indices[idx] as usize;
+                let val = inc.values[idx];
                 if val == -1.0 {
                     edge_starts[row] = col;
                 } else if val == 1.0 {
@@ -598,7 +684,7 @@ impl FdmCache {
 
         // ── 6. Pre-allocate all buffers ───────────────────
         let cf = topo.fixed_incidence.clone();
-        let cn_owned = cn.clone();
+        let cn_owned = topo.free_incidence.clone();
 
         Ok(FdmCache {
             a_matrix,
@@ -687,18 +773,18 @@ pub struct SolverResult {
 //  Helper: find nz index in CSC
 // ─────────────────────────────────────────────────────────────
 
-/// Given CSC indptr and indices arrays, find the position of element (row, col)
+/// Given CSC col_ptrs and row_indices arrays, find the position of element (row, col)
 /// in the data array.  Returns `None` if the entry is not in the sparsity pattern.
 pub fn find_nz_index(
-    indptr: &[usize],
-    indices: &[usize],
+    col_ptrs: &[u32],
+    row_indices: &[u32],
     row: usize,
     col: usize,
 ) -> Option<usize> {
-    let start = indptr[col];
-    let end_ = indptr[col + 1];
+    let start = col_ptrs[col] as usize;
+    let end_ = col_ptrs[col + 1] as usize;
     for nz in start..end_ {
-        if indices[nz] == row {
+        if row_indices[nz] as usize == row {
             return Some(nz);
         }
     }

@@ -21,13 +21,17 @@ use ndarray::Array2;
 /// Since A is symmetric (A = Aᵀ), we reuse the **same** factorization
 /// (Cholesky or LDL) from the forward solve — no refactoring needed.
 pub fn solve_adjoint(cache: &mut FdmCache) -> Result<(), TheseusError> {
-    let n = cache.a_matrix.cols();
-
+    let n = cache.a_matrix.nrows;
+    let mut rhs_flat = Vec::with_capacity(n * 3);
     for d in 0..3 {
-        let rhs: Vec<f64> = (0..n).map(|i| cache.grad_x[[i, d]]).collect();
-        let x = cache.factorization.as_ref()
-            .ok_or(TheseusError::MissingFactorization)?
-            .solve(&rhs);
+        for i in 0..n {
+            rhs_flat.push(cache.grad_x[[i, d]]);
+        }
+    }
+    let fac = cache.factorization.as_ref()
+        .ok_or(TheseusError::MissingFactorization)?;
+    let solutions = fac.solve_batch(&rhs_flat, 3);
+    for (d, x) in solutions.into_iter().enumerate() {
         for i in 0..n {
             cache.lambda[[i, d]] = x[i];
         }

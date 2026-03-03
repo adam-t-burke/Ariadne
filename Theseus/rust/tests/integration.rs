@@ -5,7 +5,7 @@
 //! and actually reduces the objective value.
 
 use ndarray::Array2;
-use sprs::TriMat;
+use theseus::sparse::SparseColMatOwned;
 use theseus::types::*;
 use theseus::optimizer;
 
@@ -13,29 +13,24 @@ use theseus::optimizer;
 //  Helpers (shared arch construction)
 // ─────────────────────────────────────────────────────────────
 
-fn build_incidence(edges: &[(usize, usize)], num_nodes: usize) -> sprs::CsMat<f64> {
+fn build_incidence(edges: &[(usize, usize)], num_nodes: usize) -> SparseColMatOwned {
     let ne = edges.len();
-    let mut tri = TriMat::new((ne, num_nodes));
+    let mut rows = Vec::with_capacity(ne * 2);
+    let mut cols = Vec::with_capacity(ne * 2);
+    let mut vals = Vec::with_capacity(ne * 2);
     for (e, &(s, t)) in edges.iter().enumerate() {
-        tri.add_triplet(e, s, -1.0);
-        tri.add_triplet(e, t, 1.0);
+        rows.push(e);
+        cols.push(s);
+        vals.push(-1.0);
+        rows.push(e);
+        cols.push(t);
+        vals.push(1.0);
     }
-    tri.to_csc()
+    SparseColMatOwned::from_coo(ne, num_nodes, &rows, &cols, &vals).unwrap()
 }
 
-fn extract_columns(mat: &sprs::CsMat<f64>, cols: &[usize]) -> sprs::CsMat<f64> {
-    let nrows = mat.rows();
-    let ncols = cols.len();
-    let mut tri = TriMat::new((nrows, ncols));
-    let mat_csc = mat.to_csc();
-    for (new_col, &old_col) in cols.iter().enumerate() {
-        let start = mat_csc.indptr().raw_storage()[old_col];
-        let end_ = mat_csc.indptr().raw_storage()[old_col + 1];
-        for nz in start..end_ {
-            tri.add_triplet(mat_csc.indices()[nz], new_col, mat_csc.data()[nz]);
-        }
-    }
-    tri.to_csc()
+fn extract_columns(mat: &SparseColMatOwned, cols: &[usize]) -> SparseColMatOwned {
+    mat.extract_columns(cols)
 }
 
 fn make_arch_problem(bounds: Bounds, objectives: Vec<Box<dyn ObjectiveTrait>>) -> Problem {
