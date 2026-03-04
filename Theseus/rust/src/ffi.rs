@@ -43,7 +43,7 @@ thread_local! {
 }
 
 /// Store an error message for later retrieval by `theseus_last_error`.
-fn set_last_error(msg: &str) {
+pub(crate) fn set_last_error(msg: &str) {
     LAST_ERROR.with(|e| *e.borrow_mut() = msg.to_owned());
 }
 
