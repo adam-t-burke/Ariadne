@@ -20,5 +20,15 @@ pub mod optimizer;
 pub mod inverse;
 pub mod ffi;
 
+// FEA modules (Phase 1: bar/truss elements)
+pub mod fea_types;
+pub mod fea_assembly;
+pub mod fea_solve;
+pub mod fea_objectives;
+pub mod fea_gradients;
+pub mod fea_optimizer;
+pub mod fea_ffi;
+
 pub use types::TheseusError;
 pub use types::ObjectiveTrait;
+pub use fea_types::FeaObjectiveTrait;
