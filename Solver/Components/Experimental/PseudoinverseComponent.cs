@@ -35,6 +35,7 @@ public class PseudoinverseComponent : GH_Component
         pManager.AddBooleanParameter("L2", "L2", "True = L2 (least-squares), False = L1 (absolute residuals). L1 is more robust when a few equations are inconsistent.", GH_ParamAccess.item, true);
         pManager.AddIntegerParameter("L1 Iterations", "L1Iter", "Maximum IRLS iterations for L1 mode (ignored when L2 is selected)", GH_ParamAccess.item, 20);
         pManager.AddBooleanParameter("Augmented", "Aug", "Use the augmented saddle-point system instead of forming M^T M. Faster for large meshes (>50k edges). Requires λ > 0.", GH_ParamAccess.item, false);
+        pManager.AddBooleanParameter("Enforce Rx=0", "Rx0", "Strictly enforce zero horizontal reaction at supports. Channels thrust into tie members. Only valid for statically indeterminate structures.", GH_ParamAccess.item, false);
 
         pManager[5].Optional = true;
     }
@@ -60,6 +61,7 @@ public class PseudoinverseComponent : GH_Component
         bool useL2 = true;
         int maxL1Iter = 20;
         bool useAugmented = false;
+        bool enforceZeroRx = false;
 
         if (!DA.GetData(0, ref network)) return;
         if (!DA.GetDataList(1, targetPoints)) return;
@@ -70,6 +72,7 @@ public class PseudoinverseComponent : GH_Component
         DA.GetData(6, ref useL2);
         DA.GetData(7, ref maxL1Iter);
         DA.GetData(8, ref useAugmented);
+        DA.GetData(9, ref enforceZeroRx);
 
         if (network == null || !network.Valid)
         {
@@ -108,7 +111,7 @@ public class PseudoinverseComponent : GH_Component
         try
         {
             var result = TheseusSolverService.SolvePseudoinverse(
-                network, inputs, targetFreeXyz, regularization, useL2, maxL1Iter, useAugmented);
+                network, inputs, targetFreeXyz, regularization, useL2, maxL1Iter, useAugmented, enforceZeroRx);
 
             DA.SetData(0, result.Network);
             DA.SetDataList(1, result.NodePositions);

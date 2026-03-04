@@ -98,7 +98,8 @@ public static class TheseusSolverService
         double regularization = 1e-6,
         bool useL2 = true,
         int maxL1Iter = 20,
-        bool useAugmented = false)
+        bool useAugmented = false,
+        bool enforceZeroRx = false)
     {
         ValidateCommon(network, inputs);
         var context = BuildContext(network);
@@ -111,7 +112,7 @@ public static class TheseusSolverService
             data.Loads, data.FixedPositions,
             data.QInit, data.LowerBounds, data.UpperBounds);
 
-        var result = solver.SolvePseudoinverse(targetFreeXyz, regularization, useL2, maxL1Iter, useAugmented);
+        var result = solver.SolvePseudoinverse(targetFreeXyz, regularization, useL2, maxL1Iter, useAugmented, enforceZeroRx);
         return BuildResult(network, result, context);
     }
 
