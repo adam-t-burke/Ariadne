@@ -75,16 +75,26 @@ fn compute_target_member_vectors(
 
 /// Build the sparse matrix M by vertically stacking Cn^T · diag(u_d) for d=x,y,z.
 ///
+/// When `enforce_zero_rx` is true and there are fixed nodes, appends Cf^T · diag(u_x)
+/// and zeros to the RHS to strictly enforce R_x = 0 at supports.
+///
 /// M has the same column-sparsity as Cn^T (at most 2 non-zeros per column per
 /// dimension block → ≤ 6 per column total).  Uses COO → CSC for construction.
 fn build_equilibrium_matrix(
     problem: &Problem,
     u: &Array2<f64>,
+    enforce_zero_rx: bool,
 ) -> (SparseColMatOwned, Vec<f64>) {
     let topo = &problem.topology;
     let ne = topo.num_edges;
     let nn_free = topo.free_node_indices.len();
-    let m_rows = 3 * nn_free;
+    let nn_fixed = topo.fixed_node_indices.len();
+    let rx_rows = if enforce_zero_rx && nn_fixed > 0 {
+        nn_fixed
+    } else {
+        0
+    };
+    let m_rows = 3 * nn_free + rx_rows;
 
     // Cn is (ne × nn_free).  Cn^T is (nn_free × ne).
     let cn_t = topo.free_incidence.transpose();
@@ -107,10 +117,28 @@ fn build_equilibrium_matrix(
         }
     }
 
+    // Cf^T · diag(u_x): append rows for R_x = 0 at fixed nodes
+    if rx_rows > 0 {
+        let cf = &topo.fixed_incidence; // ne × nn_fixed
+        let row_offset = 3 * nn_free;
+        for j in 0..nn_fixed {
+            let start = cf.col_ptrs[j] as usize;
+            let end_ = cf.col_ptrs[j + 1] as usize;
+            for nz in start..end_ {
+                let i = cf.row_indices[nz] as usize;
+                let val = cf.values[nz];
+                let scale = u[[i, 0]];
+                if scale != 0.0 {
+                    triplets.push(((row_offset + j) as u32, i as u32, val * scale));
+                }
+            }
+        }
+    }
+
     let m_mat = SparseColMatOwned::from_triplets(m_rows, ne, &triplets)
         .expect("build_equilibrium_matrix");
 
-    // p = [Pn_x; Pn_y; Pn_z]
+    // p = [Pn_x; Pn_y; Pn_z; 0; ...; 0]  (zeros for Rx rows when enforce_zero_rx)
     let loads = &problem.free_node_loads;
     let mut p = vec![0.0; m_rows];
     for d in 0..3 {
@@ -119,6 +147,7 @@ fn build_equilibrium_matrix(
             p[off + i] = loads[[i, d]];
         }
     }
+    // rx_rows zeros are already in p via vec![0.0; m_rows]
 
     (m_mat, p)
 }
@@ -252,11 +281,12 @@ pub fn solve_pseudoinverse(
     problem: &Problem,
     target_free_xyz: &Array2<f64>,
     regularization: f64,
+    enforce_zero_rx: bool,
 ) -> Result<Vec<f64>, TheseusError> {
     let ne = problem.topology.num_edges;
 
     let u = compute_target_member_vectors(problem, target_free_xyz);
-    let (m_mat, p) = build_equilibrium_matrix(problem, &u);
+    let (m_mat, p) = build_equilibrium_matrix(problem, &u, enforce_zero_rx);
 
     // G = M^T M  (ne × ne, sparse)
     let m_t = m_mat.transpose();
@@ -313,6 +343,7 @@ pub fn solve_pseudoinverse_augmented(
     problem: &Problem,
     target_free_xyz: &Array2<f64>,
     regularization: f64,
+    enforce_zero_rx: bool,
 ) -> Result<Vec<f64>, TheseusError> {
     if regularization <= 0.0 {
         return Err(TheseusError::Solver(
@@ -321,10 +352,10 @@ pub fn solve_pseudoinverse_augmented(
     }
 
     let ne = problem.topology.num_edges;
-    let m_rows = 3 * problem.topology.free_node_indices.len();
 
     let u = compute_target_member_vectors(problem, target_free_xyz);
-    let (m_mat, p) = build_equilibrium_matrix(problem, &u);
+    let (m_mat, p) = build_equilibrium_matrix(problem, &u, enforce_zero_rx);
+    let m_rows = p.len();
 
     let (k_mat, rhs) = build_augmented_system(&m_mat, &p, regularization);
 
@@ -369,11 +400,12 @@ pub fn solve_pseudoinverse_l1(
     target_free_xyz: &Array2<f64>,
     regularization: f64,
     max_iter: usize,
+    enforce_zero_rx: bool,
 ) -> Result<Vec<f64>, TheseusError> {
     let ne = problem.topology.num_edges;
 
     let u = compute_target_member_vectors(problem, target_free_xyz);
-    let (m_mat, p) = build_equilibrium_matrix(problem, &u);
+    let (m_mat, p) = build_equilibrium_matrix(problem, &u, enforce_zero_rx);
 
     let m_t = m_mat.transpose();
     let m_rows = p.len();
@@ -486,6 +518,7 @@ pub fn solve_pseudoinverse_l1_augmented(
     target_free_xyz: &Array2<f64>,
     regularization: f64,
     max_iter: usize,
+    enforce_zero_rx: bool,
 ) -> Result<Vec<f64>, TheseusError> {
     if regularization <= 0.0 {
         return Err(TheseusError::Solver(
@@ -496,7 +529,7 @@ pub fn solve_pseudoinverse_l1_augmented(
     let ne = problem.topology.num_edges;
 
     let u = compute_target_member_vectors(problem, target_free_xyz);
-    let (m_mat, p) = build_equilibrium_matrix(problem, &u);
+    let (m_mat, p) = build_equilibrium_matrix(problem, &u, enforce_zero_rx);
 
     let m_rows = p.len();
 
@@ -588,6 +621,9 @@ pub fn solve_pseudoinverse_l1_augmented(
 ///
 /// The augmented path avoids forming M^T M and is faster for large meshes
 /// (>50k edges).  It requires `regularization > 0`.
+///
+/// When `enforce_zero_rx` is true, augments the system to strictly enforce
+/// R_x = 0 at fixed supports (channels horizontal thrust into tie members).
 pub fn solve_pseudoinverse_dispatch(
     problem: &Problem,
     target_free_xyz: &Array2<f64>,
@@ -595,12 +631,13 @@ pub fn solve_pseudoinverse_dispatch(
     use_l2: bool,
     max_l1_iter: usize,
     use_augmented: bool,
+    enforce_zero_rx: bool,
 ) -> Result<Vec<f64>, TheseusError> {
     match (use_l2, use_augmented) {
-        (true, false) => solve_pseudoinverse(problem, target_free_xyz, regularization),
-        (true, true) => solve_pseudoinverse_augmented(problem, target_free_xyz, regularization),
-        (false, false) => solve_pseudoinverse_l1(problem, target_free_xyz, regularization, max_l1_iter),
-        (false, true) => solve_pseudoinverse_l1_augmented(problem, target_free_xyz, regularization, max_l1_iter),
+        (true, false) => solve_pseudoinverse(problem, target_free_xyz, regularization, enforce_zero_rx),
+        (true, true) => solve_pseudoinverse_augmented(problem, target_free_xyz, regularization, enforce_zero_rx),
+        (false, false) => solve_pseudoinverse_l1(problem, target_free_xyz, regularization, max_l1_iter, enforce_zero_rx),
+        (false, true) => solve_pseudoinverse_l1_augmented(problem, target_free_xyz, regularization, max_l1_iter, enforce_zero_rx),
     }
 }
 
