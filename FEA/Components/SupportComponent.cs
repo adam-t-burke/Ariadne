@@ -9,9 +9,9 @@ namespace Ariadne.FEA.Components
     public class SupportComponent : GH_Component
     {
         public SupportComponent()
-            : base("FEA Support", "Support",
-                "Define a support boundary condition with per-DOF constraints",
-                "Theseus-FEA", "Design")
+            : base("Point Support", "PtSup",
+                "Define a concentrated nodal support. Best for bars or advanced solid use; prefer face supports for solids.",
+                "Theseus-FEA", "Setup")
         { }
 
         protected override void RegisterInputParams(GH_InputParamManager pManager)
@@ -52,7 +52,7 @@ namespace Ariadne.FEA.Components
             });
         }
 
-        protected override Bitmap Icon => null;
+        protected override Bitmap? Icon => null;
         public override Guid ComponentGuid => new Guid("A1B2C3D4-FEA1-4000-8001-000000000001");
     }
 }

@@ -6,6 +6,7 @@ use crate::fea_assembly::{assemble_global_k, assemble_loads, bar_element_stiffne
 use crate::fea_types::{FeaCache, FeaProblem, FeaResult};
 use crate::types::{Factorization, FactorizationStrategy, TheseusError};
 use ndarray::Array2;
+use rayon::prelude::*;
 
 // ─────────────────────────────────────────────────────────────
 //  Factor and solve
@@ -79,71 +80,91 @@ fn post_process(
         u_full[gi] = cache.displacements[fi];
     }
 
-    // Per-element: elongation, axial force, stress, strain, utilization
-    for e in 0..ne {
-        let (ni, nj) = problem.edge_nodes[e];
-        let props = &problem.element_props[e];
-        let mat = &problem.materials[props.material_idx];
-        let a = areas[props.section_idx];
-        let l = cache.elem_lengths[e];
-        let c = &cache.elem_cos[e];
+    // Per-element: elongation, axial force, stress, strain, utilization (parallel)
+    cache.axial_forces[..ne]
+        .par_iter_mut()
+        .zip(cache.stresses[..ne].par_iter_mut())
+        .zip(cache.strains[..ne].par_iter_mut())
+        .zip(cache.utilization[..ne].par_iter_mut())
+        .enumerate()
+        .for_each(|(e, (((af, st), sn), ut))| {
+            let (ni, nj) = problem.edge_nodes[e];
+            let props = &problem.element_props[e];
+            let mat = &problem.materials[props.material_idx];
+            let a = areas[props.section_idx];
+            let l = cache.elem_lengths[e];
+            let c = &cache.elem_cos[e];
 
-        if l < f64::EPSILON {
-            cache.axial_forces[e] = 0.0;
-            cache.stresses[e] = 0.0;
-            cache.strains[e] = 0.0;
-            cache.utilization[e] = 0.0;
-            continue;
-        }
+            if l < f64::EPSILON {
+                *af = 0.0;
+                *st = 0.0;
+                *sn = 0.0;
+                *ut = 0.0;
+                return;
+            }
 
-        // Elongation = c^T (u_j - u_i)
-        let mut delta = 0.0;
-        for d in 0..3 {
-            delta += c[d] * (u_full[nj * 3 + d] - u_full[ni * 3 + d]);
-        }
+            let mut delta = 0.0;
+            for d in 0..3 {
+                delta += c[d] * (u_full[nj * 3 + d] - u_full[ni * 3 + d]);
+            }
 
-        let strain = delta / l;
-        let stress = mat.e * strain;
-        let force = stress * a;
+            let strain = delta / l;
+            let stress = mat.e * strain;
+            let force = stress * a;
 
-        cache.strains[e] = strain;
-        cache.stresses[e] = stress;
-        cache.axial_forces[e] = force;
-        cache.utilization[e] = if mat.yield_stress > 0.0 {
-            stress.abs() / mat.yield_stress
-        } else {
-            0.0
-        };
-    }
+            *sn = strain;
+            *st = stress;
+            *af = force;
+            *ut = if mat.yield_stress > 0.0 {
+                stress.abs() / mat.yield_stress
+            } else {
+                0.0
+            };
+        });
 
     // Reactions: R = K_full * u - f
-    // We compute per-element contributions to constrained DOFs.
-    for v in cache.reactions.iter_mut() {
-        *v = 0.0;
-    }
+    // Parallel fold/reduce with per-thread buffers to avoid data races.
+    let n_reactions = cache.reactions.len();
 
-    for e in 0..ne {
-        let (ni, nj) = problem.edge_nodes[e];
-        let props = &problem.element_props[e];
-        let mat = &problem.materials[props.material_idx];
-        let a = areas[props.section_idx];
-        let l = cache.elem_lengths[e];
-        if l < f64::EPSILON { continue; }
-        let c = &cache.elem_cos[e];
-        let ea_over_l = mat.e * a / l;
-        let ke = bar_element_stiffness(ea_over_l, c);
+    let reactions = (0..ne)
+        .into_par_iter()
+        .fold(
+            || vec![0.0; n_reactions],
+            |mut buf, e| {
+                let (ni, nj) = problem.edge_nodes[e];
+                let props = &problem.element_props[e];
+                let mat = &problem.materials[props.material_idx];
+                let a = areas[props.section_idx];
+                let l = cache.elem_lengths[e];
+                if l < f64::EPSILON { return buf; }
+                let c = &cache.elem_cos[e];
+                let ea_over_l = mat.e * a / l;
+                let ke = bar_element_stiffness(ea_over_l, c);
 
-        let global_dofs = [ni * 3, ni * 3 + 1, ni * 3 + 2,
-                           nj * 3, nj * 3 + 1, nj * 3 + 2];
+                let global_dofs = [ni * 3, ni * 3 + 1, ni * 3 + 2,
+                                   nj * 3, nj * 3 + 1, nj * 3 + 2];
 
-        for (li, &gi) in global_dofs.iter().enumerate() {
-            let mut ke_u = 0.0;
-            for (lj, &gj) in global_dofs.iter().enumerate() {
-                ke_u += ke[li][lj] * u_full[gj];
-            }
-            cache.reactions[gi] += ke_u;
-        }
-    }
+                for (li, &gi) in global_dofs.iter().enumerate() {
+                    let mut ke_u = 0.0;
+                    for (lj, &gj) in global_dofs.iter().enumerate() {
+                        ke_u += ke[li][lj] * u_full[gj];
+                    }
+                    buf[gi] += ke_u;
+                }
+                buf
+            },
+        )
+        .reduce(
+            || vec![0.0; n_reactions],
+            |mut a_buf, b_buf| {
+                for (a, b) in a_buf.iter_mut().zip(b_buf.iter()) {
+                    *a += *b;
+                }
+                a_buf
+            },
+        );
+
+    cache.reactions.copy_from_slice(&reactions);
 
     // Subtract applied loads from reactions
     for load in &problem.loads {

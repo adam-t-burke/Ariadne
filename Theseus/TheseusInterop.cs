@@ -7,8 +7,7 @@ namespace Theseus.Interop;
 
 /// <summary>
 /// Raw P/Invoke declarations for theseus.dll.
-///
-// / Every function here maps 1:1 to an <c>extern "C"</c> symbol
+/// Every function here maps 1-to-1 to an <c>extern "C"</c> symbol
 /// in <c>rust/src/ffi.rs</c>.  Prefer the managed <see cref="TheseusSolver"/>
 /// wrapper for production use.
 /// </summary>
@@ -23,7 +22,13 @@ internal static class TheseusInterop
 
     static IntPtr ResolveTheseus(string name, Assembly assembly, DllImportSearchPath? searchPath)
     {
-        if (name != DLL)
+        string? fileName = null;
+        if (name == DLL)
+            fileName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "theseus.dll" : "libtheseus.dylib";
+        else if (name == "tetgen_wrapper")
+            fileName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "tetgen_wrapper.dll" : "libtetgen_wrapper.so";
+
+        if (fileName == null)
             return IntPtr.Zero;
 
         string? dir = Path.GetDirectoryName(assembly.Location);
@@ -33,7 +38,6 @@ internal static class TheseusInterop
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && !RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
             return IntPtr.Zero;
 
-        string fileName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "theseus.dll" : "libtheseus.dylib";
         string path = Path.Combine(dir, fileName);
 
         if (NativeLibrary.TryLoad(path, assembly, searchPath, out IntPtr handle))
@@ -196,6 +200,7 @@ internal static class TheseusInterop
         IntPtr handle,
         double[] target_free_xyz, double regularization,
         int use_l2, nuint max_l1_iter, int use_augmented, int enforce_zero_rx,
+        int solve_for_q,
         double[] out_q, double[] out_xyz, double[] out_lengths,
         double[] out_forces, double[] out_reactions);
 

@@ -530,6 +530,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "rawpointer",
+ "rayon",
 ]
 
 [[package]]
@@ -948,6 +949,7 @@ dependencies = [
  "faer-core",
  "faer-sparse",
  "ndarray",
+ "rayon",
 ]
 
 [[package]]

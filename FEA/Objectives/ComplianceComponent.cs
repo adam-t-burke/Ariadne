@@ -38,7 +38,7 @@ namespace Ariadne.FEA.Objectives
             DA.SetData(0, new FeaComplianceObj { Weight = weight });
         }
 
-        protected override Bitmap Icon => null;
+        protected override Bitmap? Icon => null;
         public override Guid ComponentGuid => new Guid("A1B2C3D4-FEA1-4000-8001-000000000010");
     }
 }

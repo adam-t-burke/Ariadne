@@ -10,6 +10,7 @@ using Rhino.Geometry;
 public sealed class FeaSupport
 {
     public Point3d Location { get; init; }
+    public int? NodeIndex { get; init; }
     public bool FixX { get; init; } = true;
     public bool FixY { get; init; } = true;
     public bool FixZ { get; init; } = true;

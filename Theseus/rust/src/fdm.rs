@@ -4,6 +4,7 @@
 
 use crate::types::{FdmCache, Factorization, FactorizationStrategy, Problem, TheseusError};
 use ndarray::Array2;
+use rayon::prelude::*;
 
 // ─────────────────────────────────────────────────────────────
 //  Fixed-node position assembly
@@ -236,38 +237,67 @@ pub fn solve_fdm(
 pub fn compute_geometry(cache: &mut FdmCache, problem: &Problem) {
     let ne = problem.topology.num_edges;
 
-    for i in 0..ne {
-        let s = cache.edge_starts[i];
-        let e = cache.edge_ends[i];
+    // Per-edge member length and force (embarrassingly parallel — no write conflicts)
+    let nf = &cache.nf;
+    let edge_starts = &cache.edge_starts;
+    let edge_ends = &cache.edge_ends;
+    let q = &cache.q;
 
-        let dx = cache.nf[[e, 0]] - cache.nf[[s, 0]];
-        let dy = cache.nf[[e, 1]] - cache.nf[[s, 1]];
-        let dz = cache.nf[[e, 2]] - cache.nf[[s, 2]];
+    cache.member_lengths.par_iter_mut().zip(cache.member_forces.par_iter_mut())
+        .enumerate()
+        .for_each(|(i, (len_out, force_out))| {
+            let s = edge_starts[i];
+            let e = edge_ends[i];
 
-        let len_sq = dx * dx + dy * dy + dz * dz;
-        let len = len_sq.max(0.0).sqrt();
-        cache.member_lengths[i] = len;
-        cache.member_forces[i] = cache.q[i] * len;
-    }
+            let dx = nf[[e, 0]] - nf[[s, 0]];
+            let dy = nf[[e, 1]] - nf[[s, 1]];
+            let dz = nf[[e, 2]] - nf[[s, 2]];
 
-    // Reactions: for each edge, accumulate axial force contributions
-    cache.reactions.fill(0.0);
-    for i in 0..ne {
-        let s = cache.edge_starts[i];
-        let e = cache.edge_ends[i];
-        let qi = cache.q[i];
+            let len_sq = dx * dx + dy * dy + dz * dz;
+            let len = len_sq.max(0.0).sqrt();
+            *len_out = len;
+            *force_out = q[i] * len;
+        });
 
-        let rx = (cache.nf[[e, 0]] - cache.nf[[s, 0]]) * qi;
-        let ry = (cache.nf[[e, 1]] - cache.nf[[s, 1]]) * qi;
-        let rz = (cache.nf[[e, 2]] - cache.nf[[s, 2]]) * qi;
+    // Reactions: fold/reduce per-thread buffers to avoid write conflicts
+    let nn = cache.reactions.nrows();
+    let reaction_sum = (0..ne).into_par_iter()
+        .fold(
+            || vec![0.0f64; nn * 3],
+            |mut buf, i| {
+                let s = edge_starts[i];
+                let e = edge_ends[i];
+                let qi = q[i];
 
-        cache.reactions[[s, 0]] += rx;
-        cache.reactions[[s, 1]] += ry;
-        cache.reactions[[s, 2]] += rz;
+                let rx = (nf[[e, 0]] - nf[[s, 0]]) * qi;
+                let ry = (nf[[e, 1]] - nf[[s, 1]]) * qi;
+                let rz = (nf[[e, 2]] - nf[[s, 2]]) * qi;
 
-        cache.reactions[[e, 0]] -= rx;
-        cache.reactions[[e, 1]] -= ry;
-        cache.reactions[[e, 2]] -= rz;
+                buf[s * 3]     += rx;
+                buf[s * 3 + 1] += ry;
+                buf[s * 3 + 2] += rz;
+
+                buf[e * 3]     -= rx;
+                buf[e * 3 + 1] -= ry;
+                buf[e * 3 + 2] -= rz;
+
+                buf
+            },
+        )
+        .reduce(
+            || vec![0.0f64; nn * 3],
+            |mut a, b| {
+                for (ai, bi) in a.iter_mut().zip(b.iter()) {
+                    *ai += *bi;
+                }
+                a
+            },
+        );
+
+    for node in 0..nn {
+        cache.reactions[[node, 0]] = reaction_sum[node * 3];
+        cache.reactions[[node, 1]] = reaction_sum[node * 3 + 1];
+        cache.reactions[[node, 2]] = reaction_sum[node * 3 + 2];
     }
 }
 

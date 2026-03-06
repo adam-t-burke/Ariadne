@@ -13,7 +13,7 @@ namespace Ariadne.FEA.Components
         public FeaOptConfigComponent()
             : base("FEA Optimization Config", "FEA Opt",
                 "Configure FEA optimization parameters and objectives",
-                "Theseus-FEA", "Design")
+                "Theseus-FEA", "Solver")
         { }
 
         protected override void RegisterInputParams(GH_InputParamManager pManager)
@@ -90,7 +90,7 @@ namespace Ariadne.FEA.Components
             });
         }
 
-        protected override Bitmap Icon => null;
+        protected override Bitmap? Icon => null;
         public override Guid ComponentGuid => new Guid("A1B2C3D4-FEA1-4000-8001-000000000006");
     }
 }

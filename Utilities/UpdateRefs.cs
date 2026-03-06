@@ -19,11 +19,11 @@ namespace Ariadne.Utilities
     /// </summary>
     public class UpdateRefs : GH_Component
     {
-        FDM_Network oldNet;
-        FDM_Network newNet;
-        RhinoDoc doc;
+        FDM_Network oldNet = null!;
+        FDM_Network newNet = null!;
+        RhinoDoc doc = null!;
         GH_RhinoScriptInterface rs = new();
-        GH_Document gh_doc;
+        GH_Document gh_doc = null!;
 
 
         /// <summary>

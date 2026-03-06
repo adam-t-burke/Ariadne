@@ -13,7 +13,7 @@ using Theseus.Interop;
 /// </summary>
 public static class FeaSolverService
 {
-    public static FeaSolveResult SolveForward(
+    internal static BarSolveData SolveForward(
         FEA_Network network,
         List<Vector3d> loads,
         List<int>? loadNodeIndices,
@@ -27,7 +27,7 @@ public static class FeaSolverService
         }
     }
 
-    public static FeaSolveResult Solve(
+    internal static BarSolveData Solve(
         FEA_Network network,
         List<Vector3d> loads,
         List<int>? loadNodeIndices,
@@ -184,12 +184,37 @@ public static class FeaSolverService
         return (solver, context);
     }
 
-    private static FeaSolveResult BuildResult(FEA_Network network, FeaSolverResult result)
+    private static BarSolveData BuildResult(FEA_Network network, FeaSolverResult result)
     {
         var graph = network.Graph;
         int nn = graph.Nn;
         int ne = graph.Ne;
 
+        // Convert flat displacement array to Vector3d per node
+        var displacements = new Vector3d[nn];
+        for (int i = 0; i < nn; i++)
+        {
+            displacements[i] = new Vector3d(
+                result.Displacements[i * 3],
+                result.Displacements[i * 3 + 1],
+                result.Displacements[i * 3 + 2]);
+        }
+
+        // Extract reactions at support nodes only
+        int numSupports = network.Supports.Count;
+        var reactions = new Vector3d[numSupports];
+        var reactionNodeIndices = new int[numSupports];
+        for (int s = 0; s < numSupports; s++)
+        {
+            int nodeIdx = network.SupportToNodeMap[s];
+            reactionNodeIndices[s] = nodeIdx;
+            reactions[s] = new Vector3d(
+                result.Reactions[nodeIdx * 3],
+                result.Reactions[nodeIdx * 3 + 1],
+                result.Reactions[nodeIdx * 3 + 2]);
+        }
+
+        // Build deformed node positions
         var deformedNodes = new Point3d[nn];
         for (int i = 0; i < nn; i++)
         {
@@ -206,11 +231,11 @@ public static class FeaSolverService
             deformedEdges[e] = new LineCurve(deformedNodes[edge.Start.Index], deformedNodes[edge.End.Index]);
         }
 
-        return new FeaSolveResult
+        return new BarSolveData
         {
-            Network = network,
-            Displacements = result.Displacements,
-            Reactions = result.Reactions,
+            Displacements = displacements,
+            Reactions = reactions,
+            ReactionNodeIndices = reactionNodeIndices,
             AxialForces = result.AxialForces,
             Stresses = result.Stresses,
             Strains = result.Strains,

@@ -13,7 +13,7 @@ namespace Ariadne.Utilities
     /// </summary>
     public class CurveToCurve : GH_Component
     {
-        Line[] lines;
+        Line[] lines = null!;
         System.Drawing.Color col;
         int thickness;
         bool show;

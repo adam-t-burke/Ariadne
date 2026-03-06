@@ -319,7 +319,7 @@ public sealed class TheseusSolver : IDisposable
     public SolverResult SolvePseudoinverse(
         double[] targetFreeXyz, double regularization,
         bool useL2 = true, int maxL1Iter = 20, bool useAugmented = false,
-        bool enforceZeroRx = false)
+        bool enforceZeroRx = false, bool solveForQ = true)
     {
         ThrowIfDisposed();
         var q = new double[_numEdges];
@@ -331,7 +331,7 @@ public sealed class TheseusSolver : IDisposable
         Check(TheseusInterop.theseus_solve_pseudoinverse(
             _handle, targetFreeXyz, regularization,
             useL2 ? 1 : 0, (nuint)maxL1Iter, useAugmented ? 1 : 0,
-            enforceZeroRx ? 1 : 0,
+            enforceZeroRx ? 1 : 0, solveForQ ? 1 : 0,
             q, xyz, lengths, forces, reactions));
 
         return new SolverResult

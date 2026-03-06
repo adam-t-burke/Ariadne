@@ -4,6 +4,7 @@
 //! a scalar loss from the current geometry snapshot.  The corresponding
 //! hand-coded gradients live in `gradients.rs`.
 
+use rayon::prelude::*;
 use crate::types::{
     GeometrySnapshot, ObjectiveTrait, FdmCache, Problem,
     TargetXYZ, TargetXY, TargetPlane, PlanarConstraintAlongDirection, TargetLength, LengthVariation, ForceVariation,
@@ -524,6 +525,6 @@ impl ObjectiveTrait for ReactionDirectionMagnitude {
 
 /// Evaluate total geometric loss (sum of all objectives).
 pub fn total_loss(objectives: &[Box<dyn ObjectiveTrait>], snap: &GeometrySnapshot) -> f64 {
-    objectives.iter().map(|obj| obj.loss(snap)).sum()
+    objectives.par_iter().map(|obj| obj.loss(snap)).sum()
 }
 
