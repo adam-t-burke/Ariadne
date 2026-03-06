@@ -25,14 +25,11 @@ public sealed record FeaOptimizationConfig
     public bool StreamPreview { get; init; } = true;
 }
 
-/// <summary>
-/// Results from an FEA solve.
-/// </summary>
-public sealed record FeaSolveResult
+internal sealed record BarSolveData
 {
-    public required FEA_Network Network { get; init; }
-    public required double[] Displacements { get; init; }
-    public required double[] Reactions { get; init; }
+    public required Vector3d[] Displacements { get; init; }
+    public required Vector3d[] Reactions { get; init; }
+    public required int[] ReactionNodeIndices { get; init; }
     public required double[] AxialForces { get; init; }
     public required double[] Stresses { get; init; }
     public required double[] Strains { get; init; }

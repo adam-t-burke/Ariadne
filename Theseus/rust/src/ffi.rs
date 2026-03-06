@@ -865,6 +865,7 @@ pub unsafe extern "C" fn theseus_solve_pseudoinverse(
     max_l1_iter: usize,
     use_augmented: i32,
     enforce_zero_rx: i32,
+    solve_for_q: i32,
     out_q: *mut f64,
     out_xyz: *mut f64,
     out_lengths: *mut f64,
@@ -884,7 +885,7 @@ pub unsafe extern "C" fn theseus_solve_pseudoinverse(
 
         let q = crate::inverse::solve_pseudoinverse_dispatch(
             &h.problem, &target, regularization, use_l2 != 0, max_l1_iter,
-            use_augmented != 0, enforce_zero_rx != 0,
+            use_augmented != 0, enforce_zero_rx != 0, solve_for_q != 0,
         )?;
 
         // Forward solve with the computed q

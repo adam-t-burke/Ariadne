@@ -5,7 +5,7 @@
 //! into grad_area or grad_pos for explicit design-variable contributions.
 
 use crate::fea_types::{FeaObjectiveTrait, FeaSnapshot};
-use crate::objectives::softplus;
+use crate::objectives::{softplus, softplus_grad};
 
 // ─────────────────────────────────────────────────────────────
 //  Compliance: minimize strain energy u^T K u = u^T f
@@ -18,50 +18,32 @@ pub struct FeaCompliance {
 
 impl FeaObjectiveTrait for FeaCompliance {
     fn loss(&self, snap: &FeaSnapshot) -> f64 {
-        // Compliance = u^T f, but we have u and can compute u^T K u
-        // For linear elastic: u^T K u = u^T f = 2 * strain energy
-        // We use the displacement-based form: sum over elements of F_e * delta_e
+        // J = u^T K u = Σ_e (EA/L) * δ_e^2  where δ_e = c^T(u_j - u_i)
+        // Equivalently: Σ_e force_e * strain_e * L_e = Σ_e (EA*strain^2*L)
         let mut compliance = 0.0;
-        for (e, &force) in snap.axial_forces.iter().enumerate() {
+        for e in 0..snap.elem_lengths.len() {
             let l = snap.elem_lengths[e];
             if l < f64::EPSILON { continue; }
-            compliance += force * snap.strains[e] * l;
+            compliance += snap.axial_forces[e] * snap.strains[e] * l;
         }
         self.weight * compliance
     }
 
-    fn accumulate_grad_u(&self, grad_u: &mut [f64], snap: &FeaSnapshot) {
-        // For compliance J = u^T K u = u^T f, dJ/du = 2f = 2Ku.
-        // We accumulate 2 * u into grad_u. The adjoint solve K*lambda = 2*u
-        // gives lambda = 2*u (since K*u = f), and the implicit gradient
-        // captures the full sensitivity.
-        // Here we set dJ/du = 2*u (in full-DOF space), which after the adjoint
-        // solve K*lambda = 2*u gives lambda = 2*u, and the implicit gradient
-        // -lambda^T dK/dtheta u gives the correct total derivative.
-        // Actually: dJ/du = 2*K*u = 2*f. We don't have K here, but we can
-        // note that for the adjoint, K*lambda = dJ/du, so lambda = K^{-1} dJ/du.
-        // If dJ/du = 2*f = 2*K*u, then lambda = 2*u.
-        // We set grad_u[i] = 2 * displacements[i] * (something to make K*lambda = 2*K*u).
-        // Simplest: just set grad_u = 2*u and note that K*(2u) = 2*f = dJ/du. Wait no.
-        // K * lambda = grad_u. If grad_u = 2*K*u, then lambda = 2*u. But we can't
-        // compute K*u here. Instead, we set grad_u to a proxy that the adjoint will
-        // handle correctly. The cleanest: set grad_u[i] = 2 * snap.displacements[i].
-        // Then K*lambda = 2*u => lambda = 2*K^{-1}*u, which is NOT 2*u.
-        // The correct approach: we need grad_u = 2*f in free-DOF space.
-        // But f is the RHS which we don't have in the snapshot.
-        // The gradient module will handle this by using cache.rhs directly.
-        // So this is intentionally a no-op for compliance.
-        let _ = (grad_u, snap);
+    fn accumulate_grad_u(&self, _grad_u: &mut [f64], _snap: &FeaSnapshot) {
+        // For compliance J = u^T K u, dJ/du = 2Ku = 2f.
+        // This requires the RHS vector f which is in cache.rhs (free-DOF space).
+        // The gradient module handles this via the is_compliance() flag,
+        // injecting 2*cache.rhs into grad_u_full directly.
     }
 
     fn weight(&self) -> f64 { self.weight }
+    fn is_compliance(&self) -> bool { true }
 
     fn has_area_gradient(&self) -> bool { true }
 
     fn accumulate_grad_area(&self, _grad_a: &mut [f64], _snap: &FeaSnapshot) {
         // For compliance, the area gradient is fully handled by the adjoint:
-        // dJ/dA_e = -lambda^T (dke/dA_e) u, computed in fea_gradients.rs.
-        // No explicit contribution needed here.
+        // dJ/dA_s = -λ^T (dK/dA_s) u, computed in fea_gradients.rs.
     }
 }
 
@@ -108,14 +90,11 @@ impl FeaObjectiveTrait for FeaMaxDisplacement {
         for (k, &ni) in self.node_indices.iter().enumerate() {
             let mag = disp_mags[k];
             if mag < f64::EPSILON { continue; }
-            let softmax_weight = exp_vals[k] / sum_exp;
+            let w_k = exp_vals[k] / sum_exp;
             for d in 0..3 {
                 let u_d = snap.displacements[ni * 3 + d];
-                // d(smooth_max)/du_d = softmax_weight * d(mag)/du_d
-                // d(mag)/du_d = u_d / mag
-                let g = self.weight * softmax_weight * u_d / mag;
-                // Map to free DOF index
-                grad_u[ni * 3 + d] += g;
+                // d(smooth_max)/du_d = w_k * u_d / mag
+                grad_u[ni * 3 + d] += self.weight * w_k * u_d / mag;
             }
         }
     }
@@ -171,13 +150,15 @@ impl FeaObjectiveTrait for FeaMinWeight {
     fn loss(&self, snap: &FeaSnapshot) -> f64 {
         let mut total = 0.0;
         for e in 0..snap.elem_lengths.len() {
-            total += snap.densities[e] * snap.areas[e] * snap.elem_lengths[e];
+            // areas is per-section; look up via section_indices
+            let a = snap.areas[snap.section_indices[e]];
+            total += snap.densities[e] * a * snap.elem_lengths[e];
         }
         self.weight * total
     }
 
     fn accumulate_grad_u(&self, _grad_u: &mut [f64], _snap: &FeaSnapshot) {
-        // Weight does not depend on displacements directly
+        // Weight does not depend on displacements directly.
     }
 
     fn weight(&self) -> f64 { self.weight }
@@ -185,22 +166,35 @@ impl FeaObjectiveTrait for FeaMinWeight {
     fn has_area_gradient(&self) -> bool { true }
 
     fn accumulate_grad_area(&self, grad_a: &mut [f64], snap: &FeaSnapshot) {
+        // dJ/dA_s = Σ_{e : section_indices[e]==s} weight * ρ_e * L_e
         for e in 0..snap.elem_lengths.len() {
-            grad_a[e] += self.weight * snap.densities[e] * snap.elem_lengths[e];
+            let s = snap.section_indices[e];
+            grad_a[s] += self.weight * snap.densities[e] * snap.elem_lengths[e];
         }
     }
 
     fn has_position_gradient(&self) -> bool { true }
 
-    fn accumulate_grad_pos(&self, _grad_pos: &mut [f64], _snap: &FeaSnapshot) {
-        // d(rho * A * L)/d(node_pos) requires edge connectivity which is
-        // not available in the snapshot. This gradient is handled in
-        // fea_gradients.rs where we have access to the problem definition.
+    fn accumulate_grad_pos(&self, grad_pos: &mut [f64], snap: &FeaSnapshot) {
+        // dJ/d(pos) = Σ_e weight * ρ_e * A_e * dL_e/d(pos)
+        // dL/d(xi_d) = -c[d],  dL/d(xj_d) = +c[d]
+        for e in 0..snap.elem_lengths.len() {
+            let l = snap.elem_lengths[e];
+            if l < f64::EPSILON { continue; }
+            let (ni, nj) = snap.edge_nodes[e];
+            let c = snap.elem_cos[e];
+            let a = snap.areas[snap.section_indices[e]];
+            let rho_a_w = self.weight * snap.densities[e] * a;
+            for d in 0..3 {
+                grad_pos[ni * 3 + d] += rho_a_w * (-c[d]);
+                grad_pos[nj * 3 + d] += rho_a_w * c[d];
+            }
+        }
     }
 }
 
 // ─────────────────────────────────────────────────────────────
-//  MaxStress: softplus penalty on |sigma| - threshold
+//  MaxStress: softplus penalty on |σ| - threshold
 // ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -222,19 +216,29 @@ impl FeaObjectiveTrait for FeaMaxStress {
     }
 
     fn accumulate_grad_u(&self, grad_u: &mut [f64], snap: &FeaSnapshot) {
-        // d softplus(|sigma|, threshold, k) / du
-        // = softplus_grad(|sigma|, threshold, k) * d|sigma|/du
-        // d|sigma|/du = sign(sigma) * dsigma/du
-        // dsigma/du = E * d(strain)/du = E * d(c^T(u_j-u_i)/L)/du
-        // = E/L * c[d] * (±1)
-        // This needs element connectivity which we don't have in the snapshot.
-        // The gradient module handles this via the adjoint.
-        // For the adjoint: dJ/du is accumulated here as:
-        // dJ/du_i[d] = weight * softplus_grad * sign(sigma) * E * c[d] * (-1/L)
-        // dJ/du_j[d] = weight * softplus_grad * sign(sigma) * E * c[d] * (+1/L)
-        // But we need edge_nodes and direction cosines from the problem.
-        // These are handled in fea_gradients.rs.
-        let _ = (grad_u, snap);
+        // σ_e = E_e * c_e^T (u_j - u_i) / L_e
+        // d|σ|/du = sign(σ) * dσ/du
+        // dσ/du_i[d] = -E/L * c[d],  dσ/du_j[d] = +E/L * c[d]
+        // dJ/du = weight * softplus_grad(|σ|, threshold, k) * sign(σ) * dσ/du
+        for (k, &e) in self.edge_indices.iter().enumerate() {
+            let l = snap.elem_lengths[e];
+            if l < f64::EPSILON { continue; }
+            let sigma = snap.stresses[e];
+            let abs_sigma = sigma.abs();
+            let sign_sigma = if sigma >= 0.0 { 1.0 } else { -1.0 };
+            let sp_grad = softplus_grad(abs_sigma, self.threshold[k], self.sharpness);
+
+            let (ni, nj) = snap.edge_nodes[e];
+            let c = snap.elem_cos[e];
+            let e_mod = snap.materials_e[e];
+            let e_over_l = e_mod / l;
+
+            let factor = self.weight * sp_grad * sign_sigma * e_over_l;
+            for d in 0..3 {
+                grad_u[ni * 3 + d] += factor * (-c[d]);
+                grad_u[nj * 3 + d] += factor * c[d];
+            }
+        }
     }
 
     fn weight(&self) -> f64 { self.weight }
@@ -256,8 +260,7 @@ impl FeaObjectiveTrait for FeaTargetGeometry {
         let mut loss = 0.0;
         for (k, &ni) in self.node_indices.iter().enumerate() {
             for d in 0..3 {
-                let deformed = snap.deformed_xyz[[ni, d]];
-                let diff = deformed - self.targets[k][d];
+                let diff = snap.deformed_xyz[[ni, d]] - self.targets[k][d];
                 loss += diff * diff;
             }
         }
@@ -265,12 +268,10 @@ impl FeaObjectiveTrait for FeaTargetGeometry {
     }
 
     fn accumulate_grad_u(&self, grad_u: &mut [f64], snap: &FeaSnapshot) {
-        // deformed = original + u, so d(deformed)/du = I
-        // dJ/du_i[d] = 2 * weight * (deformed_i[d] - target_i[d])
+        // deformed = original + u  =>  d(deformed)/du = I
         for (k, &ni) in self.node_indices.iter().enumerate() {
             for d in 0..3 {
-                let deformed = snap.deformed_xyz[[ni, d]];
-                let diff = deformed - self.targets[k][d];
+                let diff = snap.deformed_xyz[[ni, d]] - self.targets[k][d];
                 grad_u[ni * 3 + d] += self.weight * 2.0 * diff;
             }
         }
@@ -281,12 +282,10 @@ impl FeaObjectiveTrait for FeaTargetGeometry {
     fn has_position_gradient(&self) -> bool { true }
 
     fn accumulate_grad_pos(&self, grad_pos: &mut [f64], snap: &FeaSnapshot) {
-        // deformed = original + u, so d(deformed)/d(original) = I
-        // dJ/d(pos_i[d]) = 2 * weight * (deformed_i[d] - target_i[d])
+        // deformed = original + u  =>  d(deformed)/d(original) = I
         for (k, &ni) in self.node_indices.iter().enumerate() {
             for d in 0..3 {
-                let deformed = snap.deformed_xyz[[ni, d]];
-                let diff = deformed - self.targets[k][d];
+                let diff = snap.deformed_xyz[[ni, d]] - self.targets[k][d];
                 grad_pos[ni * 3 + d] += self.weight * 2.0 * diff;
             }
         }

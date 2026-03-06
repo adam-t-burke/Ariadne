@@ -9,7 +9,7 @@ namespace Ariadne.FEA.Components
         public SectionComponent()
             : base("FEA Section", "Section",
                 "Define cross-section properties",
-                "Theseus-FEA", "Design")
+                "Theseus-FEA", "Setup")
         { }
 
         protected override void RegisterInputParams(GH_InputParamManager pManager)
@@ -32,7 +32,7 @@ namespace Ariadne.FEA.Components
             DA.SetData(0, new FeaSection { Area = area });
         }
 
-        protected override Bitmap Icon => null;
+        protected override Bitmap? Icon => null;
         public override Guid ComponentGuid => new Guid("A1B2C3D4-FEA1-4000-8001-000000000003");
     }
 }

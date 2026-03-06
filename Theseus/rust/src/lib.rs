@@ -29,6 +29,14 @@ pub mod fea_gradients;
 pub mod fea_optimizer;
 pub mod fea_ffi;
 
+// Solid element modules (Phase 2: tet4 continuum elements)
+pub mod solid_types;
+pub mod solid_assembly;
+pub mod solid_solve;
+pub mod solid_ffi;
+pub mod solid_spr;
+pub mod solid_spr_ffi;
+
 pub use types::TheseusError;
 pub use types::ObjectiveTrait;
 pub use fea_types::FeaObjectiveTrait;

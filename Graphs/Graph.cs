@@ -48,13 +48,27 @@ namespace Ariadne.Graphs
         public GH_Structure<Edge> OutputEdgeTree { get; set; }
 
         /// <summary>Parameterless constructor; initialize properties before use.</summary>
-        public Graph() { }
+        public Graph()
+        {
+            Nodes = new List<Node>();
+            Edges = new List<Edge>();
+            IndicesTree = new GH_Structure<GH_Number>();
+            AdjacencyTree = new GH_Structure<GH_Number>();
+            EdgeInputMap = new List<(int branchIndex, int itemIndex)>();
+            OutputEdgeTree = new GH_Structure<Edge>();
+        }
 
         /// <summary>Builds a graph from a flat list of curves using the given merge tolerance.</summary>
         /// <param name="_InputCurves">Curves to convert into edges; endpoints become nodes.</param>
         /// <param name="_Tolerance">Distance tolerance for merging coincident vertices.</param>
         public Graph(List<GH_Curve> _InputCurves, double _Tolerance)
         {
+            Nodes = new List<Node>();
+            Edges = new List<Edge>();
+            IndicesTree = new GH_Structure<GH_Number>();
+            AdjacencyTree = new GH_Structure<GH_Number>();
+            EdgeInputMap = new List<(int branchIndex, int itemIndex)>();
+            OutputEdgeTree = new GH_Structure<Edge>();
             ConstructGraph(_InputCurves, _Tolerance);
         }
 
@@ -63,6 +77,12 @@ namespace Ariadne.Graphs
         /// <param name="tol">Distance tolerance for merging coincident vertices.</param>
         public Graph(GH_Structure<GH_Curve> inputTree, double tol)
         {
+            Nodes = new List<Node>();
+            Edges = new List<Edge>();
+            IndicesTree = new GH_Structure<GH_Number>();
+            AdjacencyTree = new GH_Structure<GH_Number>();
+            EdgeInputMap = new List<(int branchIndex, int itemIndex)>();
+            OutputEdgeTree = new GH_Structure<Edge>();
             ConstructGraphFromTree(inputTree, tol);
         }
 
@@ -73,10 +93,10 @@ namespace Ariadne.Graphs
             Tolerance = other.Tolerance;
             Nodes = new List<Node>(other.Nodes);
             Edges = new List<Edge>(other.Edges);
-            IndicesTree = other.IndicesTree;
-            AdjacencyTree = other.AdjacencyTree;
-            EdgeInputMap = other.EdgeInputMap != null ? new List<(int, int)>(other.EdgeInputMap) : null;
-            OutputEdgeTree = other.OutputEdgeTree;
+            IndicesTree = other.IndicesTree ?? new GH_Structure<GH_Number>();
+            AdjacencyTree = other.AdjacencyTree ?? new GH_Structure<GH_Number>();
+            EdgeInputMap = other.EdgeInputMap != null ? new List<(int, int)>(other.EdgeInputMap) : new List<(int, int)>();
+            OutputEdgeTree = other.OutputEdgeTree ?? new GH_Structure<Edge>();
         }
 
         // Internal construction mode (kept private per request)
@@ -425,7 +445,7 @@ namespace Ariadne.Graphs
                 
                 for (int itemIdx = 0; itemIdx < branch.Count; itemIdx++)
                 {
-                    allCurves.Add((GH_Curve)branch[itemIdx]);
+                    allCurves.Add((GH_Curve)branch[itemIdx]!);
                     EdgeInputMap.Add((branchIdx, itemIdx));
                 }
             }

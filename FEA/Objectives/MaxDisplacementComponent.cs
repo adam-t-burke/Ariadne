@@ -51,7 +51,7 @@ namespace Ariadne.FEA.Objectives
             });
         }
 
-        protected override Bitmap Icon => null;
+        protected override Bitmap? Icon => null;
         public override Guid ComponentGuid => new Guid("A1B2C3D4-FEA1-4000-8001-000000000011");
     }
 }

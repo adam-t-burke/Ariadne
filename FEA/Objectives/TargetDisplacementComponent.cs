@@ -58,6 +58,12 @@ namespace Ariadne.FEA.Objectives
             if (!DA.GetDataList(1, targets)) return;
             DA.GetData(2, ref weight);
 
+            if (targets.Count == 0)
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "At least one target displacement is required.");
+                return;
+            }
+
             DA.SetData(0, new FeaTargetDisplacementObj
             {
                 Weight = weight,
@@ -66,7 +72,7 @@ namespace Ariadne.FEA.Objectives
             });
         }
 
-        protected override Bitmap Icon => null;
+        protected override Bitmap? Icon => null;
         public override Guid ComponentGuid => new Guid("A1B2C3D4-FEA1-4000-8001-000000000012");
     }
 }

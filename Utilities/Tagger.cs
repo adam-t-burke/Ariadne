@@ -16,9 +16,9 @@ namespace Ariadne.Utilities
     /// </summary>
     public class Tagger : GH_Component
     {
-        FDM_Network network;
-        List<string> tags;
-        List<Point3d> points;
+        FDM_Network network = null!;
+        List<string> tags = null!;
+        List<Point3d> points = null!;
         bool show;
         double size;
         System.Drawing.Color col;

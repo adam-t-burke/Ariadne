@@ -55,6 +55,12 @@ namespace Ariadne.FEA.Objectives
             DA.GetData(2, ref weight);
             DA.GetData(3, ref sharpness);
 
+            if (thresholds.Count == 0)
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "At least one stress threshold is required.");
+                return;
+            }
+
             DA.SetData(0, new FeaMaxStressObj
             {
                 Weight = weight,
@@ -64,7 +70,7 @@ namespace Ariadne.FEA.Objectives
             });
         }
 
-        protected override Bitmap Icon => null;
+        protected override Bitmap? Icon => null;
         public override Guid ComponentGuid => new Guid("A1B2C3D4-FEA1-4000-8001-000000000014");
     }
 }

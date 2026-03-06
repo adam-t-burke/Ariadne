@@ -36,6 +36,7 @@ public class PseudoinverseComponent : GH_Component
         pManager.AddIntegerParameter("L1 Iterations", "L1Iter", "Maximum IRLS iterations for L1 mode (ignored when L2 is selected)", GH_ParamAccess.item, 20);
         pManager.AddBooleanParameter("Augmented", "Aug", "Use the augmented saddle-point system instead of forming M^T M. Faster for large meshes (>50k edges). Requires λ > 0.", GH_ParamAccess.item, false);
         pManager.AddBooleanParameter("Enforce Rx=0", "Rx0", "Strictly enforce zero horizontal reaction at supports. Channels thrust into tie members. Only valid for statically indeterminate structures.", GH_ParamAccess.item, false);
+        pManager.AddBooleanParameter("Solve Q", "SolveQ", "True = solve for force densities q directly (default). False = solve for axial forces F using unit direction vectors, then recover q = F / L. Solving for F can give better conditioning when edge lengths vary widely.", GH_ParamAccess.item, true);
 
         pManager[5].Optional = true;
     }
@@ -62,6 +63,7 @@ public class PseudoinverseComponent : GH_Component
         int maxL1Iter = 20;
         bool useAugmented = false;
         bool enforceZeroRx = false;
+        bool solveForQ = true;
 
         if (!DA.GetData(0, ref network)) return;
         if (!DA.GetDataList(1, targetPoints)) return;
@@ -73,6 +75,7 @@ public class PseudoinverseComponent : GH_Component
         DA.GetData(7, ref maxL1Iter);
         DA.GetData(8, ref useAugmented);
         DA.GetData(9, ref enforceZeroRx);
+        DA.GetData(10, ref solveForQ);
 
         if (network == null || !network.Valid)
         {
@@ -111,7 +114,7 @@ public class PseudoinverseComponent : GH_Component
         try
         {
             var result = TheseusSolverService.SolvePseudoinverse(
-                network, inputs, targetFreeXyz, regularization, useL2, maxL1Iter, useAugmented, enforceZeroRx);
+                network, inputs, targetFreeXyz, regularization, useL2, maxL1Iter, useAugmented, enforceZeroRx, solveForQ);
 
             DA.SetData(0, result.Network);
             DA.SetDataList(1, result.NodePositions);

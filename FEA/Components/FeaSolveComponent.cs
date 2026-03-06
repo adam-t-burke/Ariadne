@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Linq;
+using Ariadne.Graphs;
 using Grasshopper.Kernel;
 using Rhino.Geometry;
 
@@ -9,56 +11,72 @@ namespace Ariadne.FEA.Components
     public class FeaSolveComponent : GH_Component
     {
         public FeaSolveComponent()
-            : base("FEA Solve", "FEA Solve",
-                "Solve a linear elastic FEA problem (forward or with optimization)",
-                "Theseus-FEA", "Design")
+            : base("FEA Solve", "FEASolve",
+                "Solve a linear elastic FEA problem for bar, solid, or coupled models",
+                "Theseus-FEA", "Solver")
         { }
 
         protected override void RegisterInputParams(GH_InputParamManager pManager)
         {
-            pManager.AddGenericParameter("Network", "N", "FEA network", GH_ParamAccess.item);
-            pManager.AddVectorParameter("Loads", "L", "Point loads (force vectors)", GH_ParamAccess.list);
-            pManager.AddIntegerParameter("Load Nodes", "LN", "Node indices for loads (optional)", GH_ParamAccess.list);
+            pManager.AddGenericParameter("Model", "M", "FEA model (bar, solid, or coupled)", GH_ParamAccess.item);
             pManager.AddBooleanParameter("Self Weight", "SW", "Include self-weight", GH_ParamAccess.item, false);
-            pManager.AddGenericParameter("Opt Config", "Opt", "Optimization config (optional)", GH_ParamAccess.item);
+            pManager.AddGenericParameter("Opt Config", "Opt", "Optimization config (optional, bar only)", GH_ParamAccess.item);
 
             pManager[2].Optional = true;
-            pManager[4].Optional = true;
         }
 
         protected override void RegisterOutputParams(GH_OutputParamManager pManager)
         {
-            pManager.AddGenericParameter("Network", "N", "Solved FEA network", GH_ParamAccess.item);
-            pManager.AddNumberParameter("Displacements", "U", "Nodal displacements (flat: x0,y0,z0,...)", GH_ParamAccess.list);
-            pManager.AddNumberParameter("Reactions", "R", "Reaction forces (flat: x0,y0,z0,...)", GH_ParamAccess.list);
-            pManager.AddNumberParameter("Axial Forces", "F", "Axial force per element", GH_ParamAccess.list);
-            pManager.AddNumberParameter("Stresses", "σ", "Axial stress per element", GH_ParamAccess.list);
-            pManager.AddNumberParameter("Strains", "ε", "Axial strain per element", GH_ParamAccess.list);
+            pManager.AddGenericParameter("Results", "Res", "Full unified FEA solve result (contains DeformedModel)", GH_ParamAccess.item);
+            pManager.AddVectorParameter("Displacements", "U", "Displacement vector per node", GH_ParamAccess.list);
+            pManager.AddVectorParameter("Reactions", "R", "Reaction force vectors at supports", GH_ParamAccess.list);
+            pManager.AddGenericParameter("Reaction Nodes", "RN", "Node objects corresponding to each reaction", GH_ParamAccess.list);
+            pManager.AddNumberParameter("Stresses", "σ", "Axial stress (bar) or von Mises stress (solid) per element", GH_ParamAccess.list);
+            pManager.AddNumberParameter("Axial Forces", "F", "Axial force per bar element (empty for solid)", GH_ParamAccess.list);
+            pManager.AddNumberParameter("Strains", "ε", "Axial strain per bar element (empty for solid)", GH_ParamAccess.list);
+            pManager.AddNumberParameter("Utilization", "Util", "Utilization per element", GH_ParamAccess.list);
             pManager.AddPointParameter("Deformed Nodes", "DN", "Deformed node positions", GH_ParamAccess.list);
-            pManager.AddCurveParameter("Deformed Edges", "DE", "Deformed edge curves", GH_ParamAccess.list);
-            pManager.AddNumberParameter("Utilization", "Util", "Stress utilization per element", GH_ParamAccess.list);
-            pManager.AddIntegerParameter("Iterations", "Iter", "Optimization iterations", GH_ParamAccess.item);
-            pManager.AddBooleanParameter("Converged", "Conv", "Whether optimization converged", GH_ParamAccess.item);
+            pManager.AddIntegerParameter("Iterations", "Iter", "Solver iterations", GH_ParamAccess.item);
+            pManager.AddBooleanParameter("Converged", "Conv", "Whether the solver converged", GH_ParamAccess.item);
         }
 
         protected override void SolveInstance(IGH_DataAccess DA)
         {
-            FEA_Network network = null;
-            var loads = new List<Vector3d>();
-            var loadNodes = new List<int>();
+            FEA_Model? model = null;
             bool selfWeight = false;
-            FeaOptimizationConfig optConfig = null;
+            FeaOptimizationConfig? optConfig = null;
 
-            if (!DA.GetData(0, ref network)) return;
-            if (!DA.GetDataList(1, loads)) return;
-            DA.GetDataList(2, loadNodes);
-            DA.GetData(3, ref selfWeight);
-            DA.GetData(4, ref optConfig);
+            if (!DA.GetData(0, ref model)) return;
+            DA.GetData(1, ref selfWeight);
+            DA.GetData(2, ref optConfig);
 
-            if (network == null || !network.Valid)
+            if (model == null || !model.Valid)
             {
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Invalid FEA network.");
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Error,
+                    model?.ValidationMessage ?? "Invalid FEA model.");
                 return;
+            }
+
+            var loads = model.Loads.Select(load => load.Force).ToList();
+            var loadNodeIdx = model.Loads.Select(load => load.NodeIndex).ToList();
+
+            int constrainedLoadCount = 0;
+            foreach (var load in model.Loads)
+            {
+                var constrained = model.GetConstrainedDofs(load.NodeIndex);
+                if ((constrained[0] && Math.Abs(load.Force.X) > 1e-12) ||
+                    (constrained[1] && Math.Abs(load.Force.Y) > 1e-12) ||
+                    (constrained[2] && Math.Abs(load.Force.Z) > 1e-12))
+                {
+                    constrainedLoadCount++;
+                }
+            }
+
+            if (constrainedLoadCount > 0)
+            {
+                AddRuntimeMessage(
+                    GH_RuntimeMessageLevel.Warning,
+                    $"{constrainedLoadCount} load(s) act on constrained DOFs; those components will appear as reactions rather than free displacement.");
             }
 
             if (loads.Count == 0 && !selfWeight)
@@ -67,29 +85,60 @@ namespace Ariadne.FEA.Components
                 return;
             }
 
+            if (model.IsCoupled)
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Error,
+                    "Coupled bar+solid models are not yet supported.");
+                return;
+            }
+
             try
             {
-                FeaSolveResult result;
-                List<int>? loadNodeIdx = loadNodes.Count > 0 ? loadNodes : null;
+                FeaResult result;
 
-                if (optConfig != null && optConfig.Run)
+                if (model.HasBarElements)
                 {
-                    result = FeaSolverService.Solve(network, loads, loadNodeIdx, selfWeight, optConfig);
+                    result = SolveBar(model, loads, loadNodeIdx, selfWeight, optConfig);
                 }
                 else
                 {
-                    result = FeaSolverService.SolveForward(network, loads, loadNodeIdx, selfWeight);
+                    result = SolveSolid(model, loads, loadNodeIdx, selfWeight);
                 }
 
-                DA.SetData(0, result.Network);
+                DA.SetData(0, result);
                 DA.SetDataList(1, result.Displacements);
                 DA.SetDataList(2, result.Reactions);
-                DA.SetDataList(3, result.AxialForces);
-                DA.SetDataList(4, result.Stresses);
-                DA.SetDataList(5, result.Strains);
-                DA.SetDataList(6, result.DeformedNodes);
-                DA.SetDataList(7, result.DeformedEdges);
-                DA.SetDataList(8, result.Utilization);
+
+                if (model.HasBarElements)
+                {
+                    var reactionNodes = new List<Node>();
+                    foreach (int ni in result.ReactionNodeIndices)
+                        reactionNodes.Add(model.BarGraph!.Nodes[ni]);
+                    DA.SetDataList(3, reactionNodes);
+                    DA.SetDataList(4, result.BarStresses ?? []);
+                    DA.SetDataList(5, result.AxialForces ?? []);
+                    DA.SetDataList(6, result.BarStrains ?? []);
+                }
+                else
+                {
+                    var reactionNodes = new List<Node>();
+                    var mesh = model.SolidMesh!;
+                    foreach (int ni in result.ReactionNodeIndices)
+                    {
+                        reactionNodes.Add(new Node
+                        {
+                            Value = mesh.TetNodes[ni],
+                            Index = ni
+                        });
+                    }
+                    DA.SetDataList(3, reactionNodes);
+                    DA.SetDataList(4, result.VonMises ?? []);
+                    DA.SetDataList(5, new List<double>());
+                    DA.SetDataList(6, new List<double>());
+                }
+
+                DA.SetDataList(7, result.Utilization);
+                DA.SetDataList(8, result.DeformedNodes);
                 DA.SetData(9, result.Iterations);
                 DA.SetData(10, result.Converged);
             }
@@ -99,7 +148,85 @@ namespace Ariadne.FEA.Components
             }
         }
 
-        protected override Bitmap Icon => null;
-        public override Guid ComponentGuid => new Guid("A1B2C3D4-FEA1-4000-8001-000000000005");
+        private static FeaResult SolveBar(
+            FEA_Model model,
+            List<Vector3d> loads,
+            List<int>? loadNodeIdx,
+            bool selfWeight,
+            FeaOptimizationConfig? optConfig)
+        {
+            var network = model.ToBarNetwork();
+
+            BarSolveData barResult;
+            if (optConfig != null && optConfig.Run)
+                barResult = FeaSolverService.Solve(network, loads, loadNodeIdx, selfWeight, optConfig);
+            else
+                barResult = FeaSolverService.SolveForward(network, loads, loadNodeIdx, selfWeight);
+
+            var deformedModel = new FEA_Model(model);
+            for (int i = 0; i < barResult.DeformedNodes.Length; i++)
+                deformedModel.BarGraph!.Nodes[i].Value = barResult.DeformedNodes[i];
+            for (int e = 0; e < barResult.DeformedEdges.Length; e++)
+                deformedModel.BarGraph!.Edges[e].Value = barResult.DeformedEdges[e];
+
+            int ne = model.BarGraph!.Ne;
+            var utilization = barResult.Utilization ?? new double[ne];
+
+            return new FeaResult
+            {
+                Model = model,
+                DeformedModel = deformedModel,
+                Displacements = barResult.Displacements,
+                Reactions = barResult.Reactions,
+                ReactionNodeIndices = barResult.ReactionNodeIndices,
+                DeformedNodes = barResult.DeformedNodes,
+                AxialForces = barResult.AxialForces,
+                BarStresses = barResult.Stresses,
+                BarStrains = barResult.Strains,
+                Utilization = utilization,
+                Iterations = barResult.Iterations,
+                Converged = barResult.Converged,
+            };
+        }
+
+        private static FeaResult SolveSolid(
+            FEA_Model model,
+            List<Vector3d> loads,
+            List<int>? loadNodeIdx,
+            bool selfWeight)
+        {
+            var network = model.ToSolidNetwork();
+            var solidResult = SolidSolverService.SolveForward(network, loads, loadNodeIdx, selfWeight);
+
+            var deformedModel = new FEA_Model(model);
+            for (int i = 0; i < solidResult.DeformedNodes.Length; i++)
+                deformedModel.SolidMesh!.TetNodes[i] = solidResult.DeformedNodes[i];
+
+            int ne = model.SolidMesh!.Ne;
+            var utilization = solidResult.VonMises.Select((vm, e) =>
+            {
+                int matIdx = model.MaterialAssignment[e];
+                double yieldStress = model.Materials[matIdx].YieldStress;
+                return yieldStress > 0 ? vm / yieldStress : 0.0;
+            }).ToArray();
+
+            return new FeaResult
+            {
+                Model = model,
+                DeformedModel = deformedModel,
+                Displacements = solidResult.Displacements,
+                Reactions = solidResult.Reactions,
+                ReactionNodeIndices = solidResult.ReactionNodeIndices,
+                DeformedNodes = solidResult.DeformedNodes,
+                SolidStresses = solidResult.Stresses,
+                VonMises = solidResult.VonMises,
+                Utilization = utilization,
+                Iterations = 1,
+                Converged = true,
+            };
+        }
+
+        protected override Bitmap? Icon => null;
+        public override Guid ComponentGuid => new Guid("A1B2C3D4-FEA1-4000-8001-200000000003");
     }
 }

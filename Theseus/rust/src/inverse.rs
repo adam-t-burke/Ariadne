@@ -7,6 +7,13 @@
 //! where u_d = C · N_target are the target member coordinate differences.
 //! Stacking all 3 dimensions gives the sparse system  M q = p.
 //!
+//! When `solve_for_q` is false, the system is reformulated to solve for axial
+//! forces F directly by normalising u to unit vectors:
+//!
+//!   Cn^T  diag(e_d)  F  =  Pn_d       where  e_d = u_d / ‖u‖
+//!
+//! Force densities are then recovered as  q = F / L.
+//!
 //! Three solvers are provided:
 //!
 //!   - **Pseudoinverse L2** (Tikhonov-regularised normal equations):
@@ -67,6 +74,45 @@ fn compute_target_member_vectors(
         }
     }
     u
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Normalise u → unit vectors (for solve-for-F mode)
+// ─────────────────────────────────────────────────────────────
+
+const ZERO_LENGTH_TOL: f64 = 1e-14;
+
+/// Normalise member vectors in-place to unit vectors and return the edge lengths.
+///
+/// Each row `u[k,:]` is divided by its Euclidean norm `L_k`.  Returns `L`
+/// (length `ne`).  Errors if any edge has near-zero length.
+fn normalise_member_vectors(u: &mut Array2<f64>) -> Result<Vec<f64>, TheseusError> {
+    let ne = u.nrows();
+    let mut lengths = vec![0.0; ne];
+    for k in 0..ne {
+        let lsq = u[[k, 0]] * u[[k, 0]] + u[[k, 1]] * u[[k, 1]] + u[[k, 2]] * u[[k, 2]];
+        let l = lsq.sqrt();
+        if l < ZERO_LENGTH_TOL {
+            return Err(TheseusError::Solver(format!(
+                "target edge {k} has near-zero length ({l:.2e}); \
+                 cannot solve for F with degenerate edges",
+            )));
+        }
+        let inv_l = 1.0 / l;
+        u[[k, 0]] *= inv_l;
+        u[[k, 1]] *= inv_l;
+        u[[k, 2]] *= inv_l;
+        lengths[k] = l;
+    }
+    Ok(lengths)
+}
+
+/// Convert axial forces F back to force densities: `q[k] = F[k] / L[k]`.
+fn forces_to_q(f: &[f64], lengths: &[f64]) -> Vec<f64> {
+    f.iter()
+        .zip(lengths.iter())
+        .map(|(&fi, &li)| fi / li)
+        .collect()
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -277,15 +323,23 @@ fn apply_mt(cn: &SparseColMatOwned, u: &Array2<f64>, r: &[f64], nn_free: usize) 
 /// Find force densities via pseudoinverse of the equilibrium system.
 ///
 /// Solves  `(M^T M + λI) q = M^T p`  using sparse LDL factorisation.
+/// When `solve_for_q` is false, solves for axial forces F instead and
+/// recovers q = F / L from the target edge lengths.
 pub fn solve_pseudoinverse(
     problem: &Problem,
     target_free_xyz: &Array2<f64>,
     regularization: f64,
     enforce_zero_rx: bool,
+    solve_for_q: bool,
 ) -> Result<Vec<f64>, TheseusError> {
     let ne = problem.topology.num_edges;
 
-    let u = compute_target_member_vectors(problem, target_free_xyz);
+    let mut u = compute_target_member_vectors(problem, target_free_xyz);
+    let target_lengths = if solve_for_q {
+        None
+    } else {
+        Some(normalise_member_vectors(&mut u)?)
+    };
     let (m_mat, p) = build_equilibrium_matrix(problem, &u, enforce_zero_rx);
 
     // G = M^T M  (ne × ne, sparse)
@@ -303,7 +357,12 @@ pub fn solve_pseudoinverse(
 
     // Factorise G and solve (LDL for normal equations)
     let fac = Factorization::new(&g, FactorizationStrategy::LDL)?;
-    let q = fac.solve(&h);
+    let sol = fac.solve(&h);
+
+    let q = match target_lengths {
+        Some(ref lengths) => forces_to_q(&sol, lengths),
+        None => sol,
+    };
 
     // Validate solution
     for (i, &v) in q.iter().enumerate() {
@@ -339,11 +398,14 @@ pub fn solve_pseudoinverse(
 ///
 /// Asymptotically faster for large meshes (>50k edges) where the M^T M
 /// fill-in explosion dominates runtime.  Requires `λ > 0`.
+/// When `solve_for_q` is false, solves for axial forces F instead and
+/// recovers q = F / L from the target edge lengths.
 pub fn solve_pseudoinverse_augmented(
     problem: &Problem,
     target_free_xyz: &Array2<f64>,
     regularization: f64,
     enforce_zero_rx: bool,
+    solve_for_q: bool,
 ) -> Result<Vec<f64>, TheseusError> {
     if regularization <= 0.0 {
         return Err(TheseusError::Solver(
@@ -353,7 +415,12 @@ pub fn solve_pseudoinverse_augmented(
 
     let ne = problem.topology.num_edges;
 
-    let u = compute_target_member_vectors(problem, target_free_xyz);
+    let mut u = compute_target_member_vectors(problem, target_free_xyz);
+    let target_lengths = if solve_for_q {
+        None
+    } else {
+        Some(normalise_member_vectors(&mut u)?)
+    };
     let (m_mat, p) = build_equilibrium_matrix(problem, &u, enforce_zero_rx);
     let m_rows = p.len();
 
@@ -362,8 +429,11 @@ pub fn solve_pseudoinverse_augmented(
     let fac = Factorization::new(&k_mat, FactorizationStrategy::LDL)?;
     let sol = fac.solve(&rhs);
 
-    // q occupies the last ne entries of the solution vector
-    let q: Vec<f64> = sol[m_rows..m_rows + ne].to_vec();
+    let raw: Vec<f64> = sol[m_rows..m_rows + ne].to_vec();
+    let q = match target_lengths {
+        Some(ref lengths) => forces_to_q(&raw, lengths),
+        None => raw,
+    };
 
     for (i, &v) in q.iter().enumerate() {
         if !v.is_finite() {
@@ -395,16 +465,24 @@ pub fn solve_pseudoinverse_augmented(
 /// `(M^T W M + λI) q = M^T W p` where `W = diag(1/max(|r_i|, ε))`.
 ///
 /// Warm-starts from the L2 pseudoinverse solution for fast convergence.
+/// When `solve_for_q` is false, solves for axial forces F instead and
+/// recovers q = F / L from the target edge lengths.
 pub fn solve_pseudoinverse_l1(
     problem: &Problem,
     target_free_xyz: &Array2<f64>,
     regularization: f64,
     max_iter: usize,
     enforce_zero_rx: bool,
+    solve_for_q: bool,
 ) -> Result<Vec<f64>, TheseusError> {
     let ne = problem.topology.num_edges;
 
-    let u = compute_target_member_vectors(problem, target_free_xyz);
+    let mut u = compute_target_member_vectors(problem, target_free_xyz);
+    let target_lengths = if solve_for_q {
+        None
+    } else {
+        Some(normalise_member_vectors(&mut u)?)
+    };
     let (m_mat, p) = build_equilibrium_matrix(problem, &u, enforce_zero_rx);
 
     let m_t = m_mat.transpose();
@@ -418,14 +496,14 @@ pub fn solve_pseudoinverse_l1(
     }
     let h_l2 = m_t.matvec(&p);
     let fac_l2 = Factorization::new(&g_l2, FactorizationStrategy::LDL)?;
-    let mut q = fac_l2.solve(&h_l2);
+    let mut sol = fac_l2.solve(&h_l2);
 
     const ABS_EPS: f64 = 1e-12;
     let mut prev_l1 = f64::MAX;
 
     for _ in 0..max_iter {
-        // r = M*q − p
-        let mut r = m_mat.matvec(&q);
+        // r = M*sol − p
+        let mut r = m_mat.matvec(&sol);
         for (ri, &pi) in r.iter_mut().zip(p.iter()) {
             *ri -= pi;
         }
@@ -482,8 +560,13 @@ pub fn solve_pseudoinverse_l1(
         let h = m_t.matvec(&wp);
 
         let fac = Factorization::new(&g, FactorizationStrategy::LDL)?;
-        q = fac.solve(&h);
+        sol = fac.solve(&h);
     }
+
+    let q = match target_lengths {
+        Some(ref lengths) => forces_to_q(&sol, lengths),
+        None => sol,
+    };
 
     // Validate solution
     for (i, &v) in q.iter().enumerate() {
@@ -513,12 +596,15 @@ pub fn solve_pseudoinverse_l1(
 /// Equivalent to `solve_pseudoinverse_l1` but each IRLS iteration factorises
 /// the augmented system instead of forming M_w^T M_w.  Avoids fill-in explosion
 /// at large scales.  Requires `λ > 0`.
+/// When `solve_for_q` is false, solves for axial forces F instead and
+/// recovers q = F / L from the target edge lengths.
 pub fn solve_pseudoinverse_l1_augmented(
     problem: &Problem,
     target_free_xyz: &Array2<f64>,
     regularization: f64,
     max_iter: usize,
     enforce_zero_rx: bool,
+    solve_for_q: bool,
 ) -> Result<Vec<f64>, TheseusError> {
     if regularization <= 0.0 {
         return Err(TheseusError::Solver(
@@ -528,7 +614,12 @@ pub fn solve_pseudoinverse_l1_augmented(
 
     let ne = problem.topology.num_edges;
 
-    let u = compute_target_member_vectors(problem, target_free_xyz);
+    let mut u = compute_target_member_vectors(problem, target_free_xyz);
+    let target_lengths = if solve_for_q {
+        None
+    } else {
+        Some(normalise_member_vectors(&mut u)?)
+    };
     let (m_mat, p) = build_equilibrium_matrix(problem, &u, enforce_zero_rx);
 
     let m_rows = p.len();
@@ -537,14 +628,14 @@ pub fn solve_pseudoinverse_l1_augmented(
     let (k_l2, rhs_l2) = build_augmented_system(&m_mat, &p, regularization);
     let fac_l2 = Factorization::new(&k_l2, FactorizationStrategy::LDL)?;
     let sol_l2 = fac_l2.solve(&rhs_l2);
-    let mut q: Vec<f64> = sol_l2[m_rows..m_rows + ne].to_vec();
+    let mut sol: Vec<f64> = sol_l2[m_rows..m_rows + ne].to_vec();
 
     const ABS_EPS: f64 = 1e-12;
     let mut prev_l1 = f64::MAX;
 
     for _ in 0..max_iter {
-        // r = M*q − p
-        let mut r = m_mat.matvec(&q);
+        // r = M*sol − p
+        let mut r = m_mat.matvec(&sol);
         for (ri, &pi) in r.iter_mut().zip(p.iter()) {
             *ri -= pi;
         }
@@ -591,9 +682,14 @@ pub fn solve_pseudoinverse_l1_augmented(
         let (k_mat, rhs) = build_augmented_system(&m_w, &rhs_top, effective_reg);
 
         let fac = Factorization::new(&k_mat, FactorizationStrategy::LDL)?;
-        let sol = fac.solve(&rhs);
-        q = sol[m_rows..m_rows + ne].to_vec();
+        let iter_sol = fac.solve(&rhs);
+        sol = iter_sol[m_rows..m_rows + ne].to_vec();
     }
+
+    let q = match target_lengths {
+        Some(ref lengths) => forces_to_q(&sol, lengths),
+        None => sol,
+    };
 
     for (i, &v) in q.iter().enumerate() {
         if !v.is_finite() {
@@ -624,6 +720,10 @@ pub fn solve_pseudoinverse_l1_augmented(
 ///
 /// When `enforce_zero_rx` is true, augments the system to strictly enforce
 /// R_x = 0 at fixed supports (channels horizontal thrust into tie members).
+///
+/// When `solve_for_q` is false, solves for axial forces F directly (using
+/// unit direction vectors instead of coordinate differences) and recovers
+/// q = F / L from the target edge lengths.
 pub fn solve_pseudoinverse_dispatch(
     problem: &Problem,
     target_free_xyz: &Array2<f64>,
@@ -632,12 +732,13 @@ pub fn solve_pseudoinverse_dispatch(
     max_l1_iter: usize,
     use_augmented: bool,
     enforce_zero_rx: bool,
+    solve_for_q: bool,
 ) -> Result<Vec<f64>, TheseusError> {
     match (use_l2, use_augmented) {
-        (true, false) => solve_pseudoinverse(problem, target_free_xyz, regularization, enforce_zero_rx),
-        (true, true) => solve_pseudoinverse_augmented(problem, target_free_xyz, regularization, enforce_zero_rx),
-        (false, false) => solve_pseudoinverse_l1(problem, target_free_xyz, regularization, max_l1_iter, enforce_zero_rx),
-        (false, true) => solve_pseudoinverse_l1_augmented(problem, target_free_xyz, regularization, max_l1_iter, enforce_zero_rx),
+        (true, false) => solve_pseudoinverse(problem, target_free_xyz, regularization, enforce_zero_rx, solve_for_q),
+        (true, true) => solve_pseudoinverse_augmented(problem, target_free_xyz, regularization, enforce_zero_rx, solve_for_q),
+        (false, false) => solve_pseudoinverse_l1(problem, target_free_xyz, regularization, max_l1_iter, enforce_zero_rx, solve_for_q),
+        (false, true) => solve_pseudoinverse_l1_augmented(problem, target_free_xyz, regularization, max_l1_iter, enforce_zero_rx, solve_for_q),
     }
 }
 

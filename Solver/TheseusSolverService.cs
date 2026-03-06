@@ -17,6 +17,9 @@ public static class TheseusSolverService
     /// <summary>
     /// Solve an FDM network with optimization.
     /// </summary>
+    /// <param name="network">The FDM network to solve.</param>
+    /// <param name="inputs">Solver inputs including loads, bounds, and objectives.</param>
+    /// <param name="options">Optional solver options (iterations, tolerances, etc.).</param>
     /// <param name="progressCallback">
     /// Optional callback invoked every ReportFrequency evaluations with
     /// (iteration, loss, xyz[numNodes*3], q[numEdges]).
@@ -99,7 +102,8 @@ public static class TheseusSolverService
         bool useL2 = true,
         int maxL1Iter = 20,
         bool useAugmented = false,
-        bool enforceZeroRx = false)
+        bool enforceZeroRx = false,
+        bool solveForQ = true)
     {
         ValidateCommon(network, inputs);
         var context = BuildContext(network);
@@ -112,7 +116,7 @@ public static class TheseusSolverService
             data.Loads, data.FixedPositions,
             data.QInit, data.LowerBounds, data.UpperBounds);
 
-        var result = solver.SolvePseudoinverse(targetFreeXyz, regularization, useL2, maxL1Iter, useAugmented, enforceZeroRx);
+        var result = solver.SolvePseudoinverse(targetFreeXyz, regularization, useL2, maxL1Iter, useAugmented, enforceZeroRx, solveForQ);
         return BuildResult(network, result, context);
     }
 
