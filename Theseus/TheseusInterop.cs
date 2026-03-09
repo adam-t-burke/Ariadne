@@ -200,7 +200,7 @@ internal static class TheseusInterop
         IntPtr handle,
         double[] target_free_xyz, double regularization,
         int use_l2, nuint max_l1_iter, int use_augmented, int enforce_zero_rx,
-        int solve_for_q,
+        int enforce_zero_ry, int enforce_zero_rz, int solve_for_q,
         double[] out_q, double[] out_xyz, double[] out_lengths,
         double[] out_forces, double[] out_reactions);
 
