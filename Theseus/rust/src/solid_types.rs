@@ -1,5 +1,6 @@
-//! Data types for solid (continuum) FEA: tet4 elements.
+//! Data types for solid (continuum) FEA: tet4 elements with 4-point quadrature.
 
+use crate::solid_assembly::NUM_GP;
 use crate::sparse::SparseColMatOwned;
 use crate::types::{Factorization, TheseusError, find_nz_index};
 use ndarray::Array2;
@@ -102,9 +103,9 @@ pub struct SolidCache {
     pub dof_map: SolidDofMap,
     pub displacements: Vec<f64>,
     pub rhs: Vec<f64>,
-    pub stresses: Vec<[f64; 6]>,
-    pub strains: Vec<[f64; 6]>,
-    pub von_mises: Vec<f64>,
+    pub stresses: Vec<[[f64; 6]; NUM_GP]>,
+    pub strains: Vec<[[f64; 6]; NUM_GP]>,
+    pub von_mises: Vec<[f64; NUM_GP]>,
     pub reactions: Vec<f64>,
 }
 
@@ -121,7 +122,7 @@ impl SolidCache {
         let n_free = problem.dof_map.num_free_dofs;
         let n_total = problem.dof_map.num_total_dofs;
 
-        let mut triplets: Vec<(u32, u32, f64)> = Vec::new();
+        let mut triplets: Vec<(u32, u32, f64)> = Vec::with_capacity(ne * 144 + n_free);
         for e in 0..ne {
             let nodes = &problem.elements[e];
             let mut global_dofs = [0usize; 12];
@@ -181,9 +182,9 @@ impl SolidCache {
             dof_map: problem.dof_map.clone(),
             displacements: vec![0.0; n_free],
             rhs: vec![0.0; n_free],
-            stresses: vec![[0.0; 6]; ne],
-            strains: vec![[0.0; 6]; ne],
-            von_mises: vec![0.0; ne],
+            stresses: vec![[[0.0; 6]; NUM_GP]; ne],
+            strains: vec![[[0.0; 6]; NUM_GP]; ne],
+            von_mises: vec![[0.0; NUM_GP]; ne],
             reactions: vec![0.0; n_total],
         })
     }
@@ -194,7 +195,7 @@ pub struct SolidResult {
     pub displacements: Vec<f64>,
     pub deformed_positions: Array2<f64>,
     pub reactions: Vec<f64>,
-    pub stresses: Vec<[f64; 6]>,
-    pub strains: Vec<[f64; 6]>,
-    pub von_mises: Vec<f64>,
+    pub stresses: Vec<[[f64; 6]; NUM_GP]>,
+    pub strains: Vec<[[f64; 6]; NUM_GP]>,
+    pub von_mises: Vec<[f64; NUM_GP]>,
 }

@@ -4,6 +4,14 @@ using System.Runtime.InteropServices;
 namespace Theseus.Interop;
 
 /// <summary>
+/// Number of Gauss points per tet4 element. Must match NUM_GP in the Rust core.
+/// </summary>
+public static class SolidConstants
+{
+    public const int NumGP = 4;
+}
+
+/// <summary>
 /// Result of a solid FEA forward solve.
 /// All arrays use row-major layout.
 /// </summary>
@@ -18,10 +26,16 @@ public sealed class SolidSolverResult
     /// <summary>Flat reaction forces at all nodes, length num_nodes * 3.</summary>
     public double[] Reactions { get; init; } = [];
 
-    /// <summary>Flat stress tensor per element [xx,yy,zz,xy,yz,xz], length num_elements * 6.</summary>
+    /// <summary>
+    /// Per-GP stress tensors: [elem0_gp0(6), elem0_gp1(6), ..., elem0_gp3(6), elem1_gp0(6), ...].
+    /// Length = num_elements * NumGP * 6.
+    /// </summary>
     public double[] Stresses { get; init; } = [];
 
-    /// <summary>Von Mises stress per element, length num_elements.</summary>
+    /// <summary>
+    /// Per-GP von Mises: [elem0_gp0, elem0_gp1, ..., elem0_gp3, elem1_gp0, ...].
+    /// Length = num_elements * NumGP.
+    /// </summary>
     public double[] VonMises { get; init; } = [];
 }
 
@@ -146,11 +160,12 @@ public sealed class SolidSolver : IDisposable
         int nn = _numNodes;
         int ne = _numElements;
 
+        int ngp = SolidConstants.NumGP;
         var displacements = new double[nn * 3];
         var deformedXyz = new double[nn * 3];
         var reactions = new double[nn * 3];
-        var stresses = new double[ne * 6];
-        var vonMises = new double[ne];
+        var stresses = new double[ne * ngp * 6];
+        var vonMises = new double[ne * ngp];
 
         Check(SolidInterop.theseus_solid_solve_forward(
             _handle, displacements, deformedXyz,

@@ -1,8 +1,12 @@
-//! Forward FEA solver for tet4 solid elements.
+//! Forward FEA solver for tet4 solid elements with 4-point quadrature.
 //!
 //! Pipeline: assemble K → build RHS → factorise → solve K u = f → post-process.
 
-use crate::solid_assembly::{assemble_global_k, assemble_loads, tet4_b_matrix, constitutive_matrix};
+use crate::solid_assembly::{
+    assemble_global_k, assemble_loads, extract_tet_coords, precompute_d_matrices,
+    tet4_b_matrix_at, tet4_element_stiffness_quad,
+    TET4_GAUSS_POINTS, NUM_GP,
+};
 use crate::solid_types::{SolidCache, SolidProblem, SolidResult};
 use crate::types::{Factorization, FactorizationStrategy, TheseusError};
 use rayon::prelude::*;
@@ -57,48 +61,38 @@ fn factor_and_solve(cache: &mut SolidCache) -> Result<(), TheseusError> {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  Post-processing: stress, strain, von Mises, reactions
+//  Post-processing: merged stress/strain/VM + reactions
 // ─────────────────────────────────────────────────────────────
+
+/// Per-element result produced by the merged parallel pass.
+struct ElemPostResult {
+    stresses: [[f64; 6]; NUM_GP],
+    strains: [[f64; 6]; NUM_GP],
+    von_mises: [f64; NUM_GP],
+    reaction_contribs: [f64; 12],
+    global_dofs: [usize; 12],
+}
 
 fn post_process(
     cache: &mut SolidCache,
     problem: &SolidProblem,
+    u_full: &[f64],
 ) -> Result<(), TheseusError> {
     let ne = problem.num_elements;
-    let n_total = cache.dof_map.num_total_dofs;
-
-    let mut u_full = vec![0.0; n_total];
-    for (fi, &gi) in cache.dof_map.free_dofs.iter().enumerate() {
-        u_full[gi] = cache.displacements[fi];
-    }
 
     let positions = &problem.node_positions;
-    let materials = &problem.materials;
     let element_props = &problem.element_props;
     let elements = &problem.elements;
 
-    // Per-element stress/strain/von Mises (parallel)
-    let elem_results: Vec<([f64; 6], [f64; 6], f64)> = (0..ne)
+    let d_matrices = precompute_d_matrices(problem);
+
+    let elem_results: Vec<ElemPostResult> = (0..ne)
         .into_par_iter()
         .map(|e| {
             let nodes = &elements[e];
-            let mat = &materials[element_props[e].material_idx];
+            let coords = extract_tet_coords(positions, nodes);
+            let d = &d_matrices[element_props[e].material_idx];
 
-            let coords = [
-                [positions[[nodes[0], 0]], positions[[nodes[0], 1]], positions[[nodes[0], 2]]],
-                [positions[[nodes[1], 0]], positions[[nodes[1], 1]], positions[[nodes[1], 2]]],
-                [positions[[nodes[2], 0]], positions[[nodes[2], 1]], positions[[nodes[2], 2]]],
-                [positions[[nodes[3], 0]], positions[[nodes[3], 1]], positions[[nodes[3], 2]]],
-            ];
-
-            let (b, _vol) = match tet4_b_matrix(&coords) {
-                Some(bv) => bv,
-                None => return ([0.0; 6], [0.0; 6], 0.0),
-            };
-
-            let d = constitutive_matrix(mat.e, mat.nu);
-
-            // u_e: element displacement vector (12 entries)
             let mut u_e = [0.0f64; 12];
             for (i, &ni) in nodes.iter().enumerate() {
                 for dd in 0..3 {
@@ -106,96 +100,96 @@ fn post_process(
                 }
             }
 
-            // strain = B * u_e  (6 entries)
-            let mut strain = [0.0f64; 6];
-            for i in 0..6 {
-                let mut s = 0.0;
-                for j in 0..12 {
-                    s += b[i][j] * u_e[j];
+            let mut gp_stress = [[0.0f64; 6]; NUM_GP];
+            let mut gp_strain = [[0.0f64; 6]; NUM_GP];
+            let mut gp_vm = [0.0f64; NUM_GP];
+
+            for (gp, &(pt, _w)) in TET4_GAUSS_POINTS.iter().enumerate() {
+                let (b, _) = match tet4_b_matrix_at(&coords, pt[0], pt[1], pt[2]) {
+                    Some(bv) => bv,
+                    None => {
+                        return ElemPostResult {
+                            stresses: [[0.0; 6]; NUM_GP],
+                            strains: [[0.0; 6]; NUM_GP],
+                            von_mises: [0.0; NUM_GP],
+                            reaction_contribs: [0.0; 12],
+                            global_dofs: [0; 12],
+                        };
+                    }
+                };
+
+                let mut strain = [0.0f64; 6];
+                for i in 0..6 {
+                    let mut s = 0.0;
+                    for j in 0..12 {
+                        s += b[i][j] * u_e[j];
+                    }
+                    strain[i] = s;
                 }
-                strain[i] = s;
+
+                let mut stress = [0.0f64; 6];
+                for i in 0..6 {
+                    let mut s = 0.0;
+                    for j in 0..6 {
+                        s += d[i][j] * strain[j];
+                    }
+                    stress[i] = s;
+                }
+
+                let sxx = stress[0]; let syy = stress[1]; let szz = stress[2];
+                let sxy = stress[3]; let syz = stress[4]; let sxz = stress[5];
+                let vm = (0.5 * ((sxx - syy).powi(2) + (syy - szz).powi(2) + (szz - sxx).powi(2)
+                    + 6.0 * (sxy * sxy + syz * syz + sxz * sxz))).sqrt();
+
+                gp_stress[gp] = stress;
+                gp_strain[gp] = strain;
+                gp_vm[gp] = vm;
             }
 
-            // stress = D * strain  (6 entries)
-            let mut stress = [0.0f64; 6];
-            for i in 0..6 {
+            let ke = tet4_element_stiffness_quad(&coords, d)
+                .unwrap_or([[0.0; 12]; 12]);
+
+            let mut r_local = [0.0f64; 12];
+            for li in 0..12 {
                 let mut s = 0.0;
-                for j in 0..6 {
-                    s += d[i][j] * strain[j];
+                for lj in 0..12 {
+                    s += ke[li][lj] * u_e[lj];
                 }
-                stress[i] = s;
+                r_local[li] = s;
             }
 
-            // von Mises
-            let sxx = stress[0]; let syy = stress[1]; let szz = stress[2];
-            let sxy = stress[3]; let syz = stress[4]; let sxz = stress[5];
-            let vm = (0.5 * ((sxx - syy).powi(2) + (syy - szz).powi(2) + (szz - sxx).powi(2)
-                + 6.0 * (sxy * sxy + syz * syz + sxz * sxz))).sqrt();
+            let mut global_dofs = [0usize; 12];
+            for (i, &ni) in nodes.iter().enumerate() {
+                for dd in 0..3 {
+                    global_dofs[i * 3 + dd] = ni * 3 + dd;
+                }
+            }
 
-            (stress, strain, vm)
+            ElemPostResult {
+                stresses: gp_stress,
+                strains: gp_strain,
+                von_mises: gp_vm,
+                reaction_contribs: r_local,
+                global_dofs,
+            }
         })
         .collect();
 
-    for (e, (stress, strain, vm)) in elem_results.into_iter().enumerate() {
-        cache.stresses[e] = stress;
-        cache.strains[e] = strain;
-        cache.von_mises[e] = vm;
-    }
-
-    // Reactions: R = K_full * u - f  (parallel fold/reduce)
+    // Scatter results into cache
     let n_reactions = cache.reactions.len();
+    for v in cache.reactions.iter_mut() { *v = 0.0; }
 
-    let reactions = (0..ne)
-        .into_par_iter()
-        .fold(
-            || vec![0.0; n_reactions],
-            |mut buf, e| {
-                let nodes = &elements[e];
-                let mat = &materials[element_props[e].material_idx];
+    for (e, res) in elem_results.into_iter().enumerate() {
+        cache.stresses[e] = res.stresses;
+        cache.strains[e] = res.strains;
+        cache.von_mises[e] = res.von_mises;
 
-                let coords = [
-                    [positions[[nodes[0], 0]], positions[[nodes[0], 1]], positions[[nodes[0], 2]]],
-                    [positions[[nodes[1], 0]], positions[[nodes[1], 1]], positions[[nodes[1], 2]]],
-                    [positions[[nodes[2], 0]], positions[[nodes[2], 1]], positions[[nodes[2], 2]]],
-                    [positions[[nodes[3], 0]], positions[[nodes[3], 1]], positions[[nodes[3], 2]]],
-                ];
-
-                let (b, vol) = match tet4_b_matrix(&coords) {
-                    Some(bv) => bv,
-                    None => return buf,
-                };
-
-                let d = constitutive_matrix(mat.e, mat.nu);
-                let ke = crate::solid_assembly::tet4_element_stiffness(&b, &d, vol);
-
-                let mut global_dofs = [0usize; 12];
-                for (i, &ni) in nodes.iter().enumerate() {
-                    for dd in 0..3 {
-                        global_dofs[i * 3 + dd] = ni * 3 + dd;
-                    }
-                }
-
-                for (li, &gi) in global_dofs.iter().enumerate() {
-                    let mut ke_u = 0.0;
-                    for (lj, &gj) in global_dofs.iter().enumerate() {
-                        ke_u += ke[li][lj] * u_full[gj];
-                    }
-                    buf[gi] += ke_u;
-                }
-                buf
-            },
-        )
-        .reduce(
-            || vec![0.0; n_reactions],
-            |mut a_buf, b_buf| {
-                for (a, b) in a_buf.iter_mut().zip(b_buf.iter()) {
-                    *a += *b;
-                }
-                a_buf
-            },
-        );
-
-    cache.reactions.copy_from_slice(&reactions);
+        for (li, &gi) in res.global_dofs.iter().enumerate() {
+            if gi < n_reactions {
+                cache.reactions[gi] += res.reaction_contribs[li];
+            }
+        }
+    }
 
     // Subtract applied loads
     for load in &problem.loads {
@@ -206,22 +200,19 @@ fn post_process(
 
     if problem.include_self_weight {
         for e in 0..ne {
-            let nodes = &elements[e];
-            let mat = &materials[element_props[e].material_idx];
+            let nodes = &problem.elements[e];
+            let mat = &problem.materials[problem.element_props[e].material_idx];
+            let coords = extract_tet_coords(&problem.node_positions, nodes);
 
-            let coords = [
-                [positions[[nodes[0], 0]], positions[[nodes[0], 1]], positions[[nodes[0], 2]]],
-                [positions[[nodes[1], 0]], positions[[nodes[1], 1]], positions[[nodes[1], 2]]],
-                [positions[[nodes[2], 0]], positions[[nodes[2], 1]], positions[[nodes[2], 2]]],
-                [positions[[nodes[3], 0]], positions[[nodes[3], 1]], positions[[nodes[3], 2]]],
-            ];
-
-            if let Some((_, vol)) = tet4_b_matrix(&coords) {
-                let weight = mat.density * vol;
-                let quarter_weight = weight * 0.25;
-                for &ni in nodes {
-                    for d in 0..3 {
-                        cache.reactions[ni * 3 + d] -= quarter_weight * problem.gravity[d];
+            for &(pt, w) in &TET4_GAUSS_POINTS {
+                if let Some((_, abs_det_j)) = tet4_b_matrix_at(&coords, pt[0], pt[1], pt[2]) {
+                    let n_vals = crate::solid_assembly::tet4_shape_functions(pt[0], pt[1], pt[2]);
+                    let factor = w * abs_det_j * mat.density;
+                    for node_local in 0..4 {
+                        let ni = nodes[node_local];
+                        for d in 0..3 {
+                            cache.reactions[ni * 3 + d] -= factor * n_vals[node_local] * problem.gravity[d];
+                        }
                     }
                 }
             }
@@ -254,10 +245,7 @@ pub fn solve_solid(
     // 3. Factor and solve
     factor_and_solve(cache)?;
 
-    // 4. Post-process
-    post_process(cache, problem)?;
-
-    // 5. Build full displacement vector and deformed positions
+    // 4. Build full displacement vector (once, shared with post_process)
     let nn = problem.num_nodes;
     let n_total = cache.dof_map.num_total_dofs;
     let mut u_full = vec![0.0; n_total];
@@ -265,6 +253,10 @@ pub fn solve_solid(
         u_full[gi] = cache.displacements[fi];
     }
 
+    // 5. Post-process (stress, strain, VM, reactions -- single merged pass)
+    post_process(cache, problem, &u_full)?;
+
+    // 6. Deformed positions
     let mut deformed = problem.node_positions.clone();
     for i in 0..nn {
         for d in 0..3 {
@@ -272,12 +264,14 @@ pub fn solve_solid(
         }
     }
 
-    // 6. Validate
-    for (e, &vm) in cache.von_mises.iter().enumerate() {
-        if !vm.is_finite() {
-            return Err(TheseusError::Solver(format!(
-                "Solid FEA produced non-finite von Mises stress at element {e}.",
-            )));
+    // 7. Validate
+    for (e, gp_vm) in cache.von_mises.iter().enumerate() {
+        for (gp, &vm) in gp_vm.iter().enumerate() {
+            if !vm.is_finite() {
+                return Err(TheseusError::Solver(format!(
+                    "Solid FEA produced non-finite von Mises stress at element {e}, GP {gp}.",
+                )));
+            }
         }
     }
 

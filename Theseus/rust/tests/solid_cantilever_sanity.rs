@@ -59,7 +59,9 @@ fn skewed_tet_balances_load_and_deflects_downward() {
     assert!(ux.is_finite() && uy.is_finite() && uz.is_finite());
     assert!(uz < 0.0, "loaded node should move downward");
 
-    for vm in result.von_mises {
-        assert!(vm.is_finite());
+    for gp_vm in result.von_mises {
+        for vm in gp_vm {
+            assert!(vm.is_finite());
+        }
     }
 }
