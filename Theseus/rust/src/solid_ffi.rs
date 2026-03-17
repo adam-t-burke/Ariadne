@@ -203,8 +203,8 @@ unsafe fn solid_create_inner(
 /// - `out_displacements`: num_nodes * 3
 /// - `out_deformed_xyz`: num_nodes * 3
 /// - `out_reactions`: num_nodes * 3
-/// - `out_stresses`: num_elements * 6
-/// - `out_von_mises`: num_elements
+/// - `out_stresses`: num_elements * 4 * 6  (4 GPs × 6 components per element)
+/// - `out_von_mises`: num_elements * 4     (4 GPs per element)
 #[no_mangle]
 pub unsafe extern "C" fn theseus_solid_solve_forward(
     handle: *mut SolidHandle,
@@ -224,6 +224,7 @@ pub unsafe extern "C" fn theseus_solid_solve_forward(
 
         let nn = h.problem.num_nodes;
         let ne = h.problem.num_elements;
+        let ngp = crate::solid_assembly::NUM_GP;
 
         // Displacements (flat, num_nodes * 3)
         slice::from_raw_parts_mut(out_displacements, nn * 3)
@@ -241,17 +242,23 @@ pub unsafe extern "C" fn theseus_solid_solve_forward(
         slice::from_raw_parts_mut(out_reactions, nn * 3)
             .copy_from_slice(&result.reactions);
 
-        // Stresses (flat, num_elements * 6: [xx,yy,zz,xy,yz,xz] per element)
-        let stress_out = slice::from_raw_parts_mut(out_stresses, ne * 6);
+        // Stresses: [elem0_gp0(6), elem0_gp1(6), ..., elem0_gp3(6), elem1_gp0(6), ...]
+        let stress_out = slice::from_raw_parts_mut(out_stresses, ne * ngp * 6);
         for e in 0..ne {
-            for c in 0..6 {
-                stress_out[e * 6 + c] = result.stresses[e][c];
+            for gp in 0..ngp {
+                for c in 0..6 {
+                    stress_out[e * ngp * 6 + gp * 6 + c] = result.stresses[e][gp][c];
+                }
             }
         }
 
-        // Von Mises (flat, num_elements)
-        slice::from_raw_parts_mut(out_von_mises, ne)
-            .copy_from_slice(&result.von_mises);
+        // Von Mises: [elem0_gp0, elem0_gp1, ..., elem0_gp3, elem1_gp0, ...]
+        let vm_out = slice::from_raw_parts_mut(out_von_mises, ne * ngp);
+        for e in 0..ne {
+            for gp in 0..ngp {
+                vm_out[e * ngp + gp] = result.von_mises[e][gp];
+            }
+        }
 
         Ok(())
     }))

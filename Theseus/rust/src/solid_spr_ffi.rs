@@ -26,11 +26,14 @@ where
 
 /// Perform SPR nodal stress recovery and principal stress decomposition.
 ///
+/// Accepts per-GP stresses (4 Gauss points per element) and averages them
+/// to one stress per element before running SPR recovery.
+///
 /// # Safety
 /// All pointers must be valid for the given lengths:
 /// - `node_positions`: `num_nodes * 3` f64
 /// - `elements`: `num_elements * 4` i32
-/// - `element_stresses`: `num_elements * 6` f64
+/// - `element_stresses`: `num_elements * NUM_GP * 6` f64 (4 GPs × 6 components)
 /// - `nodal_stresses`: `num_nodes * 6` f64 (output)
 /// - `element_errors`: `num_elements` f64 (output)
 /// - `principal_values`: `num_nodes * 3` f64 (output)
@@ -51,13 +54,13 @@ pub unsafe extern "C" fn theseus_solid_spr_recover(
     principal_vectors: *mut f64,
     nodal_von_mises: *mut f64,
 ) -> i32 {
+    let ngp = crate::solid_assembly::NUM_GP;
+
     spr_ffi_guard(AssertUnwindSafe(|| {
-        // Marshal node positions
         let pos_slice = slice::from_raw_parts(node_positions, num_nodes * 3);
         let positions = Array2::from_shape_vec((num_nodes, 3), pos_slice.to_vec())
             .map_err(|e| TheseusError::Shape(format!("node_positions: {e}")))?;
 
-        // Marshal elements
         let elem_slice = slice::from_raw_parts(elements, num_elements * 4);
         let elems: Vec<[usize; 4]> = (0..num_elements)
             .map(|e| [
@@ -68,20 +71,26 @@ pub unsafe extern "C" fn theseus_solid_spr_recover(
             ])
             .collect();
 
-        // Marshal element stresses
-        let stress_slice = slice::from_raw_parts(element_stresses, num_elements * 6);
+        // Average 4 GP stresses per element down to 1 for SPR
+        let stress_slice = slice::from_raw_parts(element_stresses, num_elements * ngp * 6);
         let elem_stresses: Vec<[f64; 6]> = (0..num_elements)
             .map(|e| {
-                let mut s = [0.0f64; 6];
-                s.copy_from_slice(&stress_slice[e * 6..(e + 1) * 6]);
-                s
+                let mut avg = [0.0f64; 6];
+                for gp in 0..ngp {
+                    for c in 0..6 {
+                        avg[c] += stress_slice[e * ngp * 6 + gp * 6 + c];
+                    }
+                }
+                let inv = 1.0 / ngp as f64;
+                for c in 0..6 {
+                    avg[c] *= inv;
+                }
+                avg
             })
             .collect();
 
-        // Run SPR recovery
         let (nodal_s, elem_err) = spr_recover_nodal_stresses(&positions, &elems, &elem_stresses);
 
-        // Write nodal stresses
         let out_nodal = slice::from_raw_parts_mut(nodal_stresses, num_nodes * 6);
         for (i, s) in nodal_s.iter().enumerate() {
             for c in 0..6 {
@@ -89,11 +98,9 @@ pub unsafe extern "C" fn theseus_solid_spr_recover(
             }
         }
 
-        // Write element errors
         let out_errors = slice::from_raw_parts_mut(element_errors, num_elements);
         out_errors.copy_from_slice(&elem_err);
 
-        // Compute principal stresses and von Mises for each node
         let out_pvals = slice::from_raw_parts_mut(principal_values, num_nodes * 3);
         let out_pvecs = slice::from_raw_parts_mut(principal_vectors, num_nodes * 9);
         let out_vm = slice::from_raw_parts_mut(nodal_von_mises, num_nodes);

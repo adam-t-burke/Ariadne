@@ -113,12 +113,15 @@ namespace Ariadne.FEA.Components
                 elements[e * 4 + 3] = elem[3];
             }
 
-            // Marshal element stresses from the solve result
-            var elemStresses = new double[ne * 6];
+            // Marshal element stresses: expand element-averaged stresses to
+            // 4-GP layout expected by the native SPR FFI (identical per GP for tet4).
+            int ngp = Theseus.Interop.SolidConstants.NumGP;
+            var elemStresses = new double[ne * ngp * 6];
             for (int e = 0; e < ne; e++)
             {
-                for (int c = 0; c < 6; c++)
-                    elemStresses[e * 6 + c] = result.SolidStresses[e, c];
+                for (int gp = 0; gp < ngp; gp++)
+                    for (int c = 0; c < 6; c++)
+                        elemStresses[e * ngp * 6 + gp * 6 + c] = result.SolidStresses[e, c];
             }
 
             // Allocate output buffers

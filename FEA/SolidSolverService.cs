@@ -120,6 +120,7 @@ public static class SolidSolverService
         var mesh = network.Mesh;
         int nn = mesh.Nn;
         int ne = mesh.Ne;
+        int ngp = SolidConstants.NumGP;
         double fromMeters = GetLengthScaleFromMeters();
 
         var displacements = new Vector3d[nn];
@@ -144,10 +145,27 @@ public static class SolidSolverService
                 result.Reactions[ni * 3 + 2]);
         }
 
+        // Average GP stresses to one per element for downstream consumers
         var stresses = new double[ne, 6];
+        double inv = 1.0 / ngp;
         for (int e = 0; e < ne; e++)
             for (int c = 0; c < 6; c++)
-                stresses[e, c] = result.Stresses[e * 6 + c];
+            {
+                double sum = 0;
+                for (int gp = 0; gp < ngp; gp++)
+                    sum += result.Stresses[e * ngp * 6 + gp * 6 + c];
+                stresses[e, c] = sum * inv;
+            }
+
+        // Average GP von Mises to one per element for visualization
+        var vonMises = new double[ne];
+        for (int e = 0; e < ne; e++)
+        {
+            double sum = 0;
+            for (int gp = 0; gp < ngp; gp++)
+                sum += result.VonMises[e * ngp + gp];
+            vonMises[e] = sum * inv;
+        }
 
         var deformedNodes = new Point3d[nn];
         for (int i = 0; i < nn; i++)
@@ -164,7 +182,7 @@ public static class SolidSolverService
             Reactions = reactions,
             ReactionNodeIndices = reactionNodeIndices,
             Stresses = stresses,
-            VonMises = result.VonMises,
+            VonMises = vonMises,
             DeformedNodes = deformedNodes,
         };
     }
