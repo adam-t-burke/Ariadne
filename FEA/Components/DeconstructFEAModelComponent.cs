@@ -72,14 +72,27 @@ namespace Ariadne.FEA.Components
             if (model.HasSolidElements)
             {
                 solidMesh = model.SolidMesh!;
+                int solidOffset = model.HasBarElements ? model.BarGraph!.Nn : 0;
                 for (int i = 0; i < solidMesh.TetNodes.Count; i++)
                 {
                     allNodes.Add(new Node
                     {
                         Value = solidMesh.TetNodes[i],
-                        Index = model.HasBarElements
-                            ? model.BarGraph!.Nn + i
-                            : i
+                        Index = solidOffset + i
+                    });
+                }
+            }
+
+            if (model.HasShellElements)
+            {
+                int shellOffset = (model.HasBarElements ? model.BarGraph!.Nn : 0)
+                                + (model.HasSolidElements ? model.SolidMesh!.Nn : 0);
+                for (int i = 0; i < model.ShellMesh!.Vertices.Count; i++)
+                {
+                    allNodes.Add(new Node
+                    {
+                        Value = (Point3d)model.ShellMesh.Vertices[i],
+                        Index = shellOffset + i
                     });
                 }
             }

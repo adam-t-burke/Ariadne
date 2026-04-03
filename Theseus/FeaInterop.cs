@@ -21,8 +21,9 @@ internal static class FeaInterop
         nuint num_sections, double[] sections,
         nuint[] element_props,
         nuint num_supports, nuint[] supports,
-        nuint num_loads, double[] loads_data, nuint[] load_nodes,
-        int include_self_weight, double[] gravity);
+        nuint num_loads, double[] loads_data, double[] load_moments, nuint[] load_nodes,
+        int include_self_weight, double[] gravity,
+        byte beam_formulation);
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
     public static extern void theseus_fea_free(IntPtr handle);
@@ -86,7 +87,8 @@ internal static class FeaInterop
         double[] out_displacements, double[] out_reactions,
         double[] out_axial_forces, double[] out_stresses,
         double[] out_strains, double[] out_deformed_xyz,
-        double[] out_utilization);
+        double[] out_utilization,
+        double[] out_internal_forces);
 
     // ── Optimization ─────────────────────────────────────────
 

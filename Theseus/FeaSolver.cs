@@ -17,6 +17,7 @@ public sealed class FeaSolverResult
     public double[] Strains { get; init; } = [];
     public double[] DeformedXyz { get; init; } = [];
     public double[] Utilization { get; init; } = [];
+    public double[] InternalForces { get; init; } = [];
     public double[] NodePositions { get; init; } = [];
     public double[] Areas { get; init; } = [];
     public int Iterations { get; init; }
@@ -32,15 +33,17 @@ public sealed class FeaSolver : IDisposable
     private readonly int _numNodes;
     private readonly int _numElements;
     private readonly int _numSections;
+    private readonly int _dofsPerNode;
     private bool _disposed;
     private FeaInterop.FeaNativeProgressCallback? _pinnedCallback;
 
-    private FeaSolver(IntPtr handle, int numNodes, int numElements, int numSections)
+    private FeaSolver(IntPtr handle, int numNodes, int numElements, int numSections, int dofsPerNode)
     {
         _handle = handle;
         _numNodes = numNodes;
         _numElements = numElements;
         _numSections = numSections;
+        _dofsPerNode = dofsPerNode;
     }
 
     ~FeaSolver() { Dispose(); }
@@ -67,9 +70,12 @@ public sealed class FeaSolver : IDisposable
         int numSections, double[] sections,
         int[] elementProps,
         int numSupports, int[] supports,
-        int numLoads, double[] loadForces, int[] loadNodes,
-        bool includeSelfWeight, double[] gravity)
+        int numLoads, double[] loadForces, double[] loadMoments, int[] loadNodes,
+        bool includeSelfWeight, double[] gravity,
+        byte beamFormulation = 0)
     {
+        int dofsPerNode = beamFormulation == 0 ? 3 : 6;
+
         var handle = FeaInterop.theseus_fea_create(
             (nuint)numNodes, (nuint)numElements,
             nodePositions, ToNuint(edgeNodes),
@@ -77,13 +83,14 @@ public sealed class FeaSolver : IDisposable
             (nuint)numSections, sections,
             ToNuint(elementProps),
             (nuint)numSupports, ToNuint(supports),
-            (nuint)numLoads, loadForces, ToNuint(loadNodes),
-            includeSelfWeight ? 1 : 0, gravity);
+            (nuint)numLoads, loadForces, loadMoments, ToNuint(loadNodes),
+            includeSelfWeight ? 1 : 0, gravity,
+            beamFormulation);
 
         if (handle == IntPtr.Zero)
             throw new TheseusException(TheseusSolver.GetLastError(), -1);
 
-        return new FeaSolver(handle, numNodes, numElements, numSections);
+        return new FeaSolver(handle, numNodes, numElements, numSections, dofsPerNode);
     }
 
     // ── Objectives ───────────────────────────────────────────
@@ -170,19 +177,21 @@ public sealed class FeaSolver : IDisposable
         ThrowIfDisposed();
         int nn = _numNodes;
         int ne = _numElements;
-        int nTotal = nn * 3;
+        int nTotal = nn * _dofsPerNode;
 
         var displacements = new double[nTotal];
         var reactions = new double[nTotal];
         var axialForces = new double[ne];
         var stresses = new double[ne];
         var strains = new double[ne];
-        var deformedXyz = new double[nTotal];
+        var deformedXyz = new double[nn * 3];
         var utilization = new double[ne];
+        var internalForces = _dofsPerNode == 6 ? new double[ne * 12] : [];
 
         Check(FeaInterop.theseus_fea_solve_forward(
             _handle, displacements, reactions, axialForces,
-            stresses, strains, deformedXyz, utilization));
+            stresses, strains, deformedXyz, utilization,
+            internalForces));
 
         return new FeaSolverResult
         {
@@ -193,6 +202,7 @@ public sealed class FeaSolver : IDisposable
             Strains = strains,
             DeformedXyz = deformedXyz,
             Utilization = utilization,
+            InternalForces = internalForces,
         };
     }
 

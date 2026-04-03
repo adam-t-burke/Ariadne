@@ -1,13 +1,13 @@
-//! Data types for solid (continuum) FEA: tet4 elements with 4-point quadrature.
+//! Data types for shell FEA: triangle/quad elements with 6 DOFs per node.
+//! Prioritized for future Cosserat/Micropolar expansion.
 
-use crate::solid_assembly::NUM_GP;
 use crate::sparse::SparseColMatOwned;
 use crate::types::{Factorization, TheseusError, find_nz_index};
 use ndarray::Array2;
 use std::fmt;
 
 #[derive(Debug, Clone)]
-pub struct SolidMaterial {
+pub struct ShellMaterial {
     pub e: f64,
     pub nu: f64,
     pub density: f64,
@@ -15,24 +15,31 @@ pub struct SolidMaterial {
 }
 
 #[derive(Debug, Clone)]
-pub struct SolidElementProps {
-    pub material_idx: usize,
+pub struct ShellSection {
+    pub offset: f64,
 }
 
 #[derive(Debug, Clone)]
-pub struct SolidLoad {
+pub struct ShellElementProps {
+    pub material_idx: usize,
+    pub section_idx: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShellLoad {
     pub node_idx: usize,
     pub force: [f64; 3],
+    pub moment: [f64; 3],
 }
 
 #[derive(Debug, Clone)]
-pub struct SolidSupport {
+pub struct ShellSupport {
     pub node_idx: usize,
-    pub fixed_dofs: [bool; 3],
+    pub fixed_dofs: [bool; 6], // 3 translations, 3 rotations
 }
 
 #[derive(Debug, Clone)]
-pub struct SolidDofMap {
+pub struct ShellDofMap {
     pub num_nodes: usize,
     pub num_total_dofs: usize,
     pub num_free_dofs: usize,
@@ -42,14 +49,14 @@ pub struct SolidDofMap {
     pub fixed_dofs: Vec<usize>,
 }
 
-impl SolidDofMap {
-    pub fn from_supports(num_nodes: usize, supports: &[SolidSupport]) -> Self {
-        let num_total = num_nodes * 3;
+impl ShellDofMap {
+    pub fn from_supports(num_nodes: usize, supports: &[ShellSupport]) -> Self {
+        let num_total = num_nodes * 6;
         let mut is_fixed = vec![false; num_total];
         for sup in supports {
-            for d in 0..3 {
+            for d in 0..6 {
                 if sup.fixed_dofs[d] {
-                    is_fixed[sup.node_idx * 3 + d] = true;
+                    is_fixed[sup.node_idx * 6 + d] = true;
                 }
             }
         }
@@ -77,59 +84,60 @@ impl SolidDofMap {
 }
 
 #[derive(Debug, Clone)]
-pub struct SolidElementToNz {
+pub struct ShellElementToNz {
     pub entries: Vec<Vec<(usize, usize, usize)>>,
 }
 
 #[derive(Debug)]
-pub struct SolidProblem {
+pub struct ShellProblem {
     pub num_nodes: usize,
     pub num_elements: usize,
-    pub materials: Vec<SolidMaterial>,
-    pub element_props: Vec<SolidElementProps>,
-    pub supports: Vec<SolidSupport>,
-    pub loads: Vec<SolidLoad>,
+    pub materials: Vec<ShellMaterial>,
+    pub sections: Vec<ShellSection>,
+    pub element_props: Vec<ShellElementProps>,
+    pub supports: Vec<ShellSupport>,
+    pub loads: Vec<ShellLoad>,
     pub node_positions: Array2<f64>,
+    pub node_thicknesses: Vec<f64>,
     pub elements: Vec<Vec<usize>>,
-    pub dof_map: SolidDofMap,
+    pub dof_map: ShellDofMap,
     pub include_self_weight: bool,
     pub gravity: [f64; 3],
 }
 
-pub struct SolidCache {
+pub struct ShellCache {
     pub k_matrix: SparseColMatOwned,
     pub factorization: Option<Factorization>,
-    pub element_to_nz: SolidElementToNz,
-    pub dof_map: SolidDofMap,
+    pub element_to_nz: ShellElementToNz,
     pub displacements: Vec<f64>,
     pub rhs: Vec<f64>,
-    pub stresses: Vec<[[f64; 6]; NUM_GP]>,
-    pub strains: Vec<[[f64; 6]; NUM_GP]>,
-    pub von_mises: Vec<[f64; NUM_GP]>,
     pub reactions: Vec<f64>,
+    pub dof_map: ShellDofMap,
 }
 
-impl fmt::Debug for SolidCache {
+impl fmt::Debug for ShellCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SolidCache(n_free_dof={}, n_elem={})",
-            self.dof_map.num_free_dofs, self.stresses.len())
+        write!(f, "ShellCache(n_free_dof={}, n_elem={})",
+            self.dof_map.num_free_dofs, self.element_to_nz.entries.len())
     }
 }
 
-impl SolidCache {
-    pub fn new(problem: &SolidProblem) -> Result<Self, TheseusError> {
+impl ShellCache {
+    pub fn new(problem: &ShellProblem) -> Result<Self, TheseusError> {
         let ne = problem.num_elements;
         let n_free = problem.dof_map.num_free_dofs;
         let n_total = problem.dof_map.num_total_dofs;
 
+        // Build K's sparsity pattern from element connectivity
         let mut triplets: Vec<(u32, u32, f64)> = Vec::new();
         for e in 0..ne {
             let nodes = &problem.elements[e];
-            let num_dofs = nodes.len() * 3;
+            let num_nodes = nodes.len();
+            let num_dofs = num_nodes * 6;
             let mut global_dofs = Vec::with_capacity(num_dofs);
             for &ni in nodes {
-                for d in 0..3 {
-                    global_dofs.push(ni * 3 + d);
+                for d in 0..6 {
+                    global_dofs.push(ni * 6 + d);
                 }
             }
             for &gi in &global_dofs {
@@ -142,6 +150,7 @@ impl SolidCache {
                 }
             }
         }
+        // Add tiny diagonal to ensure all free DOFs appear in the pattern
         for i in 0..n_free {
             triplets.push((i as u32, i as u32, 0.0));
         }
@@ -149,14 +158,16 @@ impl SolidCache {
         let k_matrix = SparseColMatOwned::from_triplets(n_free, n_free, &triplets)
             .map_err(|e| TheseusError::Shape(e))?;
 
+        // Build element_to_nz mapping
         let mut elem_entries: Vec<Vec<(usize, usize, usize)>> = vec![Vec::new(); ne];
         for e in 0..ne {
             let nodes = &problem.elements[e];
-            let num_dofs = nodes.len() * 3;
+            let num_nodes = nodes.len();
+            let num_dofs = num_nodes * 6;
             let mut global_dofs = Vec::with_capacity(num_dofs);
             for &ni in nodes {
-                for d in 0..3 {
-                    global_dofs.push(ni * 3 + d);
+                for d in 0..6 {
+                    global_dofs.push(ni * 6 + d);
                 }
             }
             for (li, &gi) in global_dofs.iter().enumerate() {
@@ -180,24 +191,22 @@ impl SolidCache {
         Ok(Self {
             k_matrix,
             factorization: None,
-            element_to_nz: SolidElementToNz { entries: elem_entries },
-            dof_map: problem.dof_map.clone(),
+            element_to_nz: ShellElementToNz { entries: elem_entries },
             displacements: vec![0.0; n_free],
             rhs: vec![0.0; n_free],
-            stresses: vec![[[0.0; 6]; NUM_GP]; ne],
-            strains: vec![[[0.0; 6]; NUM_GP]; ne],
-            von_mises: vec![[0.0; NUM_GP]; ne],
             reactions: vec![0.0; n_total],
+            dof_map: problem.dof_map.clone(),
         })
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct SolidResult {
+pub struct ShellResult {
     pub displacements: Vec<f64>,
-    pub deformed_positions: Array2<f64>,
     pub reactions: Vec<f64>,
-    pub stresses: Vec<[[f64; 6]; NUM_GP]>,
-    pub strains: Vec<[[f64; 6]; NUM_GP]>,
-    pub von_mises: Vec<[f64; NUM_GP]>,
+    pub principal_stresses: Vec<[f64; 2]>,
+    pub membrane_stresses_global: Vec<[f64; 6]>,
+    pub top_stresses_global: Vec<[f64; 6]>,
+    pub bottom_stresses_global: Vec<[f64; 6]>,
+    pub von_mises: Vec<f64>,
 }

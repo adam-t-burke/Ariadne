@@ -20,8 +20,10 @@ TETGEN_API int tetgen_mesh(
     int num_points, const double* points,
     int num_facets, const int* facets,
     double max_volume, double min_ratio,
+    int quadratic,
     int* out_num_points, double** out_points,
     int* out_num_tets, int** out_tets,
+    int* out_nodes_per_tet,
     int* out_num_faces, int** out_faces)
 {
     if (!points || num_points < 4 || !facets || num_facets < 4) {
@@ -31,6 +33,7 @@ TETGEN_API int tetgen_mesh(
 
     *out_num_points = 0; *out_points = nullptr;
     *out_num_tets = 0;   *out_tets = nullptr;
+    *out_nodes_per_tet = 0;
     *out_num_faces = 0;  *out_faces = nullptr;
 
     try {
@@ -63,6 +66,9 @@ TETGEN_API int tetgen_mesh(
 
         // Build switch string: p=PLC, z=zero-based, Q=quiet
         std::string switches = "pzQ";
+        if (quadratic) {
+            switches += "o2";
+        }
         if (min_ratio > 0.0) {
             char buf[64];
             std::snprintf(buf, sizeof(buf), "q%.6g", min_ratio);
@@ -89,20 +95,11 @@ TETGEN_API int tetgen_mesh(
 
         // Copy output tets
         int nt = out.numberoftetrahedra;
-        int nc = out.numberofcorners; // should be 4
+        int nc = out.numberofcorners; // should be 4 or 10
         *out_num_tets = nt;
-        *out_tets = (int*)std::malloc(nt * 4 * sizeof(int));
-        if (nc == 4) {
-            std::memcpy(*out_tets, out.tetrahedronlist, nt * 4 * sizeof(int));
-        } else {
-            // Higher-order: only copy first 4 corners per tet
-            for (int i = 0; i < nt; i++) {
-                (*out_tets)[i * 4 + 0] = out.tetrahedronlist[i * nc + 0];
-                (*out_tets)[i * 4 + 1] = out.tetrahedronlist[i * nc + 1];
-                (*out_tets)[i * 4 + 2] = out.tetrahedronlist[i * nc + 2];
-                (*out_tets)[i * 4 + 3] = out.tetrahedronlist[i * nc + 3];
-            }
-        }
+        *out_nodes_per_tet = nc;
+        *out_tets = (int*)std::malloc(nt * nc * sizeof(int));
+        std::memcpy(*out_tets, out.tetrahedronlist, nt * nc * sizeof(int));
 
         // Copy output boundary faces
         int nf = out.numberoftrifaces;

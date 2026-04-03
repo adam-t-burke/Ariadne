@@ -23,6 +23,7 @@ namespace Ariadne.FEA.Components
             nuint num_elements,
             double[] node_positions,
             int[] elements,
+            int[] num_nodes_per_element,
             double[] element_stresses,
             double[] nodal_stresses,
             double[] element_errors,
@@ -43,13 +44,13 @@ namespace Ariadne.FEA.Components
 
         public PrincipalStressComponent()
             : base("Principal Stresses", "σ-Princ",
-                "SPR-recovered principal stresses and directions for solid FEA results",
+                "SPR-recovered principal stresses and directions for solid or shell FEA results",
                 "Theseus-FEA", "Utilities")
         { }
 
         protected override void RegisterInputParams(GH_InputParamManager pManager)
         {
-            pManager.AddGenericParameter("Results", "R", "Solid FEA result", GH_ParamAccess.item);
+            pManager.AddGenericParameter("Results", "R", "Solid or shell FEA result", GH_ParamAccess.item);
             pManager.AddNumberParameter("Arrow Scale", "AS", "Scale factor for principal direction arrows", GH_ParamAccess.item, 1.0);
             pManager.AddBooleanParameter("Show Arrows", "Show", "Display principal direction arrows in viewport", GH_ParamAccess.item, true);
         }
@@ -74,20 +75,27 @@ namespace Ariadne.FEA.Components
             if (input is GH_ObjectWrapper wrapper)
                 input = wrapper.Value;
             if (input is not FeaResult result) return;
-            if (!result.Model.HasSolidElements || result.SolidStresses == null)
-            {
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Results input must be a solid FeaResult.");
-                return;
-            }
 
             DA.GetData(1, ref _arrowScale);
             DA.GetData(2, ref _showArrows);
 
+            if (result.Model.HasSolidElements && result.SolidStresses != null)
+                SolveSolid(DA, result);
+            else if (result.Model.HasShellElements && result.ShellTopStresses != null)
+                SolveShell(DA, result);
+            else
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Error,
+                    "Results must be a solid or shell FeaResult with stress data.");
+            }
+        }
+
+        private void SolveSolid(IGH_DataAccess DA, FeaResult result)
+        {
             var mesh = result.Model.SolidMesh!;
             int nn = mesh.Nn;
             int ne = mesh.Ne;
 
-            // Marshal node positions in meters (matching the solver coordinate system)
             var doc = Rhino.RhinoDoc.ActiveDoc;
             double toMeters = doc != null
                 ? Rhino.RhinoMath.UnitScale(doc.ModelUnitSystem, Rhino.UnitSystem.Meters)
@@ -102,50 +110,114 @@ namespace Ariadne.FEA.Components
                 nodePos[i * 3 + 2] = pt.Z * toMeters;
             }
 
-            // Marshal elements
-            var elements = new int[ne * 4];
+            var elements = new int[mesh.Elements.Sum(e => e.Length)];
+            var numNodesPerElement = new int[ne];
+            int elemOffset = 0;
             for (int e = 0; e < ne; e++)
             {
                 var elem = mesh.Elements[e];
-                elements[e * 4] = elem[0];
-                elements[e * 4 + 1] = elem[1];
-                elements[e * 4 + 2] = elem[2];
-                elements[e * 4 + 3] = elem[3];
+                numNodesPerElement[e] = elem.Length;
+                for (int j = 0; j < elem.Length; j++)
+                    elements[elemOffset++] = elem[j];
             }
 
-            // Marshal element stresses: expand element-averaged stresses to
-            // 4-GP layout expected by the native SPR FFI (identical per GP for tet4).
             int ngp = Theseus.Interop.SolidConstants.NumGP;
             var elemStresses = new double[ne * ngp * 6];
             for (int e = 0; e < ne; e++)
-            {
                 for (int gp = 0; gp < ngp; gp++)
                     for (int c = 0; c < 6; c++)
-                        elemStresses[e * ngp * 6 + gp * 6 + c] = result.SolidStresses[e, c];
-            }
+                        elemStresses[e * ngp * 6 + gp * 6 + c] = result.SolidStresses![e, c];
 
-            // Allocate output buffers
             var nodalStresses = new double[nn * 6];
             var elementErrors = new double[ne];
             var principalValues = new double[nn * 3];
             var principalVectors = new double[nn * 9];
             var nodalVonMises = new double[nn];
 
-            // Call native SPR recovery
             int rc = SolidSprInterop.theseus_solid_spr_recover(
                 (nuint)nn, (nuint)ne,
-                nodePos, elements, elemStresses,
+                nodePos, elements, numNodesPerElement, elemStresses,
                 nodalStresses, elementErrors,
                 principalValues, principalVectors, nodalVonMises);
 
             if (rc != 0)
             {
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Error,
-                    $"SPR recovery failed (code {rc}). Check mesh and stress data.");
+                    $"Solid SPR recovery failed (code {rc}).");
                 return;
             }
 
-            // Unpack results
+            UnpackAndOutput(DA, result, nn, principalValues, principalVectors,
+                nodalVonMises, elementErrors, nodalStresses, mesh.TetNodes.ToArray());
+        }
+
+        private void SolveShell(IGH_DataAccess DA, FeaResult result)
+        {
+            var model = result.Model;
+            var shellData = model.ToShellData();
+            int nn = shellData.NumNodes;
+            int ne = shellData.NumElements;
+
+            var memStresses = new double[ne * 6];
+            var topStresses = result.ShellTopStresses!;
+            var botStresses = result.ShellBottomStresses!;
+
+            // Build membrane stresses from average of top and bottom
+            for (int e = 0; e < ne; e++)
+                for (int c = 0; c < 6; c++)
+                    memStresses[e * 6 + c] = (topStresses[e * 6 + c] + botStresses[e * 6 + c]) / 2.0;
+
+            var nodalMembrane = new double[nn * 6];
+            var nodalTop = new double[nn * 6];
+            var nodalBottom = new double[nn * 6];
+            var elementErrors = new double[ne];
+            var principalValuesTop = new double[nn * 3];
+            var principalValuesBot = new double[nn * 3];
+            var principalVectorsTop = new double[nn * 9];
+            var principalVectorsBot = new double[nn * 9];
+            var vonMisesTop = new double[nn];
+            var vonMisesBot = new double[nn];
+
+            int rc = Theseus.Interop.ShellInterop.theseus_shell_spr_recover(
+                (nuint)nn, (nuint)ne,
+                shellData.NodePositions, shellData.Elements, shellData.NumNodesPerElement,
+                memStresses, topStresses, botStresses,
+                nodalMembrane, nodalTop, nodalBottom,
+                elementErrors,
+                principalValuesTop, principalValuesBot,
+                principalVectorsTop, principalVectorsBot,
+                vonMisesTop, vonMisesBot);
+
+            if (rc != 0)
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Error,
+                    $"Shell SPR recovery failed (code {rc}).");
+                return;
+            }
+
+            // Use top-fiber principals for visualization (typically the critical fiber)
+            // VM envelope = max(top, bottom) per node
+            var vmEnvelope = new double[nn];
+            for (int i = 0; i < nn; i++)
+                vmEnvelope[i] = Math.Max(vonMisesTop[i], vonMisesBot[i]);
+
+            var shellNodes = new Point3d[nn];
+            for (int i = 0; i < nn; i++)
+            {
+                var v = model.ShellMesh!.Vertices[i];
+                shellNodes[i] = new Point3d(v.X, v.Y, v.Z);
+            }
+
+            UnpackAndOutput(DA, result, nn, principalValuesTop, principalVectorsTop,
+                vmEnvelope, elementErrors, nodalTop, shellNodes);
+        }
+
+        private void UnpackAndOutput(
+            IGH_DataAccess DA, FeaResult result, int nn,
+            double[] principalValues, double[] principalVectors,
+            double[] nodalVonMises, double[] elementErrors,
+            double[] nodalStresses, Point3d[] nodePositions)
+        {
             var s1 = new double[nn];
             var s2 = new double[nn];
             var s3 = new double[nn];
@@ -167,7 +239,6 @@ namespace Ariadne.FEA.Components
                     principalVectors[i * 9 + 6], principalVectors[i * 9 + 7], principalVectors[i * 9 + 8]);
             }
 
-            // Cache for viewport drawing
             _cachedResult = result;
             _cachedS1 = s1;
             _cachedS2 = s2;
@@ -176,9 +247,8 @@ namespace Ariadne.FEA.Components
             _cachedV2 = v2;
             _cachedV3 = v3;
             _cachedVm = nodalVonMises;
-            _cachedNodes = mesh.TetNodes.ToArray();
+            _cachedNodes = nodePositions;
 
-            // Set outputs
             DA.SetDataList(0, s1);
             DA.SetDataList(1, s2);
             DA.SetDataList(2, s3);

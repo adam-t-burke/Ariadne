@@ -1,7 +1,8 @@
-//! FEA-specific data structures for linear elastic truss analysis.
+//! FEA-specific data structures for linear elastic truss and beam analysis.
 //!
-//! Phase 1: 3D bar/truss elements (3 DOF per node, axial only).
-//! Phase 2 will extend to beam elements (6 DOF per node).
+//! Supports two modes:
+//! - Truss: 3 DOF per node (translations only, axial forces)
+//! - Beam: 6 DOF per node (translations + rotations, axial/shear/bending/torsion)
 
 use crate::sparse::SparseColMatOwned;
 use crate::types::{Factorization, TheseusError, find_nz_index};
@@ -30,17 +31,33 @@ impl FeaMaterial {
 }
 
 // ─────────────────────────────────────────────────────────────
+//  Beam formulation
+// ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BeamFormulation {
+    Truss,
+    EulerBernoulli,
+    Timoshenko,
+}
+
+// ─────────────────────────────────────────────────────────────
 //  Section
 // ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct FeaSection {
     pub area: f64,
+    pub iy: f64,
+    pub iz: f64,
+    pub j: f64,
+    pub asy: f64,
+    pub asz: f64,
 }
 
 impl Default for FeaSection {
     fn default() -> Self {
-        Self { area: 0.01 }
+        Self { area: 0.01, iy: 0.0, iz: 0.0, j: 0.0, asy: 0.0, asz: 0.0 }
     }
 }
 
@@ -61,24 +78,16 @@ pub struct FeaElementProps {
 #[derive(Debug, Clone)]
 pub struct FeaSupport {
     pub node_idx: usize,
-    pub fixed_dofs: [bool; 3],
+    pub fixed_dofs: Vec<bool>,
 }
 
 impl FeaSupport {
     pub fn pinned(node_idx: usize) -> Self {
-        Self { node_idx, fixed_dofs: [true, true, true] }
+        Self { node_idx, fixed_dofs: vec![true, true, true] }
     }
 
-    pub fn roller_x(node_idx: usize) -> Self {
-        Self { node_idx, fixed_dofs: [true, false, false] }
-    }
-
-    pub fn roller_y(node_idx: usize) -> Self {
-        Self { node_idx, fixed_dofs: [false, true, false] }
-    }
-
-    pub fn roller_z(node_idx: usize) -> Self {
-        Self { node_idx, fixed_dofs: [false, false, true] }
+    pub fn fixed_6dof(node_idx: usize) -> Self {
+        Self { node_idx, fixed_dofs: vec![true, true, true, true, true, true] }
     }
 }
 
@@ -90,6 +99,7 @@ impl FeaSupport {
 pub struct FeaLoad {
     pub node_idx: usize,
     pub force: [f64; 3],
+    pub moment: [f64; 3],
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -112,13 +122,14 @@ pub struct DofMap {
 }
 
 impl DofMap {
-    pub fn from_supports(num_nodes: usize, supports: &[FeaSupport]) -> Self {
-        let num_total = num_nodes * 3;
+    pub fn from_supports(num_nodes: usize, dofs_per_node: usize, supports: &[FeaSupport]) -> Self {
+        let num_total = num_nodes * dofs_per_node;
         let mut is_fixed = vec![false; num_total];
         for sup in supports {
-            for d in 0..3 {
+            let n_fix = sup.fixed_dofs.len().min(dofs_per_node);
+            for d in 0..n_fix {
                 if sup.fixed_dofs[d] {
-                    is_fixed[sup.node_idx * 3 + d] = true;
+                    is_fixed[sup.node_idx * dofs_per_node + d] = true;
                 }
             }
         }
@@ -168,6 +179,8 @@ pub struct ElementToNz {
 pub struct FeaProblem {
     pub num_nodes: usize,
     pub num_elements: usize,
+    pub beam_formulation: BeamFormulation,
+    pub dofs_per_node: usize,
     pub materials: Vec<FeaMaterial>,
     pub sections: Vec<FeaSection>,
     pub element_props: Vec<FeaElementProps>,
@@ -269,6 +282,9 @@ pub struct FeaCache {
     pub strains: Vec<f64>,
     pub reactions: Vec<f64>,
     pub utilization: Vec<f64>,
+    /// Per-element internal forces for beam mode: 12 values per element
+    /// [N1,Vy1,Vz1,T1,My1,Mz1, N2,Vy2,Vz2,T2,My2,Mz2]
+    pub internal_forces: Vec<f64>,
 }
 
 impl fmt::Debug for FeaCache {
@@ -284,13 +300,17 @@ impl FeaCache {
         let ne = problem.num_elements;
         let n_free = problem.dof_map.num_free_dofs;
         let n_total = problem.dof_map.num_total_dofs;
+        let dpn = problem.dofs_per_node;
+        let elem_dofs = dpn * 2;
 
         // Build K's sparsity pattern from element connectivity
         let mut triplets: Vec<(u32, u32, f64)> = Vec::new();
         for e in 0..ne {
             let (ni, nj) = problem.edge_nodes[e];
-            let global_dofs = [ni * 3, ni * 3 + 1, ni * 3 + 2,
-                               nj * 3, nj * 3 + 1, nj * 3 + 2];
+            let mut global_dofs = Vec::with_capacity(elem_dofs);
+            for d in 0..dpn { global_dofs.push(ni * dpn + d); }
+            for d in 0..dpn { global_dofs.push(nj * dpn + d); }
+
             for &gi in &global_dofs {
                 if let Some(fi) = problem.dof_map.global_to_free[gi] {
                     for &gj in &global_dofs {
@@ -301,7 +321,6 @@ impl FeaCache {
                 }
             }
         }
-        // Add tiny diagonal to ensure all free DOFs appear in the pattern
         for i in 0..n_free {
             triplets.push((i as u32, i as u32, 0.0));
         }
@@ -309,12 +328,12 @@ impl FeaCache {
         let k_matrix = SparseColMatOwned::from_triplets(n_free, n_free, &triplets)
             .map_err(|e| TheseusError::Shape(e))?;
 
-        // Build element_to_nz mapping
         let mut elem_entries: Vec<Vec<(usize, usize, usize)>> = vec![Vec::new(); ne];
         for e in 0..ne {
             let (ni, nj) = problem.edge_nodes[e];
-            let global_dofs = [ni * 3, ni * 3 + 1, ni * 3 + 2,
-                               nj * 3, nj * 3 + 1, nj * 3 + 2];
+            let mut global_dofs = Vec::with_capacity(elem_dofs);
+            for d in 0..dpn { global_dofs.push(ni * dpn + d); }
+            for d in 0..dpn { global_dofs.push(nj * dpn + d); }
             for (li, &gi) in global_dofs.iter().enumerate() {
                 if let Some(fi) = problem.dof_map.global_to_free[gi] {
                     for (lj, &gj) in global_dofs.iter().enumerate() {
@@ -363,6 +382,7 @@ impl FeaCache {
             stresses: vec![0.0; ne],
             strains: vec![0.0; ne],
             reactions: vec![0.0; n_total],
+            internal_forces: if problem.dofs_per_node == 6 { vec![0.0; ne * 12] } else { Vec::new() },
             utilization: vec![0.0; ne],
         })
     }
@@ -381,6 +401,7 @@ pub struct FeaResult {
     pub stresses: Vec<f64>,
     pub strains: Vec<f64>,
     pub utilization: Vec<f64>,
+    pub internal_forces: Vec<f64>,
 }
 
 // ─────────────────────────────────────────────────────────────

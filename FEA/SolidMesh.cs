@@ -22,6 +22,8 @@ public class SolidMesh : GH_Mesh
     /// <summary>Boundary face connectivity. Each int[3] contains the three node indices of a boundary triangle.</summary>
     public List<int[]> BoundaryFaces { get; set; } = [];
 
+    public FeaMaterial? Material { get; set; }
+
     private bool _boundaryMeshDirty = true;
 
     public int Nn => TetNodes.Count;

@@ -55,35 +55,29 @@ pub struct FeaHandle {
 pub unsafe extern "C" fn theseus_fea_create(
     num_nodes: usize,
     num_elements: usize,
-    // Node positions: flat [x0,y0,z0, x1,y1,z1, ...]
     node_positions: *const f64,
-    // Edge connectivity: flat [start0,end0, start1,end1, ...]
     edge_nodes: *const usize,
-    // Materials: flat [E0,density0,yield0, E1,density1,yield1, ...]
     num_materials: usize,
     materials: *const f64,
-    // Sections: flat [area0, area1, ...]
     num_sections: usize,
     sections: *const f64,
-    // Per-element assignment: [mat_idx0,sec_idx0, mat_idx1,sec_idx1, ...]
     element_props: *const usize,
-    // Supports: flat [node_idx, fix_x, fix_y, fix_z, ...]  (fix as 0/1)
     num_supports: usize,
     supports: *const usize,
-    // Loads: flat [node_idx, fx, fy, fz, ...]
     num_loads: usize,
     loads_data: *const f64,
+    load_moments: *const f64,
     load_nodes: *const usize,
-    // Self-weight
     include_self_weight: i32,
     gravity: *const f64,
+    beam_formulation: u8,
 ) -> *mut FeaHandle {
     let result = catch_unwind(AssertUnwindSafe(|| {
         fea_create_inner(
             num_nodes, num_elements, node_positions, edge_nodes,
             num_materials, materials, num_sections, sections, element_props,
-            num_supports, supports, num_loads, loads_data, load_nodes,
-            include_self_weight, gravity,
+            num_supports, supports, num_loads, loads_data, load_moments, load_nodes,
+            include_self_weight, gravity, beam_formulation,
         )
     }));
 
@@ -114,10 +108,19 @@ unsafe fn fea_create_inner(
     supports_ptr: *const usize,
     num_loads: usize,
     loads_data_ptr: *const f64,
+    load_moments_ptr: *const f64,
     load_nodes_ptr: *const usize,
     include_self_weight: i32,
     gravity_ptr: *const f64,
+    beam_formulation_raw: u8,
 ) -> Result<*mut FeaHandle, TheseusError> {
+    let beam_formulation = match beam_formulation_raw {
+        1 => BeamFormulation::EulerBernoulli,
+        2 => BeamFormulation::Timoshenko,
+        _ => BeamFormulation::Truss,
+    };
+    let dofs_per_node: usize = if beam_formulation == BeamFormulation::Truss { 3 } else { 6 };
+
     let pos_slice = slice::from_raw_parts(node_positions_ptr, num_nodes * 3);
     let node_positions = Array2::from_shape_vec((num_nodes, 3), pos_slice.to_vec())
         .map_err(|e| TheseusError::Shape(format!("node_positions: {e}")))?;
@@ -136,8 +139,18 @@ unsafe fn fea_create_inner(
         })
         .collect();
 
-    let sec_slice = slice::from_raw_parts(sections_ptr, num_sections);
-    let sections: Vec<FeaSection> = sec_slice.iter().map(|&a| FeaSection { area: a }).collect();
+    // Sections: 6 doubles per section [A, Iy, Iz, J, Asy, Asz]
+    let sec_slice = slice::from_raw_parts(sections_ptr, num_sections * 6);
+    let sections: Vec<FeaSection> = (0..num_sections)
+        .map(|i| FeaSection {
+            area: sec_slice[i * 6],
+            iy: sec_slice[i * 6 + 1],
+            iz: sec_slice[i * 6 + 2],
+            j: sec_slice[i * 6 + 3],
+            asy: sec_slice[i * 6 + 4],
+            asz: sec_slice[i * 6 + 5],
+        })
+        .collect();
 
     let ep_slice = slice::from_raw_parts(element_props_ptr, num_elements * 2);
     let element_props: Vec<FeaElementProps> = (0..num_elements)
@@ -147,37 +160,47 @@ unsafe fn fea_create_inner(
         })
         .collect();
 
-    let sup_slice = slice::from_raw_parts(supports_ptr, num_supports * 4);
+    // Supports: 7 usize per support [node, fix_x, fix_y, fix_z, fix_rx, fix_ry, fix_rz]
+    let sup_stride = 7;
+    let sup_slice = slice::from_raw_parts(supports_ptr, num_supports * sup_stride);
     let supports: Vec<FeaSupport> = (0..num_supports)
-        .map(|i| FeaSupport {
-            node_idx: sup_slice[i * 4],
-            fixed_dofs: [
-                sup_slice[i * 4 + 1] != 0,
-                sup_slice[i * 4 + 2] != 0,
-                sup_slice[i * 4 + 3] != 0,
-            ],
+        .map(|i| {
+            let base = i * sup_stride;
+            let mut fixed = Vec::with_capacity(dofs_per_node);
+            for d in 0..dofs_per_node {
+                fixed.push(sup_slice[base + 1 + d] != 0);
+            }
+            FeaSupport {
+                node_idx: sup_slice[base],
+                fixed_dofs: fixed,
+            }
         })
         .collect();
 
+    // Loads: forces (3) + moments (3) per load
     let load_forces = slice::from_raw_parts(loads_data_ptr, num_loads * 3);
+    let load_moms = slice::from_raw_parts(load_moments_ptr, num_loads * 3);
     let load_node_indices = slice::from_raw_parts(load_nodes_ptr, num_loads);
     let loads: Vec<FeaLoad> = (0..num_loads)
         .map(|i| FeaLoad {
             node_idx: load_node_indices[i],
             force: [load_forces[i * 3], load_forces[i * 3 + 1], load_forces[i * 3 + 2]],
+            moment: [load_moms[i * 3], load_moms[i * 3 + 1], load_moms[i * 3 + 2]],
         })
         .collect();
 
     let grav = slice::from_raw_parts(gravity_ptr, 3);
     let gravity = [grav[0], grav[1], grav[2]];
 
-    let dof_map = DofMap::from_supports(num_nodes, &supports);
+    let dof_map = DofMap::from_supports(num_nodes, dofs_per_node, &supports);
 
     let areas: Vec<f64> = sections.iter().map(|s| s.area).collect();
 
     let problem = FeaProblem {
         num_nodes,
         num_elements,
+        beam_formulation,
+        dofs_per_node,
         materials,
         sections,
         element_props,
@@ -409,6 +432,7 @@ pub unsafe extern "C" fn theseus_fea_solve_forward(
     out_strains: *mut f64,
     out_deformed_xyz: *mut f64,
     out_utilization: *mut f64,
+    out_internal_forces: *mut f64,
 ) -> i32 {
     fea_ffi_guard(AssertUnwindSafe(|| {
         let h = &mut *handle;
@@ -418,7 +442,8 @@ pub unsafe extern "C" fn theseus_fea_solve_forward(
 
         let nn = h.problem.num_nodes;
         let ne = h.problem.num_elements;
-        let n_total = nn * 3;
+        let dpn = h.problem.dofs_per_node;
+        let n_total = nn * dpn;
 
         slice::from_raw_parts_mut(out_displacements, n_total).copy_from_slice(&result.displacements);
         slice::from_raw_parts_mut(out_reactions, n_total).copy_from_slice(&result.reactions);
@@ -432,6 +457,11 @@ pub unsafe extern "C" fn theseus_fea_solve_forward(
             for d in 0..3 {
                 xyz_out[i * 3 + d] = result.deformed_positions[[i, d]];
             }
+        }
+
+        if dpn == 6 && !result.internal_forces.is_empty() {
+            let if_out = slice::from_raw_parts_mut(out_internal_forces, ne * 12);
+            if_out.copy_from_slice(&result.internal_forces);
         }
 
         Ok(())
@@ -468,7 +498,8 @@ pub unsafe extern "C" fn theseus_fea_optimize(
 
         let nn = h.problem.num_nodes;
         let ne = h.problem.num_elements;
-        let n_total = nn * 3;
+        let dpn = h.problem.dofs_per_node;
+        let n_total = nn * dpn;
         let ns = h.problem.sections.len();
 
         let r = &result.fea_result;

@@ -50,7 +50,7 @@ internal static class SolidInterop
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
     public static extern IntPtr theseus_solid_create(
         nuint num_nodes, nuint num_elements,
-        double[] node_positions, int[] elements,
+        double[] node_positions, int[] elements, int[] num_nodes_per_element,
         nuint num_materials, double[] materials,
         int[] element_props,
         nuint num_supports, int[] supports,
@@ -130,7 +130,7 @@ public sealed class SolidSolver : IDisposable
     /// <param name="gravity">Gravity vector [gx,gy,gz], length 3.</param>
     public static SolidSolver Create(
         int numNodes, int numElements,
-        double[] nodePositions, int[] elements,
+        double[] nodePositions, int[] elements, int[] numNodesPerElement,
         int numMaterials, double[] materials,
         int[] elementProps,
         int numSupports, int[] supports,
@@ -139,7 +139,7 @@ public sealed class SolidSolver : IDisposable
     {
         var handle = SolidInterop.theseus_solid_create(
             (nuint)numNodes, (nuint)numElements,
-            nodePositions, elements,
+            nodePositions, elements, numNodesPerElement,
             (nuint)numMaterials, materials,
             elementProps,
             (nuint)numSupports, supports,

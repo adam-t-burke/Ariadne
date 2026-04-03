@@ -36,8 +36,10 @@ TETGEN_API int tetgen_mesh(
     int num_points, const double* points,
     int num_facets, const int* facets,
     double max_volume, double min_ratio,
+    int quadratic,
     int* out_num_points, double** out_points,
     int* out_num_tets, int** out_tets,
+    int* out_nodes_per_tet,
     int* out_num_faces, int** out_faces
 );
 

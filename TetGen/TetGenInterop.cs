@@ -15,8 +15,10 @@ internal static class TetGenNative
         int num_points, double[] points,
         int num_facets, int[] facets,
         double max_volume, double min_ratio,
+        int quadratic,
         out int out_num_points, out IntPtr out_points,
         out int out_num_tets, out IntPtr out_tets,
+        out int out_nodes_per_tet,
         out int out_num_faces, out IntPtr out_faces);
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
@@ -54,6 +56,7 @@ public static class TetGenMesher
         Mesh mesh,
         double maxVolume,
         double minRatio,
+        bool quadratic,
         out List<Point3d> nodes,
         out List<int[]> elements,
         out List<int[]> boundaryFaces)
@@ -89,8 +92,10 @@ public static class TetGenMesher
             nv, points,
             nf, facets,
             maxVolume, minRatio,
+            quadratic ? 1 : 0,
             out int outNp, out IntPtr outPointsPtr,
             out int outNt, out IntPtr outTetsPtr,
+            out int outNodesPerTet,
             out int outNf, out IntPtr outFacesPtr);
 
         if (rc != 0)
@@ -101,8 +106,8 @@ public static class TetGenMesher
             var outPoints = new double[outNp * 3];
             Marshal.Copy(outPointsPtr, outPoints, 0, outNp * 3);
 
-            var outTets = new int[outNt * 4];
-            Marshal.Copy(outTetsPtr, outTets, 0, outNt * 4);
+            var outTets = new int[outNt * outNodesPerTet];
+            Marshal.Copy(outTetsPtr, outTets, 0, outNt * outNodesPerTet);
 
             var outFaces = new int[outNf * 3];
             Marshal.Copy(outFacesPtr, outFaces, 0, outNf * 3);
@@ -113,7 +118,12 @@ public static class TetGenMesher
 
             elements = new List<int[]>(outNt);
             for (int i = 0; i < outNt; i++)
-                elements.Add(new int[] { outTets[i * 4], outTets[i * 4 + 1], outTets[i * 4 + 2], outTets[i * 4 + 3] });
+            {
+                var el = new int[outNodesPerTet];
+                for (int j = 0; j < outNodesPerTet; j++)
+                    el[j] = outTets[i * outNodesPerTet + j];
+                elements.Add(el);
+            }
 
             boundaryFaces = new List<int[]>(outNf);
             for (int i = 0; i < outNf; i++)
