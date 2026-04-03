@@ -44,14 +44,17 @@ public static class SolidSolverService
             nodePos[i * 3 + 2] = pt.Z * toMeters;
         }
 
-        var elements = new int[ne * 4];
+        var elements = new int[mesh.Elements.Sum(e => e.Length)];
+        var numNodesPerElement = new int[ne];
+        int elemOffset = 0;
         for (int e = 0; e < ne; e++)
         {
             var elem = mesh.Elements[e];
-            elements[e * 4] = elem[0];
-            elements[e * 4 + 1] = elem[1];
-            elements[e * 4 + 2] = elem[2];
-            elements[e * 4 + 3] = elem[3];
+            numNodesPerElement[e] = elem.Length;
+            for (int j = 0; j < elem.Length; j++)
+            {
+                elements[elemOffset++] = elem[j];
+            }
         }
 
         int numMat = network.Materials.Count;
@@ -108,7 +111,7 @@ public static class SolidSolverService
         var gravity = new double[] { 0.0, 0.0, -9.81 };
 
         return SolidSolver.Create(
-            nn, ne, nodePos, elements,
+            nn, ne, nodePos, elements, numNodesPerElement,
             numMat, matData, elemProps,
             numSupports, supData,
             numLoads, loadForces, loadNodes,

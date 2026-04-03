@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
 using Grasshopper.Kernel;
-using Grasshopper.Kernel.Data;
 using Grasshopper.Kernel.Types;
 using Ariadne.Graphs;
 using Rhino.Geometry;
@@ -14,29 +13,17 @@ namespace Ariadne.FEA.Components
     {
         public ConstructFEAModelComponent()
             : base("Construct FEA Model", "FEA Model",
-                "Create a unified FEA model from bar edges and/or solid mesh",
+                "Assemble an FEA model from element objects, supports, and loads",
                 "Theseus-FEA", "Setup")
         { }
 
         protected override void RegisterInputParams(GH_InputParamManager pManager)
         {
-            pManager.AddCurveParameter("Edges", "E", "Edge curves defining bar elements", GH_ParamAccess.tree);
-            pManager.AddGenericParameter("Solid Mesh", "SM", "Tetrahedral solid mesh", GH_ParamAccess.item);
-            pManager.AddNumberParameter("Tolerance", "Tol", "Node merging tolerance", GH_ParamAccess.item, 0.001);
-            pManager.AddGenericParameter("Supports", "Sup", "Support conditions", GH_ParamAccess.list);
-            pManager.AddGenericParameter("Node Loads", "NL", "Nodal loads applied to the model", GH_ParamAccess.list);
-            pManager.AddGenericParameter("Material", "Mat", "Material properties", GH_ParamAccess.list);
-            pManager.AddGenericParameter("Section", "Sec", "Section properties (bar elements only)", GH_ParamAccess.list);
-            pManager.AddIntegerParameter("Mat Assign", "MA", "Material index per element (default 0)", GH_ParamAccess.list);
-            pManager.AddIntegerParameter("Sec Assign", "SA", "Section index per bar element (default 0)", GH_ParamAccess.list);
+            pManager.AddGenericParameter("Elements", "E", "Element objects: BarNetwork, SolidMesh, and/or ShellMesh", GH_ParamAccess.list);
+            pManager.AddGenericParameter("Supports", "Sup", "Support conditions (from Point Support or face support components)", GH_ParamAccess.list);
+            pManager.AddGenericParameter("Node Loads", "NL", "Nodal loads (from Point Load component)", GH_ParamAccess.list);
 
-            pManager[0].Optional = true;
-            pManager[1].Optional = true;
-            pManager[4].Optional = true;
-            pManager[5].Optional = true;
-            pManager[6].Optional = true;
-            pManager[7].Optional = true;
-            pManager[8].Optional = true;
+            pManager[2].Optional = true;
         }
 
         protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -46,47 +33,79 @@ namespace Ariadne.FEA.Components
 
         protected override void SolveInstance(IGH_DataAccess DA)
         {
-            DA.DisableGapLogic();
-
-            var edgeTree = new GH_Structure<GH_Curve>();
-            SolidMesh? solidMesh = null;
-            double tol = 0.001;
+            var elementInputs = new List<object>();
             var supportInputs = new List<object>();
+            var loads = new List<FeaLoad>();
+
+            if (!DA.GetDataList(0, elementInputs) || elementInputs.Count == 0)
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "At least one element object is required.");
+                return;
+            }
+
+            if (!DA.GetDataList(1, supportInputs) || supportInputs.Count == 0)
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "At least one support is required.");
+                return;
+            }
+
+            DA.GetDataList(2, loads);
+
+            // ── Classify element objects ──
+            BarNetwork? barNetwork = null;
+            SolidMesh? solidMesh = null;
+            ShellMesh? shellMeshData = null;
             var pointSupports = new List<FeaSupport>();
             var solidSupportRegions = new List<FeaSolidSupportRegion>();
-            var loads = new List<FeaLoad>();
-            var materials = new List<FeaMaterial>();
-            var sections = new List<FeaSection>();
-            var matAssign = new List<int>();
-            var secAssign = new List<int>();
 
-            bool hasEdges = DA.GetDataTree(0, out edgeTree) && edgeTree.DataCount > 0;
-            DA.GetData(1, ref solidMesh);
-            DA.GetData(2, ref tol);
-
-            bool hasSolid = solidMesh != null && solidMesh.Ne > 0;
-
-            if (!hasEdges && !hasSolid)
+            foreach (var raw in elementInputs)
             {
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Error,
-                    "Provide at least one of Edges (bar) or Solid Mesh.");
-                return;
+                object item = raw;
+                if (item is GH_ObjectWrapper w) item = w.Value!;
+
+                switch (item)
+                {
+                    case BarNetwork bn:
+                        if (barNetwork != null)
+                        {
+                            AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Only one BarNetwork is supported per model.");
+                            return;
+                        }
+                        barNetwork = bn;
+                        break;
+
+                    case SolidMesh sm:
+                        if (solidMesh != null)
+                        {
+                            AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Only one SolidMesh is supported per model.");
+                            return;
+                        }
+                        solidMesh = sm;
+                        break;
+
+                    case ShellMesh shm:
+                        if (shellMeshData != null)
+                        {
+                            AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Only one ShellMesh is supported per model.");
+                            return;
+                        }
+                        shellMeshData = shm;
+                        break;
+
+                    default:
+                        AddRuntimeMessage(GH_RuntimeMessageLevel.Error,
+                            $"Unsupported element type: {item.GetType().Name}. Expected BarNetwork, SolidMesh, or ShellMesh.");
+                        return;
+                }
             }
 
-            if (!DA.GetDataList(3, supportInputs) || supportInputs.Count == 0)
+            // ── Classify supports ──
+            foreach (var raw in supportInputs)
             {
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Error,
-                    "At least one support is required.");
-                return;
-            }
+                object item = raw;
+                if (item is GH_ObjectWrapper w) item = w.Value!;
 
-            foreach (var input in supportInputs)
-            {
-                object value = input;
-                if (value is GH_ObjectWrapper wrapper)
-                    value = wrapper.Value!;
-
-                switch (value)
+                switch (item)
                 {
                     case FeaSupport support:
                         pointSupports.Add(support);
@@ -96,57 +115,59 @@ namespace Ariadne.FEA.Components
                         break;
                     default:
                         AddRuntimeMessage(GH_RuntimeMessageLevel.Error,
-                            "Supports input must contain FeaSupport or FeaSolidSupportRegion objects.");
+                            "Supports must be FeaSupport or FeaSolidSupportRegion objects.");
                         return;
                 }
             }
 
-            if (!hasSolid && solidSupportRegions.Count > 0)
+            if (solidMesh == null && solidSupportRegions.Count > 0)
             {
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Error,
-                    "Solid support regions require a Solid Mesh input.");
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Solid support regions require a SolidMesh element.");
                 return;
             }
 
-            if (hasSolid && pointSupports.Count > 0)
+            // ── Build the model ──
+            var model = new FEA_Model
             {
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
-                    "Point supports on solids are concentrated nodal restraints. Prefer face support components for solids.");
+                Supports = pointSupports,
+                SolidSupportRegions = solidSupportRegions,
+                Loads = loads,
+            };
+
+            if (barNetwork != null)
+            {
+                model.BarGraph = barNetwork.Graph;
+                model.BarNetworkData = barNetwork;
+                model.Materials = barNetwork.Materials;
+                model.Sections = barNetwork.Sections;
+                model.MaterialAssignment = barNetwork.MaterialAssignment;
+                model.SectionAssignment = barNetwork.SectionAssignment;
             }
 
-            DA.GetDataList(4, loads);
-
-            if (!DA.GetDataList(5, materials) || materials.Count == 0)
-                materials = [FeaMaterial.Steel()];
-
-            if (!DA.GetDataList(6, sections) || sections.Count == 0)
-                sections = [new FeaSection()];
-
-            DA.GetDataList(7, matAssign);
-            DA.GetDataList(8, secAssign);
-
-            FEA_Model model;
-
-            if (hasEdges && !hasSolid)
+            if (solidMesh != null)
             {
-                var graph = new Graph(edgeTree, tol);
-                model = new FEA_Model(graph, pointSupports, materials, sections,
-                    matAssign.ToArray(), secAssign.ToArray(), tol, loads, solidSupportRegions);
-            }
-            else if (hasSolid && !hasEdges)
-            {
-                model = new FEA_Model(solidMesh!, pointSupports, materials,
-                    matAssign.ToArray(), tol, loads, solidSupportRegions);
-            }
-            else
-            {
-                var graph = new Graph(edgeTree, tol);
-                model = new FEA_Model(graph, pointSupports, materials, sections,
-                    matAssign.ToArray(), secAssign.ToArray(), tol, loads, solidSupportRegions)
+                model.SolidMesh = solidMesh;
+                var mat = solidMesh.Material ?? FeaMaterial.Steel();
+                if (barNetwork == null)
                 {
-                    SolidMesh = solidMesh
-                };
+                    model.Materials = [mat];
+                    model.MaterialAssignment = Enumerable.Repeat(0, solidMesh.Ne).ToArray();
+                }
             }
+
+            if (shellMeshData != null)
+            {
+                model.ShellMesh = shellMeshData.OriginalMesh;
+                model.ShellMeshData = shellMeshData;
+                model.ShellThickness = shellMeshData.NodeThicknesses;
+                if (barNetwork == null && solidMesh == null)
+                {
+                    model.Materials = [shellMeshData.Material];
+                    model.MaterialAssignment = Enumerable.Repeat(0, shellMeshData.OriginalFaceCount).ToArray();
+                }
+            }
+
+            model.Initialize();
 
             if (!model.Valid)
             {

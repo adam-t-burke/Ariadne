@@ -26,7 +26,7 @@ use rayon::prelude::*;
 /// - `element_errors[e]` is the SPR error estimator η_e for element e
 pub fn spr_recover_nodal_stresses(
     node_positions: &Array2<f64>,
-    elements: &[[usize; 4]],
+    elements: &[Vec<usize>],
     element_stresses: &[[f64; 6]],
 ) -> (Vec<[f64; 6]>, Vec<f64>) {
     let nn = node_positions.nrows();
@@ -45,13 +45,15 @@ pub fn spr_recover_nodal_stresses(
         .iter()
         .map(|elem| {
             let mut c = [0.0; 3];
+            let num_nodes = elem.len();
             for &ni in elem {
                 for d in 0..3 {
                     c[d] += node_positions[[ni, d]];
                 }
             }
+            let inv_n = 1.0 / (num_nodes as f64);
             for d in 0..3 {
-                c[d] *= 0.25;
+                c[d] *= inv_n;
             }
             c
         })
@@ -137,15 +139,16 @@ pub fn spr_recover_nodal_stresses(
         .into_par_iter()
         .map(|e| {
             let elem = &elements[e];
-            // Average the recovered nodal stresses over the element
+            let num_nodes = elem.len();
             let mut spr_avg = [0.0; 6];
             for &ni in elem {
                 for c in 0..6 {
                     spr_avg[c] += nodal_stresses[ni][c];
                 }
             }
+            let inv_n = 1.0 / (num_nodes as f64);
             for c in 0..6 {
-                spr_avg[c] *= 0.25;
+                spr_avg[c] *= inv_n;
             }
 
             // ||sigma_SPR - sigma_h||
@@ -479,13 +482,12 @@ mod tests {
 
     #[test]
     fn test_spr_single_tet() {
-        // Single tet: SPR should return the element stress at all nodes
         let positions = Array2::from_shape_vec(
             (4, 3),
             vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
         )
         .unwrap();
-        let elements = vec![[0, 1, 2, 3]];
+        let elements = vec![vec![0, 1, 2, 3]];
         let stresses = vec![[100.0, 50.0, 25.0, 10.0, 5.0, 2.0]];
 
         let (nodal, errors) = spr_recover_nodal_stresses(&positions, &elements, &stresses);
@@ -531,13 +533,13 @@ mod tests {
         .unwrap();
 
         let elements = vec![
-            [0, 1, 2, 8],
-            [0, 2, 3, 8],
-            [0, 3, 4, 9],
-            [0, 4, 5, 9],
-            [0, 5, 6, 8],
-            [0, 6, 7, 9],
-            [0, 7, 1, 8],
+            vec![0, 1, 2, 8],
+            vec![0, 2, 3, 8],
+            vec![0, 3, 4, 9],
+            vec![0, 4, 5, 9],
+            vec![0, 5, 6, 8],
+            vec![0, 6, 7, 9],
+            vec![0, 7, 1, 8],
         ];
 
         let stresses = vec![
@@ -590,13 +592,13 @@ mod tests {
         .unwrap();
 
         let elements = vec![
-            [0, 1, 2, 8],
-            [0, 2, 3, 8],
-            [0, 3, 4, 9],
-            [0, 4, 5, 9],
-            [0, 5, 6, 8],
-            [0, 6, 7, 9],
-            [0, 7, 1, 8],
+            vec![0, 1, 2, 8],
+            vec![0, 2, 3, 8],
+            vec![0, 3, 4, 9],
+            vec![0, 4, 5, 9],
+            vec![0, 5, 6, 8],
+            vec![0, 6, 7, 9],
+            vec![0, 7, 1, 8],
         ];
 
         let stresses = vec![

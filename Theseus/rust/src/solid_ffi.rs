@@ -50,6 +50,7 @@ pub unsafe extern "C" fn theseus_solid_create(
     num_elements: usize,
     node_positions: *const f64,
     elements: *const i32,
+    num_nodes_per_element: *const i32,
     num_materials: usize,
     materials: *const f64,
     element_props: *const i32,
@@ -63,7 +64,7 @@ pub unsafe extern "C" fn theseus_solid_create(
 ) -> *mut SolidHandle {
     let result = catch_unwind(AssertUnwindSafe(|| {
         solid_create_inner(
-            num_nodes, num_elements, node_positions, elements,
+            num_nodes, num_elements, node_positions, elements, num_nodes_per_element,
             num_materials, materials, element_props,
             num_supports, supports,
             num_loads, load_forces, load_nodes,
@@ -89,6 +90,7 @@ unsafe fn solid_create_inner(
     num_elements: usize,
     node_positions_ptr: *const f64,
     elements_ptr: *const i32,
+    num_nodes_per_element_ptr: *const i32,
     num_materials: usize,
     materials_ptr: *const f64,
     element_props_ptr: *const i32,
@@ -105,16 +107,22 @@ unsafe fn solid_create_inner(
     let node_positions = Array2::from_shape_vec((num_nodes, 3), pos_slice.to_vec())
         .map_err(|e| TheseusError::Shape(format!("node_positions: {e}")))?;
 
-    // Elements: flat [n0,n1,n2,n3, ...] groups of 4 (tet4)
-    let elem_slice = slice::from_raw_parts(elements_ptr, num_elements * 4);
-    let elements: Vec<[usize; 4]> = (0..num_elements)
-        .map(|e| [
-            elem_slice[e * 4] as usize,
-            elem_slice[e * 4 + 1] as usize,
-            elem_slice[e * 4 + 2] as usize,
-            elem_slice[e * 4 + 3] as usize,
-        ])
-        .collect();
+    // Elements: variable nodes per element
+    let num_nodes_per_elem = slice::from_raw_parts(num_nodes_per_element_ptr, num_elements);
+    let total_indices: usize = num_nodes_per_elem.iter().map(|&n| n as usize).sum();
+    let elem_slice = slice::from_raw_parts(elements_ptr, total_indices);
+    
+    let mut elements = Vec::with_capacity(num_elements);
+    let mut offset = 0;
+    for &n in num_nodes_per_elem {
+        let n = n as usize;
+        let mut nodes = Vec::with_capacity(n);
+        for i in 0..n {
+            nodes.push(elem_slice[offset + i] as usize);
+        }
+        elements.push(nodes);
+        offset += n;
+    }
 
     // Materials: flat [E, nu, density, yield_stress, ...] groups of 4
     let mat_slice = slice::from_raw_parts(materials_ptr, num_materials * 4);

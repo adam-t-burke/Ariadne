@@ -15,6 +15,13 @@ public sealed record FeaResult
     public double[]? BarStrains { get; init; }
     public double[,]? SolidStresses { get; init; }
     public double[]? VonMises { get; init; }
+    public Vector3d[]? ShellRotations { get; init; }
+    public Vector3d[]? ShellReactionMoments { get; init; }
+    public double[]? ShellS1 { get; init; }
+    public double[]? ShellS2 { get; init; }
+    public double[]? ShellVonMises { get; init; }
+    public double[]? ShellTopStresses { get; init; }
+    public double[]? ShellBottomStresses { get; init; }
     public required double[] Utilization { get; init; }
     public required int Iterations { get; init; }
     public required bool Converged { get; init; }

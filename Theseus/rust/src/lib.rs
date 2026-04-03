@@ -37,6 +37,14 @@ pub mod solid_ffi;
 pub mod solid_spr;
 pub mod solid_spr_ffi;
 
+// Shell element modules (Phase 3: tri/quad shell elements)
+pub mod shell_types;
+pub mod shell_assembly;
+pub mod shell_solve;
+pub mod shell_ffi;
+pub mod shell_spr;
+pub mod shell_spr_ffi;
+
 pub use types::TheseusError;
 pub use types::ObjectiveTrait;
 pub use fea_types::FeaObjectiveTrait;

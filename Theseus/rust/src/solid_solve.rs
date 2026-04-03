@@ -3,8 +3,7 @@
 //! Pipeline: assemble K → build RHS → factorise → solve K u = f → post-process.
 
 use crate::solid_assembly::{
-    assemble_global_k, assemble_loads, extract_tet_coords, precompute_d_matrices,
-    tet4_b_matrix_at, tet4_element_stiffness_quad,
+    assemble_global_k, assemble_loads, precompute_d_matrices,
     TET4_GAUSS_POINTS, NUM_GP,
 };
 use crate::solid_types::{SolidCache, SolidProblem, SolidResult};
@@ -69,8 +68,9 @@ struct ElemPostResult {
     stresses: [[f64; 6]; NUM_GP],
     strains: [[f64; 6]; NUM_GP],
     von_mises: [f64; NUM_GP],
-    reaction_contribs: [f64; 12],
-    global_dofs: [usize; 12],
+    reaction_contribs: [f64; 30],
+    global_dofs: [usize; 30],
+    num_dofs: usize,
 }
 
 fn post_process(
@@ -90,78 +90,133 @@ fn post_process(
         .into_par_iter()
         .map(|e| {
             let nodes = &elements[e];
-            let coords = extract_tet_coords(positions, nodes);
             let d = &d_matrices[element_props[e].material_idx];
+            let num_nodes = nodes.len();
+            let num_dofs = num_nodes * 3;
 
-            let mut u_e = [0.0f64; 12];
+            let mut u_e = [0.0f64; 30];
+            let mut global_dofs = [0usize; 30];
             for (i, &ni) in nodes.iter().enumerate() {
                 for dd in 0..3 {
                     u_e[i * 3 + dd] = u_full[ni * 3 + dd];
+                    global_dofs[i * 3 + dd] = ni * 3 + dd;
                 }
             }
 
             let mut gp_stress = [[0.0f64; 6]; NUM_GP];
             let mut gp_strain = [[0.0f64; 6]; NUM_GP];
             let mut gp_vm = [0.0f64; NUM_GP];
+            let mut r_local = [0.0f64; 30];
 
-            for (gp, &(pt, _w)) in TET4_GAUSS_POINTS.iter().enumerate() {
-                let (b, _) = match tet4_b_matrix_at(&coords, pt[0], pt[1], pt[2]) {
-                    Some(bv) => bv,
-                    None => {
-                        return ElemPostResult {
-                            stresses: [[0.0; 6]; NUM_GP],
-                            strains: [[0.0; 6]; NUM_GP],
-                            von_mises: [0.0; NUM_GP],
-                            reaction_contribs: [0.0; 12],
-                            global_dofs: [0; 12],
-                        };
+            if num_nodes == 10 {
+                let coords = crate::solid_assembly::extract_tet10_coords(positions, nodes);
+                for (gp, &(pt, _w)) in TET4_GAUSS_POINTS.iter().enumerate() {
+                    let (b, _) = match crate::solid_assembly::tet10_b_matrix_at(&coords, pt[0], pt[1], pt[2]) {
+                        Some(bv) => bv,
+                        None => {
+                            return ElemPostResult {
+                                stresses: [[0.0; 6]; NUM_GP],
+                                strains: [[0.0; 6]; NUM_GP],
+                                von_mises: [0.0; NUM_GP],
+                                reaction_contribs: [0.0; 30],
+                                global_dofs: [0; 30],
+                                num_dofs,
+                            };
+                        }
+                    };
+
+                    let mut strain = [0.0f64; 6];
+                    for i in 0..6 {
+                        let mut s = 0.0;
+                        for j in 0..30 {
+                            s += b[i][j] * u_e[j];
+                        }
+                        strain[i] = s;
                     }
-                };
 
-                let mut strain = [0.0f64; 6];
-                for i in 0..6 {
+                    let mut stress = [0.0f64; 6];
+                    for i in 0..6 {
+                        let mut s = 0.0;
+                        for j in 0..6 {
+                            s += d[i][j] * strain[j];
+                        }
+                        stress[i] = s;
+                    }
+
+                    let sxx = stress[0]; let syy = stress[1]; let szz = stress[2];
+                    let sxy = stress[3]; let syz = stress[4]; let sxz = stress[5];
+                    let vm = (0.5 * ((sxx - syy).powi(2) + (syy - szz).powi(2) + (szz - sxx).powi(2)
+                        + 6.0 * (sxy * sxy + syz * syz + sxz * sxz))).sqrt();
+
+                    gp_stress[gp] = stress;
+                    gp_strain[gp] = strain;
+                    gp_vm[gp] = vm;
+                }
+
+                let ke = crate::solid_assembly::tet10_element_stiffness_quad(&coords, d)
+                    .unwrap_or([[0.0; 30]; 30]);
+
+                for li in 0..30 {
                     let mut s = 0.0;
-                    for j in 0..12 {
-                        s += b[i][j] * u_e[j];
+                    for lj in 0..30 {
+                        s += ke[li][lj] * u_e[lj];
                     }
-                    strain[i] = s;
+                    r_local[li] = s;
+                }
+            } else {
+                let coords = crate::solid_assembly::extract_tet4_coords(positions, nodes);
+                for (gp, &(pt, _w)) in TET4_GAUSS_POINTS.iter().enumerate() {
+                    let (b, _) = match crate::solid_assembly::tet4_b_matrix_at(&coords, pt[0], pt[1], pt[2]) {
+                        Some(bv) => bv,
+                        None => {
+                            return ElemPostResult {
+                                stresses: [[0.0; 6]; NUM_GP],
+                                strains: [[0.0; 6]; NUM_GP],
+                                von_mises: [0.0; NUM_GP],
+                                reaction_contribs: [0.0; 30],
+                                global_dofs: [0; 30],
+                                num_dofs,
+                            };
+                        }
+                    };
+
+                    let mut strain = [0.0f64; 6];
+                    for i in 0..6 {
+                        let mut s = 0.0;
+                        for j in 0..12 {
+                            s += b[i][j] * u_e[j];
+                        }
+                        strain[i] = s;
+                    }
+
+                    let mut stress = [0.0f64; 6];
+                    for i in 0..6 {
+                        let mut s = 0.0;
+                        for j in 0..6 {
+                            s += d[i][j] * strain[j];
+                        }
+                        stress[i] = s;
+                    }
+
+                    let sxx = stress[0]; let syy = stress[1]; let szz = stress[2];
+                    let sxy = stress[3]; let syz = stress[4]; let sxz = stress[5];
+                    let vm = (0.5 * ((sxx - syy).powi(2) + (syy - szz).powi(2) + (szz - sxx).powi(2)
+                        + 6.0 * (sxy * sxy + syz * syz + sxz * sxz))).sqrt();
+
+                    gp_stress[gp] = stress;
+                    gp_strain[gp] = strain;
+                    gp_vm[gp] = vm;
                 }
 
-                let mut stress = [0.0f64; 6];
-                for i in 0..6 {
+                let ke = crate::solid_assembly::tet4_element_stiffness_quad(&coords, d)
+                    .unwrap_or([[0.0; 12]; 12]);
+
+                for li in 0..12 {
                     let mut s = 0.0;
-                    for j in 0..6 {
-                        s += d[i][j] * strain[j];
+                    for lj in 0..12 {
+                        s += ke[li][lj] * u_e[lj];
                     }
-                    stress[i] = s;
-                }
-
-                let sxx = stress[0]; let syy = stress[1]; let szz = stress[2];
-                let sxy = stress[3]; let syz = stress[4]; let sxz = stress[5];
-                let vm = (0.5 * ((sxx - syy).powi(2) + (syy - szz).powi(2) + (szz - sxx).powi(2)
-                    + 6.0 * (sxy * sxy + syz * syz + sxz * sxz))).sqrt();
-
-                gp_stress[gp] = stress;
-                gp_strain[gp] = strain;
-                gp_vm[gp] = vm;
-            }
-
-            let ke = tet4_element_stiffness_quad(&coords, d)
-                .unwrap_or([[0.0; 12]; 12]);
-
-            let mut r_local = [0.0f64; 12];
-            for li in 0..12 {
-                let mut s = 0.0;
-                for lj in 0..12 {
-                    s += ke[li][lj] * u_e[lj];
-                }
-                r_local[li] = s;
-            }
-
-            let mut global_dofs = [0usize; 12];
-            for (i, &ni) in nodes.iter().enumerate() {
-                for dd in 0..3 {
-                    global_dofs[i * 3 + dd] = ni * 3 + dd;
+                    r_local[li] = s;
                 }
             }
 
@@ -171,6 +226,7 @@ fn post_process(
                 von_mises: gp_vm,
                 reaction_contribs: r_local,
                 global_dofs,
+                num_dofs,
             }
         })
         .collect();
@@ -184,7 +240,8 @@ fn post_process(
         cache.strains[e] = res.strains;
         cache.von_mises[e] = res.von_mises;
 
-        for (li, &gi) in res.global_dofs.iter().enumerate() {
+        for li in 0..res.num_dofs {
+            let gi = res.global_dofs[li];
             if gi < n_reactions {
                 cache.reactions[gi] += res.reaction_contribs[li];
             }
@@ -202,16 +259,32 @@ fn post_process(
         for e in 0..ne {
             let nodes = &problem.elements[e];
             let mat = &problem.materials[problem.element_props[e].material_idx];
-            let coords = extract_tet_coords(&problem.node_positions, nodes);
-
-            for &(pt, w) in &TET4_GAUSS_POINTS {
-                if let Some((_, abs_det_j)) = tet4_b_matrix_at(&coords, pt[0], pt[1], pt[2]) {
-                    let n_vals = crate::solid_assembly::tet4_shape_functions(pt[0], pt[1], pt[2]);
-                    let factor = w * abs_det_j * mat.density;
-                    for node_local in 0..4 {
-                        let ni = nodes[node_local];
-                        for d in 0..3 {
-                            cache.reactions[ni * 3 + d] -= factor * n_vals[node_local] * problem.gravity[d];
+            
+            if nodes.len() == 10 {
+                let coords = crate::solid_assembly::extract_tet10_coords(&problem.node_positions, nodes);
+                for &(pt, w) in &TET4_GAUSS_POINTS {
+                    if let Some((_, abs_det_j)) = crate::solid_assembly::tet10_b_matrix_at(&coords, pt[0], pt[1], pt[2]) {
+                        let n_vals = crate::solid_assembly::tet10_shape_functions(pt[0], pt[1], pt[2]);
+                        let factor = w * abs_det_j * mat.density;
+                        for node_local in 0..10 {
+                            let ni = nodes[node_local];
+                            for d in 0..3 {
+                                cache.reactions[ni * 3 + d] -= factor * n_vals[node_local] * problem.gravity[d];
+                            }
+                        }
+                    }
+                }
+            } else {
+                let coords = crate::solid_assembly::extract_tet4_coords(&problem.node_positions, nodes);
+                for &(pt, w) in &TET4_GAUSS_POINTS {
+                    if let Some((_, abs_det_j)) = crate::solid_assembly::tet4_b_matrix_at(&coords, pt[0], pt[1], pt[2]) {
+                        let n_vals = crate::solid_assembly::tet4_shape_functions(pt[0], pt[1], pt[2]);
+                        let factor = w * abs_det_j * mat.density;
+                        for node_local in 0..4 {
+                            let ni = nodes[node_local];
+                            for d in 0..3 {
+                                cache.reactions[ni * 3 + d] -= factor * n_vals[node_local] * problem.gravity[d];
+                            }
                         }
                     }
                 }

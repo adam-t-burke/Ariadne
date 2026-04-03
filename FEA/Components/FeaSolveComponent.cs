@@ -12,13 +12,13 @@ namespace Ariadne.FEA.Components
     {
         public FeaSolveComponent()
             : base("FEA Solve", "FEASolve",
-                "Solve a linear elastic FEA problem for bar, solid, or coupled models",
+                "Solve a linear elastic FEA problem for bar, solid, shell, or coupled models",
                 "Theseus-FEA", "Solver")
         { }
 
         protected override void RegisterInputParams(GH_InputParamManager pManager)
         {
-            pManager.AddGenericParameter("Model", "M", "FEA model (bar, solid, or coupled)", GH_ParamAccess.item);
+            pManager.AddGenericParameter("Model", "M", "FEA model (bar, solid, shell, or coupled)", GH_ParamAccess.item);
             pManager.AddBooleanParameter("Self Weight", "SW", "Include self-weight", GH_ParamAccess.item, false);
             pManager.AddGenericParameter("Opt Config", "Opt", "Optimization config (optional, bar only)", GH_ParamAccess.item);
 
@@ -38,6 +38,10 @@ namespace Ariadne.FEA.Components
             pManager.AddPointParameter("Deformed Nodes", "DN", "Deformed node positions", GH_ParamAccess.list);
             pManager.AddIntegerParameter("Iterations", "Iter", "Solver iterations", GH_ParamAccess.item);
             pManager.AddBooleanParameter("Converged", "Conv", "Whether the solver converged", GH_ParamAccess.item);
+            pManager.AddVectorParameter("Rotations", "Rot", "Nodal rotations (shell only)", GH_ParamAccess.list);
+            pManager.AddNumberParameter("S1", "S1", "Major principal membrane stress per element (shell only)", GH_ParamAccess.list);
+            pManager.AddNumberParameter("S2", "S2", "Minor principal membrane stress per element (shell only)", GH_ParamAccess.list);
+            pManager.AddVectorParameter("Reaction Moments", "RM", "Reaction moment vectors at supports (shell only)", GH_ParamAccess.list);
         }
 
         protected override void SolveInstance(IGH_DataAccess DA)
@@ -88,7 +92,7 @@ namespace Ariadne.FEA.Components
             if (model.IsCoupled)
             {
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Error,
-                    "Coupled bar+solid models are not yet supported.");
+                    "Coupled multi-element-type models (bar+solid, bar+shell, etc.) are not yet supported.");
                 return;
             }
 
@@ -100,9 +104,18 @@ namespace Ariadne.FEA.Components
                 {
                     result = SolveBar(model, loads, loadNodeIdx, selfWeight, optConfig);
                 }
-                else
+                else if (model.HasSolidElements)
                 {
                     result = SolveSolid(model, loads, loadNodeIdx, selfWeight);
+                }
+                else if (model.HasShellElements)
+                {
+                    result = SolveShell(model, selfWeight);
+                }
+                else
+                {
+                    AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Model has no solvable elements.");
+                    return;
                 }
 
                 DA.SetData(0, result);
@@ -119,7 +132,7 @@ namespace Ariadne.FEA.Components
                     DA.SetDataList(5, result.AxialForces ?? []);
                     DA.SetDataList(6, result.BarStrains ?? []);
                 }
-                else
+                else if (model.HasSolidElements)
                 {
                     var reactionNodes = new List<Node>();
                     var mesh = model.SolidMesh!;
@@ -136,11 +149,32 @@ namespace Ariadne.FEA.Components
                     DA.SetDataList(5, new List<double>());
                     DA.SetDataList(6, new List<double>());
                 }
+                else if (model.HasShellElements)
+                {
+                    var reactionNodes = new List<Node>();
+                    foreach (int ni in result.ReactionNodeIndices)
+                    {
+                        reactionNodes.Add(new Node
+                        {
+                            Value = (Point3d)model.ShellMesh!.Vertices[ni],
+                            Index = ni
+                        });
+                    }
+                    DA.SetDataList(3, reactionNodes);
+                    DA.SetDataList(4, result.ShellS1 ?? []);
+                    DA.SetDataList(5, new List<double>());
+                    DA.SetDataList(6, new List<double>());
+                }
 
                 DA.SetDataList(7, result.Utilization);
                 DA.SetDataList(8, result.DeformedNodes);
                 DA.SetData(9, result.Iterations);
                 DA.SetData(10, result.Converged);
+
+                DA.SetDataList(11, result.ShellRotations ?? (IEnumerable<Vector3d>)[]);
+                DA.SetDataList(12, result.ShellS1 ?? []);
+                DA.SetDataList(13, result.ShellS2 ?? []);
+                DA.SetDataList(14, result.ShellReactionMoments ?? (IEnumerable<Vector3d>)[]);
             }
             catch (Exception ex)
             {
@@ -195,7 +229,12 @@ namespace Ariadne.FEA.Components
             List<int>? loadNodeIdx,
             bool selfWeight)
         {
-            var network = model.ToSolidNetwork();
+            var network = new FEA_SolidNetwork(
+                model.SolidMesh!,
+                model.Materials,
+                model.MaterialAssignment,
+                model.GetExpandedSupports());
+                
             var solidResult = SolidSolverService.SolveForward(network, loads, loadNodeIdx, selfWeight);
 
             var deformedModel = new FEA_Model(model);
@@ -220,6 +259,60 @@ namespace Ariadne.FEA.Components
                 DeformedNodes = solidResult.DeformedNodes,
                 SolidStresses = solidResult.Stresses,
                 VonMises = solidResult.VonMises,
+                Utilization = utilization,
+                Iterations = 1,
+                Converged = true,
+            };
+        }
+
+        private static FeaResult SolveShell(FEA_Model model, bool selfWeight)
+        {
+            var shellData = model.ToShellData();
+            var shellResult = ShellSolverService.SolveForward(shellData, selfWeight);
+
+            int nn = model.ShellMesh!.Vertices.Count;
+            int nTriangles = shellResult.S1.Length;
+
+            var deformedModel = new FEA_Model(model);
+            for (int i = 0; i < nn; i++)
+                deformedModel.ShellMesh!.Vertices[i] = new Point3f(
+                    (float)shellResult.DeformedNodes[i].X,
+                    (float)shellResult.DeformedNodes[i].Y,
+                    (float)shellResult.DeformedNodes[i].Z);
+
+            var reactionNodeIndices = model.SupportNodeIndices.ToArray();
+            var reactions = new Vector3d[reactionNodeIndices.Length];
+            for (int s = 0; s < reactionNodeIndices.Length; s++)
+            {
+                int ni = reactionNodeIndices[s];
+                if (ni < shellResult.ReactionForces.Length)
+                    reactions[s] = shellResult.ReactionForces[ni];
+            }
+
+            var utilization = new double[nTriangles];
+            for (int e = 0; e < nTriangles; e++)
+            {
+                int matIdx = e < model.MaterialAssignment.Length ? model.MaterialAssignment[e] : 0;
+                double yieldStress = model.Materials[matIdx].YieldStress;
+                double vm = e < shellResult.VonMises.Length ? shellResult.VonMises[e] : 0.0;
+                utilization[e] = yieldStress > 0 ? vm / yieldStress : 0.0;
+            }
+
+            return new FeaResult
+            {
+                Model = model,
+                DeformedModel = deformedModel,
+                Displacements = shellResult.Displacements,
+                Reactions = reactions,
+                ReactionNodeIndices = reactionNodeIndices,
+                DeformedNodes = shellResult.DeformedNodes,
+                ShellRotations = shellResult.Rotations,
+                ShellReactionMoments = shellResult.ReactionMoments,
+                ShellS1 = shellResult.S1,
+                ShellS2 = shellResult.S2,
+                ShellVonMises = shellResult.VonMises,
+                ShellTopStresses = shellResult.TopStresses,
+                ShellBottomStresses = shellResult.BottomStresses,
                 Utilization = utilization,
                 Iterations = 1,
                 Converged = true,

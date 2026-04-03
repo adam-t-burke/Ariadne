@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using Grasshopper.Kernel;
+using Grasshopper.Kernel.Types;
 using Rhino.Geometry;
 
 namespace Ariadne.FEA.Components
@@ -22,6 +23,9 @@ namespace Ariadne.FEA.Components
             pManager.AddMeshParameter("Mesh", "M", "Closed triangulated surface mesh", GH_ParamAccess.item);
             pManager.AddNumberParameter("Max Volume", "V", "Maximum tetrahedron volume (0 = no constraint)", GH_ParamAccess.item, 0.0);
             pManager.AddNumberParameter("Quality", "Q", "Minimum radius-edge ratio (0 = no quality, typical 1.2-2.0)", GH_ParamAccess.item, 2.0);
+            pManager.AddBooleanParameter("Quadratic", "O2", "Generate 10-node quadratic tetrahedra", GH_ParamAccess.item, false);
+            pManager.AddGenericParameter("Material", "Mat", "Material properties (default: Steel)", GH_ParamAccess.item);
+            pManager[4].Optional = true;
         }
 
         protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -34,10 +38,12 @@ namespace Ariadne.FEA.Components
             Mesh? mesh = null;
             double maxVolume = 0.0;
             double quality = 2.0;
+            bool quadratic = false;
 
             if (!DA.GetData(0, ref mesh)) return;
             DA.GetData(1, ref maxVolume);
             DA.GetData(2, ref quality);
+            DA.GetData(3, ref quadratic);
 
             if (mesh == null)
             {
@@ -57,7 +63,7 @@ namespace Ariadne.FEA.Components
             try
             {
                 string? error = Ariadne.TetGen.TetGenMesher.Tetrahedralize(
-                    mesh, maxVolume, quality,
+                    mesh, maxVolume, quality, quadratic,
                     out var nodes, out var elements, out var boundaryFaces);
 
                 if (error != null)
@@ -74,6 +80,17 @@ namespace Ariadne.FEA.Components
                 }
 
                 var solidMesh = new SolidMesh(nodes, elements, boundaryFaces);
+
+                FeaMaterial material = FeaMaterial.Steel();
+                {
+                    object? matInput = null;
+                    if (DA.GetData(4, ref matInput) && matInput != null)
+                    {
+                        if (matInput is GH_ObjectWrapper w) matInput = w.Value;
+                        if (matInput is FeaMaterial m) material = m;
+                    }
+                }
+                solidMesh.Material = material;
 
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
                     $"Generated {solidMesh.Ne} tets with {solidMesh.Nn} nodes.");

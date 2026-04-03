@@ -60,13 +60,22 @@ fn transpose3(m: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
 // ─────────────────────────────────────────────────────────────
 
 #[inline]
-pub fn extract_tet_coords(positions: &Array2<f64>, nodes: &[usize; 4]) -> [[f64; 3]; 4] {
+pub fn extract_tet4_coords(positions: &Array2<f64>, nodes: &[usize]) -> [[f64; 3]; 4] {
     [
         [positions[[nodes[0], 0]], positions[[nodes[0], 1]], positions[[nodes[0], 2]]],
         [positions[[nodes[1], 0]], positions[[nodes[1], 1]], positions[[nodes[1], 2]]],
         [positions[[nodes[2], 0]], positions[[nodes[2], 1]], positions[[nodes[2], 2]]],
         [positions[[nodes[3], 0]], positions[[nodes[3], 1]], positions[[nodes[3], 2]]],
     ]
+}
+
+#[inline]
+pub fn extract_tet10_coords(positions: &Array2<f64>, nodes: &[usize]) -> [[f64; 3]; 10] {
+    let mut coords = [[0.0; 3]; 10];
+    for i in 0..10 {
+        coords[i] = [positions[[nodes[i], 0]], positions[[nodes[i], 1]], positions[[nodes[i], 2]]];
+    }
+    coords
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -106,6 +115,57 @@ pub fn tet4_shape_derivs(_xi: f64, _eta: f64, _zeta: f64) -> [[f64; 3]; 4] {
     ]
 }
 
+#[inline]
+pub fn tet10_shape_functions(xi: f64, eta: f64, zeta: f64) -> [f64; 10] {
+    let l1 = 1.0 - xi - eta - zeta;
+    let l2 = xi;
+    let l3 = eta;
+    let l4 = zeta;
+    [
+        l1 * (2.0 * l1 - 1.0),
+        l2 * (2.0 * l2 - 1.0),
+        l3 * (2.0 * l3 - 1.0),
+        l4 * (2.0 * l4 - 1.0),
+        4.0 * l1 * l2,
+        4.0 * l2 * l3,
+        4.0 * l3 * l1,
+        4.0 * l1 * l4,
+        4.0 * l2 * l4,
+        4.0 * l3 * l4,
+    ]
+}
+
+#[inline]
+pub fn tet10_shape_derivs(xi: f64, eta: f64, zeta: f64) -> [[f64; 3]; 10] {
+    let l1 = 1.0 - xi - eta - zeta;
+    let l2 = xi;
+    let l3 = eta;
+    let l4 = zeta;
+    
+    let mut dn = [[0.0; 3]; 10];
+    
+    let dn0_dl1 = 4.0 * l1 - 1.0;
+    dn[0][0] = -dn0_dl1; dn[0][1] = -dn0_dl1; dn[0][2] = -dn0_dl1;
+    
+    let dn1_dl2 = 4.0 * l2 - 1.0;
+    dn[1][0] = dn1_dl2;
+    
+    let dn2_dl3 = 4.0 * l3 - 1.0;
+    dn[2][1] = dn2_dl3;
+    
+    let dn3_dl4 = 4.0 * l4 - 1.0;
+    dn[3][2] = dn3_dl4;
+    
+    dn[4][0] = 4.0 * (l1 - l2); dn[4][1] = -4.0 * l2; dn[4][2] = -4.0 * l2;
+    dn[5][0] = 4.0 * l3;        dn[5][1] = 4.0 * l2;
+    dn[6][0] = -4.0 * l3;       dn[6][1] = 4.0 * (l1 - l3); dn[6][2] = -4.0 * l3;
+    dn[7][0] = -4.0 * l4;       dn[7][1] = -4.0 * l4;       dn[7][2] = 4.0 * (l1 - l4);
+    dn[8][0] = 4.0 * l4;        dn[8][2] = 4.0 * l2;
+    dn[9][1] = 4.0 * l4;        dn[9][2] = 4.0 * l3;
+    
+    dn
+}
+
 // ─────────────────────────────────────────────────────────────
 //  Constitutive matrix D (6×6, isotropic linear elasticity)
 // ─────────────────────────────────────────────────────────────
@@ -141,6 +201,20 @@ pub fn precompute_d_matrices(problem: &SolidProblem) -> Vec<[[f64; 6]; 6]> {
 pub fn d_times_b(d: &[[f64; 6]; 6], b: &[[f64; 12]; 6]) -> [[f64; 12]; 6] {
     let mut db = [[0.0f64; 12]; 6];
     for j in 0..12 {
+        for i in 0..3 {
+            db[i][j] = d[i][0] * b[0][j] + d[i][1] * b[1][j] + d[i][2] * b[2][j];
+        }
+        db[3][j] = d[3][3] * b[3][j];
+        db[4][j] = d[4][4] * b[4][j];
+        db[5][j] = d[5][5] * b[5][j];
+    }
+    db
+}
+
+#[inline]
+pub fn d_times_b_30(d: &[[f64; 6]; 6], b: &[[f64; 30]; 6]) -> [[f64; 30]; 6] {
+    let mut db = [[0.0f64; 30]; 6];
+    for j in 0..30 {
         for i in 0..3 {
             db[i][j] = d[i][0] * b[0][j] + d[i][1] * b[1][j] + d[i][2] * b[2][j];
         }
@@ -201,6 +275,54 @@ pub fn tet4_b_matrix_at(
     Some((b, det_j.abs()))
 }
 
+#[inline]
+pub fn tet10_b_matrix_at(
+    coords: &[[f64; 3]; 10],
+    xi: f64, eta: f64, zeta: f64,
+) -> Option<([[f64; 30]; 6], f64)> {
+    let dn_dxi = tet10_shape_derivs(xi, eta, zeta);
+    
+    let mut j = [[0.0f64; 3]; 3];
+    for n in 0..10 {
+        for r in 0..3 {
+            for c in 0..3 {
+                j[r][c] += coords[n][r] * dn_dxi[n][c];
+            }
+        }
+    }
+
+    let det_j = det3(&j);
+    if det_j.abs() < 1e-30 {
+        return None;
+    }
+
+    let j_inv_t = transpose3(&inv3(&j)?);
+
+    let mut dn_dx = [[0.0f64; 3]; 10];
+    for n in 0..10 {
+        for i in 0..3 {
+            dn_dx[n][i] = j_inv_t[i][0] * dn_dxi[n][0]
+                        + j_inv_t[i][1] * dn_dxi[n][1]
+                        + j_inv_t[i][2] * dn_dxi[n][2];
+        }
+    }
+
+    let mut b = [[0.0f64; 30]; 6];
+    for n in 0..10 {
+        let col = n * 3;
+        let (dx, dy, dz) = (dn_dx[n][0], dn_dx[n][1], dn_dx[n][2]);
+
+        b[0][col]     = dx;
+        b[1][col + 1] = dy;
+        b[2][col + 2] = dz;
+        b[3][col]     = dy;  b[3][col + 1] = dx;
+        b[4][col + 1] = dz;  b[4][col + 2] = dy;
+        b[5][col]     = dz;  b[5][col + 2] = dx;
+    }
+
+    Some((b, det_j.abs()))
+}
+
 /// Backward-compatible wrapper: B matrix and volume (single evaluation).
 #[inline]
 pub fn tet4_b_matrix(coords: &[[f64; 3]; 4]) -> Option<([[f64; 12]; 6], f64)> {
@@ -238,6 +360,38 @@ pub fn tet4_element_stiffness_quad(
     }
 
     for i in 0..12 {
+        for j in 0..i {
+            ke[i][j] = ke[j][i];
+        }
+    }
+
+    Some(ke)
+}
+
+#[inline]
+pub fn tet10_element_stiffness_quad(
+    coords: &[[f64; 3]; 10],
+    d: &[[f64; 6]; 6],
+) -> Option<[[f64; 30]; 30]> {
+    let mut ke = [[0.0f64; 30]; 30];
+
+    for &(pt, w) in &TET4_GAUSS_POINTS {
+        let (b, abs_det_j) = tet10_b_matrix_at(coords, pt[0], pt[1], pt[2])?;
+        let db = d_times_b_30(d, &b);
+        let factor = w * abs_det_j;
+
+        for i in 0..30 {
+            for j in i..30 {
+                let mut s = 0.0;
+                for k in 0..6 {
+                    s += b[k][i] * db[k][j];
+                }
+                ke[i][j] += factor * s;
+            }
+        }
+    }
+
+    for i in 0..30 {
         for j in 0..i {
             ke[i][j] = ke[j][i];
         }
@@ -297,12 +451,22 @@ pub fn assemble_global_k(
         .fold(
             || vec![0.0f64; nnz],
             |mut buf, e| {
-                let coords = extract_tet_coords(positions, &elements[e]);
                 let d = &d_matrices[element_props[e].material_idx];
+                let nodes = &elements[e];
 
-                if let Some(ke) = tet4_element_stiffness_quad(&coords, d) {
-                    for &(nz_idx, li, lj) in &elem_to_nz.entries[e] {
-                        buf[nz_idx] += ke[li][lj];
+                if nodes.len() == 10 {
+                    let coords = extract_tet10_coords(positions, nodes);
+                    if let Some(ke) = tet10_element_stiffness_quad(&coords, d) {
+                        for &(nz_idx, li, lj) in &elem_to_nz.entries[e] {
+                            buf[nz_idx] += ke[li][lj];
+                        }
+                    }
+                } else {
+                    let coords = extract_tet4_coords(positions, nodes);
+                    if let Some(ke) = tet4_element_stiffness_quad(&coords, d) {
+                        for &(nz_idx, li, lj) in &elem_to_nz.entries[e] {
+                            buf[nz_idx] += ke[li][lj];
+                        }
                     }
                 }
                 buf
@@ -352,18 +516,37 @@ pub fn assemble_loads(
         for e in 0..ne {
             let nodes = &problem.elements[e];
             let mat = &problem.materials[problem.element_props[e].material_idx];
-            let coords = extract_tet_coords(positions, nodes);
 
-            for &(pt, w) in &TET4_GAUSS_POINTS {
-                let n_vals = tet4_shape_functions(pt[0], pt[1], pt[2]);
-                if let Some((_, abs_det_j)) = tet4_b_matrix_at(&coords, pt[0], pt[1], pt[2]) {
-                    let factor = w * abs_det_j * mat.density;
-                    for node_local in 0..4 {
-                        let ni = nodes[node_local];
-                        for d in 0..3 {
-                            let gi = ni * 3 + d;
-                            if let Some(fi) = cache.dof_map.global_to_free[gi] {
-                                cache.rhs[fi] += factor * n_vals[node_local] * problem.gravity[d];
+            if nodes.len() == 10 {
+                let coords = extract_tet10_coords(positions, nodes);
+                for &(pt, w) in &TET4_GAUSS_POINTS {
+                    let n_vals = tet10_shape_functions(pt[0], pt[1], pt[2]);
+                    if let Some((_, abs_det_j)) = tet10_b_matrix_at(&coords, pt[0], pt[1], pt[2]) {
+                        let factor = w * abs_det_j * mat.density;
+                        for node_local in 0..10 {
+                            let ni = nodes[node_local];
+                            for d in 0..3 {
+                                let gi = ni * 3 + d;
+                                if let Some(fi) = cache.dof_map.global_to_free[gi] {
+                                    cache.rhs[fi] += factor * n_vals[node_local] * problem.gravity[d];
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                let coords = extract_tet4_coords(positions, nodes);
+                for &(pt, w) in &TET4_GAUSS_POINTS {
+                    let n_vals = tet4_shape_functions(pt[0], pt[1], pt[2]);
+                    if let Some((_, abs_det_j)) = tet4_b_matrix_at(&coords, pt[0], pt[1], pt[2]) {
+                        let factor = w * abs_det_j * mat.density;
+                        for node_local in 0..4 {
+                            let ni = nodes[node_local];
+                            for d in 0..3 {
+                                let gi = ni * 3 + d;
+                                if let Some(fi) = cache.dof_map.global_to_free[gi] {
+                                    cache.rhs[fi] += factor * n_vals[node_local] * problem.gravity[d];
+                                }
                             }
                         }
                     }

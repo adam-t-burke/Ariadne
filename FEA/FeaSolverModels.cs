@@ -60,3 +60,36 @@ internal sealed record FeaSolverData(
     int[] LoadNodes,
     bool IncludeSelfWeight,
     double[] Gravity);
+
+internal sealed record ShellSolveData
+{
+    public required Vector3d[] Displacements { get; init; }
+    public required Vector3d[] Rotations { get; init; }
+    public required Vector3d[] ReactionForces { get; init; }
+    public required Vector3d[] ReactionMoments { get; init; }
+    public required Point3d[] DeformedNodes { get; init; }
+    public required double[] S1 { get; init; }
+    public required double[] S2 { get; init; }
+    public required double[] TopStresses { get; init; }
+    public required double[] BottomStresses { get; init; }
+    public required double[] VonMises { get; init; }
+}
+
+internal sealed record ShellSolverData(
+    int NumNodes,
+    int NumElements,
+    double[] NodePositions,
+    double[] NodeThicknesses,
+    int[] Elements,
+    int[] NumNodesPerElement,
+    int NumMaterials,
+    double[] Materials,
+    int NumSections,
+    double[] Sections,
+    int[] ElementProps,
+    int NumSupports,
+    int[] Supports,
+    int NumLoads,
+    double[] LoadForces,
+    double[] LoadMoments,
+    int[] LoadNodes);

@@ -14,6 +14,20 @@ public sealed class FeaSupport
     public bool FixX { get; init; } = true;
     public bool FixY { get; init; } = true;
     public bool FixZ { get; init; } = true;
+    public bool FixRX { get; init; } = false; // 6-DOF support
+    public bool FixRY { get; init; } = false;
+    public bool FixRZ { get; init; } = false;
+
+    public static FeaSupport Fixed(Point3d location) => new()
+    {
+        Location = location,
+        FixX = true,
+        FixY = true,
+        FixZ = true,
+        FixRX = true,
+        FixRY = true,
+        FixRZ = true,
+    };
 
     public static FeaSupport Pinned(Point3d location) => new()
     {

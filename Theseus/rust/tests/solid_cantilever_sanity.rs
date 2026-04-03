@@ -41,7 +41,7 @@ fn skewed_tet_balances_load_and_deflects_downward() {
         supports: supports.clone(),
         loads,
         node_positions,
-        elements: vec![[0, 1, 2, 3]],
+        elements: vec![vec![0, 1, 2, 3]],
         dof_map: SolidDofMap::from_supports(4, &supports),
         include_self_weight: false,
         gravity: [0.0, 0.0, -9.81],

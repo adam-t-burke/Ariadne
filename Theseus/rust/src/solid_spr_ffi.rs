@@ -47,6 +47,7 @@ pub unsafe extern "C" fn theseus_solid_spr_recover(
     num_elements: usize,
     node_positions: *const f64,
     elements: *const i32,
+    num_nodes_per_element: *const i32,
     element_stresses: *const f64,
     nodal_stresses: *mut f64,
     element_errors: *mut f64,
@@ -61,15 +62,21 @@ pub unsafe extern "C" fn theseus_solid_spr_recover(
         let positions = Array2::from_shape_vec((num_nodes, 3), pos_slice.to_vec())
             .map_err(|e| TheseusError::Shape(format!("node_positions: {e}")))?;
 
-        let elem_slice = slice::from_raw_parts(elements, num_elements * 4);
-        let elems: Vec<[usize; 4]> = (0..num_elements)
-            .map(|e| [
-                elem_slice[e * 4] as usize,
-                elem_slice[e * 4 + 1] as usize,
-                elem_slice[e * 4 + 2] as usize,
-                elem_slice[e * 4 + 3] as usize,
-            ])
-            .collect();
+        let num_nodes_per_elem = slice::from_raw_parts(num_nodes_per_element, num_elements);
+        let total_indices: usize = num_nodes_per_elem.iter().map(|&n| n as usize).sum();
+        let elem_slice = slice::from_raw_parts(elements, total_indices);
+        
+        let mut elems = Vec::with_capacity(num_elements);
+        let mut offset = 0;
+        for &n in num_nodes_per_elem {
+            let n = n as usize;
+            let mut nodes = Vec::with_capacity(n);
+            for i in 0..n {
+                nodes.push(elem_slice[offset + i] as usize);
+            }
+            elems.push(nodes);
+            offset += n;
+        }
 
         // Average 4 GP stresses per element down to 1 for SPR
         let stress_slice = slice::from_raw_parts(element_stresses, num_elements * ngp * 6);

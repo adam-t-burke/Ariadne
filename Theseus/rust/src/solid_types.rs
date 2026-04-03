@@ -90,7 +90,7 @@ pub struct SolidProblem {
     pub supports: Vec<SolidSupport>,
     pub loads: Vec<SolidLoad>,
     pub node_positions: Array2<f64>,
-    pub elements: Vec<[usize; 4]>,
+    pub elements: Vec<Vec<usize>>,
     pub dof_map: SolidDofMap,
     pub include_self_weight: bool,
     pub gravity: [f64; 3],
@@ -122,13 +122,14 @@ impl SolidCache {
         let n_free = problem.dof_map.num_free_dofs;
         let n_total = problem.dof_map.num_total_dofs;
 
-        let mut triplets: Vec<(u32, u32, f64)> = Vec::with_capacity(ne * 144 + n_free);
+        let mut triplets: Vec<(u32, u32, f64)> = Vec::new();
         for e in 0..ne {
             let nodes = &problem.elements[e];
-            let mut global_dofs = [0usize; 12];
-            for (i, &ni) in nodes.iter().enumerate() {
+            let num_dofs = nodes.len() * 3;
+            let mut global_dofs = Vec::with_capacity(num_dofs);
+            for &ni in nodes {
                 for d in 0..3 {
-                    global_dofs[i * 3 + d] = ni * 3 + d;
+                    global_dofs.push(ni * 3 + d);
                 }
             }
             for &gi in &global_dofs {
@@ -151,10 +152,11 @@ impl SolidCache {
         let mut elem_entries: Vec<Vec<(usize, usize, usize)>> = vec![Vec::new(); ne];
         for e in 0..ne {
             let nodes = &problem.elements[e];
-            let mut global_dofs = [0usize; 12];
-            for (i, &ni) in nodes.iter().enumerate() {
+            let num_dofs = nodes.len() * 3;
+            let mut global_dofs = Vec::with_capacity(num_dofs);
+            for &ni in nodes {
                 for d in 0..3 {
-                    global_dofs[i * 3 + d] = ni * 3 + d;
+                    global_dofs.push(ni * 3 + d);
                 }
             }
             for (li, &gi) in global_dofs.iter().enumerate() {

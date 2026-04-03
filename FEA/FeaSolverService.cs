@@ -111,11 +111,18 @@ public static class FeaSolverService
             matData[i * 3 + 2] = network.Materials[i].YieldStress;
         }
 
-        // Sections
+        // Sections: 6 doubles per section [A, Iy, Iz, J, Asy, Asz]
         int numSec = network.Sections.Count;
-        var secData = new double[numSec];
+        var secData = new double[numSec * 6];
         for (int i = 0; i < numSec; i++)
-            secData[i] = network.Sections[i].Area;
+        {
+            secData[i * 6] = network.Sections[i].Area;
+            secData[i * 6 + 1] = network.Sections[i].Iy;
+            secData[i * 6 + 2] = network.Sections[i].Iz;
+            secData[i * 6 + 3] = network.Sections[i].J;
+            secData[i * 6 + 4] = network.Sections[i].Asy;
+            secData[i * 6 + 5] = network.Sections[i].Asz;
+        }
 
         // Element properties
         var elemProps = new int[ne * 2];
@@ -125,20 +132,24 @@ public static class FeaSolverService
             elemProps[e * 2 + 1] = network.SectionAssignment[e];
         }
 
-        // Supports
+        // Supports: 7 ints per support [node, fix_x, fix_y, fix_z, fix_rx, fix_ry, fix_rz]
         int numSup = network.Supports.Count;
-        var supData = new int[numSup * 4];
+        var supData = new int[numSup * 7];
         for (int s = 0; s < numSup; s++)
         {
-            supData[s * 4] = network.SupportToNodeMap[s];
-            supData[s * 4 + 1] = network.Supports[s].FixX ? 1 : 0;
-            supData[s * 4 + 2] = network.Supports[s].FixY ? 1 : 0;
-            supData[s * 4 + 3] = network.Supports[s].FixZ ? 1 : 0;
+            supData[s * 7] = network.SupportToNodeMap[s];
+            supData[s * 7 + 1] = network.Supports[s].FixX ? 1 : 0;
+            supData[s * 7 + 2] = network.Supports[s].FixY ? 1 : 0;
+            supData[s * 7 + 3] = network.Supports[s].FixZ ? 1 : 0;
+            supData[s * 7 + 4] = network.Supports[s].FixRX ? 1 : 0;
+            supData[s * 7 + 5] = network.Supports[s].FixRY ? 1 : 0;
+            supData[s * 7 + 6] = network.Supports[s].FixRZ ? 1 : 0;
         }
 
         // Loads
         int numLoads = loads.Count;
         var loadForces = new double[numLoads * 3];
+        var loadMoments = new double[numLoads * 3];
         var loadNodeIdx = new int[numLoads];
 
         if (loadNodeIndices != null && loadNodeIndices.Count == numLoads)
@@ -153,7 +164,6 @@ public static class FeaSolverService
         }
         else
         {
-            // Apply loads to first N free nodes
             var freeNodes = Enumerable.Range(0, nn)
                 .Where(n => !network.SupportNodeIndices.Contains(n))
                 .ToList();
@@ -171,8 +181,9 @@ public static class FeaSolverService
         var solver = FeaSolver.Create(
             nn, ne, nodePos, edgeNodes,
             numMat, matData, numSec, secData, elemProps,
-            numSup, supData, numLoads, loadForces, loadNodeIdx,
-            includeSelfWeight, gravity);
+            numSup, supData, numLoads, loadForces, loadMoments, loadNodeIdx,
+            includeSelfWeight, gravity,
+            0); // truss formulation (beam mode handled separately)
 
         var context = new FeaSolverContext
         {
