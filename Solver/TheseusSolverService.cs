@@ -50,6 +50,8 @@ public static class TheseusSolverService
             objective.ApplyTo(solver, context);
         }
 
+        ApplyLoadConfig(solver, inputs, context);
+
         solver.SetSolverOptions(
             maxIterations: options.MaxIterations,
             absTol: options.AbsTol,
@@ -83,6 +85,8 @@ public static class TheseusSolverService
             data.FreeIndices, data.FixedIndices,
             data.Loads, data.FixedPositions,
             data.QInit, data.LowerBounds, data.UpperBounds);
+
+        ApplyLoadConfig(solver, inputs, context);
 
         var result = solver.SolveForward();
 
@@ -118,6 +122,8 @@ public static class TheseusSolverService
             data.Loads, data.FixedPositions,
             data.QInit, data.LowerBounds, data.UpperBounds);
 
+        ApplyLoadConfig(solver, inputs, context);
+
         var result = solver.SolvePseudoinverse(targetFreeXyz, regularization, useL2, maxL1Iter, useAugmented,
             enforceZeroRx, enforceZeroRy, enforceZeroRz, solveForQ);
         return BuildResult(network, result, context);
@@ -145,6 +151,8 @@ public static class TheseusSolverService
             data.FreeIndices, data.FixedIndices,
             data.Loads, data.FixedPositions,
             data.QInit, data.LowerBounds, data.UpperBounds);
+
+        ApplyLoadConfig(solver, inputs, context);
 
         var result = solver.SolveNnls(targetFreeXyz, maxIter, tol);
         return BuildResult(network, result, context);
@@ -310,6 +318,87 @@ public static class TheseusSolverService
             Expand(inputs.QInit, numEdges),
             lowerBounds,
             upperBounds);
+    }
+
+    private static void ApplyLoadConfig(TheseusSolver solver, SolverInputs inputs, SolverContext context)
+    {
+        if (inputs.SelfWeight is SelfWeightConfig.Prescribed prescribed)
+        {
+            int numEdges = context.EdgeIndexMap.Count;
+            var mu = new double[numEdges];
+            for (int i = 0; i < numEdges; i++)
+                mu[i] = i < prescribed.LinearDensities.Count
+                    ? prescribed.LinearDensities[i]
+                    : prescribed.LinearDensities[^1];
+
+            var g = new[] { prescribed.Gravity.X, prescribed.Gravity.Y, prescribed.Gravity.Z };
+            solver.SetSelfWeightPrescribed(mu, g,
+                prescribed.MaxIters, prescribed.Tolerance, prescribed.Relaxation);
+        }
+        else if (inputs.SelfWeight is SelfWeightConfig.Sizing sizing)
+        {
+            var g = new[] { sizing.Gravity.X, sizing.Gravity.Y, sizing.Gravity.Z };
+            solver.SetSelfWeightSizing(sizing.Rho, sizing.Sigma, g,
+                sizing.MaxIters, sizing.Tolerance, sizing.Relaxation);
+        }
+
+        if (inputs.Pressure is { } pressure)
+        {
+            int numFaces = pressure.Faces.Count;
+            var faces = BuildFaceArray(pressure.Faces, context);
+
+            switch (pressure)
+            {
+                case PressureConfig.Normal normal:
+                {
+                    var press = ExpandPerFace(normal.Pressures, numFaces);
+                    solver.SetPressure(faces, press,
+                        normal.MaxIters, normal.Tolerance, normal.Relaxation);
+                    break;
+                }
+                case PressureConfig.Hydrostatic hydro:
+                {
+                    var up = new[] { hydro.UpDirection.X, hydro.UpDirection.Y, hydro.UpDirection.Z };
+                    solver.SetPressureHydrostatic(faces,
+                        hydro.RhoFluid, hydro.GMagnitude, hydro.ZDatum, up,
+                        hydro.MaxIters, hydro.Tolerance, hydro.Relaxation);
+                    break;
+                }
+                case PressureConfig.Directional dir:
+                {
+                    var press = ExpandPerFace(dir.Pressures, numFaces);
+                    var d = new[] { dir.Direction.X, dir.Direction.Y, dir.Direction.Z };
+                    solver.SetPressureDirectional(faces, press, d,
+                        dir.MaxIters, dir.Tolerance, dir.Relaxation);
+                    break;
+                }
+            }
+        }
+    }
+
+    private static int[][] BuildFaceArray(List<List<int>> faces, SolverContext context)
+    {
+        int numFaces = faces.Count;
+        var result = new int[numFaces][];
+        for (int f = 0; f < numFaces; f++)
+        {
+            var faceVerts = faces[f];
+            result[f] = new int[faceVerts.Count];
+            for (int v = 0; v < faceVerts.Count; v++)
+            {
+                var node = context.Network.Graph.Nodes[faceVerts[v]];
+                result[f][v] = context.NodeIndexMap[node];
+            }
+        }
+        return result;
+    }
+
+    private static double[] ExpandPerFace(List<double> values, int numFaces)
+    {
+        var result = new double[numFaces];
+        for (int f = 0; f < numFaces; f++)
+            result[f] = f < values.Count ? values[f] : values[^1];
+        return result;
     }
 
     private static SolveResult BuildResult(FDM_Network oldNetwork, SolverResult result, SolverContext context)

@@ -214,6 +214,123 @@ public sealed class TheseusSolver : IDisposable
             _handle, weight, ToNuint(anchorIndices), (nuint)anchorIndices.Length, targetDirs, targetMags));
     }
 
+    // ── Self-weight ───────────────────────────────────────────
+
+    public void SetSelfWeightPrescribed(
+        double[] linearDensities, double[] gravity,
+        int maxIters = 50, double tolerance = 1e-6, double relaxation = 1.0)
+    {
+        ThrowIfDisposed();
+        Check(TheseusInterop.theseus_set_self_weight_prescribed(
+            _handle, linearDensities, gravity,
+            (nuint)maxIters, tolerance, relaxation));
+    }
+
+    public void SetSelfWeightSizing(
+        double rho, double sigma, double[] gravity,
+        int maxIters = 50, double tolerance = 1e-6, double relaxation = 1.0)
+    {
+        ThrowIfDisposed();
+        Check(TheseusInterop.theseus_set_self_weight_sizing(
+            _handle, rho, sigma, gravity,
+            (nuint)maxIters, tolerance, relaxation));
+    }
+
+    public void ClearSelfWeight()
+    {
+        ThrowIfDisposed();
+        Check(TheseusInterop.theseus_clear_self_weight(_handle));
+    }
+
+    // ── Pressure loads ──────────────────────────────────────
+
+    public void SetPressure(
+        int[][] faces, double[] pressures,
+        int maxIters = 50, double tolerance = 1e-6, double relaxation = 1.0)
+    {
+        ThrowIfDisposed();
+        int numFaces = faces.Length;
+        var offsets = new nuint[numFaces + 1];
+        int totalVerts = 0;
+        for (int f = 0; f < numFaces; f++)
+        {
+            offsets[f] = (nuint)totalVerts;
+            totalVerts += faces[f].Length;
+        }
+        offsets[numFaces] = (nuint)totalVerts;
+
+        var verts = new nuint[totalVerts];
+        int idx = 0;
+        for (int f = 0; f < numFaces; f++)
+            foreach (int v in faces[f])
+                verts[idx++] = (nuint)v;
+
+        Check(TheseusInterop.theseus_set_pressure(
+            _handle, (nuint)numFaces, offsets, verts, pressures,
+            (nuint)maxIters, tolerance, relaxation));
+    }
+
+    public void SetPressureHydrostatic(
+        int[][] faces, double rhoFluid, double gMagnitude, double zDatum,
+        double[] upDirection,
+        int maxIters = 50, double tolerance = 1e-6, double relaxation = 1.0)
+    {
+        ThrowIfDisposed();
+        int numFaces = faces.Length;
+        var offsets = new nuint[numFaces + 1];
+        int totalVerts = 0;
+        for (int f = 0; f < numFaces; f++)
+        {
+            offsets[f] = (nuint)totalVerts;
+            totalVerts += faces[f].Length;
+        }
+        offsets[numFaces] = (nuint)totalVerts;
+
+        var verts = new nuint[totalVerts];
+        int idx = 0;
+        for (int f = 0; f < numFaces; f++)
+            foreach (int v in faces[f])
+                verts[idx++] = (nuint)v;
+
+        Check(TheseusInterop.theseus_set_pressure_hydrostatic(
+            _handle, (nuint)numFaces, offsets, verts,
+            rhoFluid, gMagnitude, zDatum, upDirection,
+            (nuint)maxIters, tolerance, relaxation));
+    }
+
+    public void SetPressureDirectional(
+        int[][] faces, double[] pressures, double[] direction,
+        int maxIters = 50, double tolerance = 1e-6, double relaxation = 1.0)
+    {
+        ThrowIfDisposed();
+        int numFaces = faces.Length;
+        var offsets = new nuint[numFaces + 1];
+        int totalVerts = 0;
+        for (int f = 0; f < numFaces; f++)
+        {
+            offsets[f] = (nuint)totalVerts;
+            totalVerts += faces[f].Length;
+        }
+        offsets[numFaces] = (nuint)totalVerts;
+
+        var verts = new nuint[totalVerts];
+        int idx = 0;
+        for (int f = 0; f < numFaces; f++)
+            foreach (int v in faces[f])
+                verts[idx++] = (nuint)v;
+
+        Check(TheseusInterop.theseus_set_pressure_directional(
+            _handle, (nuint)numFaces, offsets, verts,
+            pressures, direction,
+            (nuint)maxIters, tolerance, relaxation));
+    }
+
+    public void ClearPressure()
+    {
+        ThrowIfDisposed();
+        Check(TheseusInterop.theseus_clear_pressure(_handle));
+    }
+
     // ── Solver options ───────────────────────────────────────
 
     public void SetSolverOptions(
