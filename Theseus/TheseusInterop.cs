@@ -25,8 +25,6 @@ internal static class TheseusInterop
         string? fileName = null;
         if (name == DLL)
             fileName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "theseus.dll" : "libtheseus.dylib";
-        else if (name == "tetgen_wrapper")
-            fileName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "tetgen_wrapper.dll" : "libtetgen_wrapper.so";
 
         if (fileName == null)
             return IntPtr.Zero;
