@@ -2,7 +2,7 @@
 //!
 //! Mirrors `src/FDM.jl` from the Julia code.
 
-use crate::types::{FdmCache, Factorization, FactorizationStrategy, Problem, TheseusError};
+use crate::types::{FdmCache, Factorization, FactorizationStrategy, Problem, SelfWeightParams, PressureParams, TheseusError};
 use ndarray::Array2;
 use rayon::prelude::*;
 
@@ -299,6 +299,245 @@ pub fn compute_geometry(cache: &mut FdmCache, problem: &Problem) {
         cache.reactions[[node, 1]] = reaction_sum[node * 3 + 1];
         cache.reactions[[node, 2]] = reaction_sum[node * 3 + 2];
     }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Self-weight load computation
+// ─────────────────────────────────────────────────────────────
+
+/// Update `cache.sw_mu` from current forces (sizing mode only).
+fn update_sizing_mu(cache: &mut FdmCache, rho: f64, sigma: f64) {
+    let ne = cache.member_lengths.len();
+    for k in 0..ne {
+        let a_k = cache.member_forces[k].abs() / sigma;
+        cache.sw_mu[k] = rho * a_k;
+        cache.cross_section_areas[k] = a_k;
+    }
+}
+
+/// Add lumped self-weight loads into `cache.pn` (which should already
+/// contain base loads).  Does not reset `pn` -- caller handles that.
+fn accumulate_self_weight_loads(
+    cache: &mut FdmCache,
+    gravity: &[f64; 3],
+) {
+    let ne = cache.member_lengths.len();
+    for k in 0..ne {
+        let mu_k = cache.sw_mu[k];
+        let l_k = cache.member_lengths[k];
+        let w_half = 0.5 * mu_k * l_k;
+
+        let s = cache.edge_starts[k];
+        let e = cache.edge_ends[k];
+
+        if let Some(sf) = cache.node_to_free_idx[s] {
+            for d in 0..3 {
+                cache.pn[[sf, d]] += w_half * gravity[d];
+            }
+        }
+        if let Some(ef) = cache.node_to_free_idx[e] {
+            for d in 0..3 {
+                cache.pn[[ef, d]] += w_half * gravity[d];
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Pressure load computation
+// ─────────────────────────────────────────────────────────────
+
+/// Compute Newell area-weighted normal for a face (un-normalized).
+/// Returns `(nx, ny, nz)` where `||(nx,ny,nz)|| = face area`.
+pub fn newell_normal(face: &[usize], nf: &Array2<f64>) -> [f64; 3] {
+    let nv = face.len();
+    let mut n = [0.0f64; 3];
+    for i in 0..nv {
+        let j = (i + 1) % nv;
+        let vi = face[i];
+        let vj = face[j];
+        // Cross product contribution: (v_i × v_j)
+        n[0] += (nf[[vi, 1]] - nf[[vj, 1]]) * (nf[[vi, 2]] + nf[[vj, 2]]);
+        n[1] += (nf[[vi, 2]] - nf[[vj, 2]]) * (nf[[vi, 0]] + nf[[vj, 0]]);
+        n[2] += (nf[[vi, 0]] - nf[[vj, 0]]) * (nf[[vi, 1]] + nf[[vj, 1]]);
+    }
+    // Newell gives 2× the area-weighted normal
+    n[0] *= 0.5;
+    n[1] *= 0.5;
+    n[2] *= 0.5;
+    n
+}
+
+/// Add pressure loads into `cache.pn` (which should already contain
+/// base loads and any self-weight).  Does not reset `pn`.
+/// Dispatches on the pressure mode (Normal / Hydrostatic / Directional).
+fn accumulate_pressure_loads(
+    cache: &mut FdmCache,
+    pressure: &PressureParams,
+) {
+    let faces = &pressure.face_topology().faces;
+    match pressure {
+        PressureParams::Normal { pressures, .. } => {
+            for (f_idx, face) in faces.iter().enumerate() {
+                let p_f = pressures[f_idx];
+                let n = newell_normal(face, &cache.nf);
+                let nv = face.len() as f64;
+                for &vi in face {
+                    if let Some(fi) = cache.node_to_free_idx[vi] {
+                        for d in 0..3 {
+                            cache.pn[[fi, d]] += p_f * n[d] / nv;
+                        }
+                    }
+                }
+            }
+        }
+        PressureParams::Hydrostatic {
+            rho_fluid, g_magnitude, z_datum, up_direction, ..
+        } => {
+            for face in faces {
+                let nv = face.len() as f64;
+                if nv < 3.0 { continue; }
+
+                // Face centroid projected onto the "up" direction
+                let mut centroid_up = 0.0;
+                for &vi in face {
+                    for d in 0..3 {
+                        centroid_up += cache.nf[[vi, d]] * up_direction[d];
+                    }
+                }
+                centroid_up /= nv;
+
+                let depth = z_datum - centroid_up;
+                if depth <= 0.0 { continue; }
+
+                let p_f = rho_fluid * g_magnitude * depth;
+                let n = newell_normal(face, &cache.nf);
+                for &vi in face {
+                    if let Some(fi) = cache.node_to_free_idx[vi] {
+                        for d in 0..3 {
+                            cache.pn[[fi, d]] += p_f * n[d] / nv;
+                        }
+                    }
+                }
+            }
+        }
+        PressureParams::Directional {
+            pressures, direction, ..
+        } => {
+            for (f_idx, face) in faces.iter().enumerate() {
+                let p_f = pressures[f_idx];
+                let n = newell_normal(face, &cache.nf);
+                let nv = face.len() as f64;
+
+                // Projected area = n_f · d_hat
+                let a_proj: f64 = (0..3).map(|d| n[d] * direction[d]).sum();
+                if a_proj <= 0.0 { continue; }
+
+                let load_mag = p_f * a_proj / nv;
+                for &vi in face {
+                    if let Some(fi) = cache.node_to_free_idx[vi] {
+                        for d in 0..3 {
+                            cache.pn[[fi, d]] += load_mag * direction[d];
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Universal forward solve with geometry-dependent loads
+// ─────────────────────────────────────────────────────────────
+
+/// Forward solve that handles self-weight and/or pressure loads via iteration.
+///
+/// When neither `problem.self_weight` nor `problem.pressure` is set, this
+/// delegates directly to [`solve_fdm`] with zero overhead.
+pub fn solve_fdm_with_loads(
+    cache: &mut FdmCache,
+    q: &[f64],
+    problem: &Problem,
+    anchor_positions: &Array2<f64>,
+    perturbation: f64,
+) -> Result<(), TheseusError> {
+    let has_sw = problem.self_weight.is_some();
+    let has_pressure = problem.pressure.is_some();
+
+    if !has_sw && !has_pressure {
+        return solve_fdm(cache, q, problem, anchor_positions, perturbation);
+    }
+
+    // Determine iteration parameters from whichever load type is active
+    let max_iters = match (&problem.self_weight, &problem.pressure) {
+        (Some(sw), Some(pr)) => sw.max_iters().max(pr.max_iters()),
+        (Some(sw), None) => sw.max_iters(),
+        (None, Some(pr)) => pr.max_iters(),
+        (None, None) => unreachable!(),
+    };
+    let tolerance = match (&problem.self_weight, &problem.pressure) {
+        (Some(sw), Some(pr)) => sw.tolerance().min(pr.tolerance()),
+        (Some(sw), None) => sw.tolerance(),
+        (None, Some(pr)) => pr.tolerance(),
+        (None, None) => unreachable!(),
+    };
+    let relaxation = match &problem.self_weight {
+        Some(sw) => sw.relaxation(),
+        None => 1.0,
+    };
+
+    // Reset pn to base loads
+    cache.pn.assign(&cache.pn_base);
+
+    let nn_free = problem.topology.free_node_indices.len();
+
+    for _iter in 0..max_iters {
+        // Inner linear FDM solve with current loads
+        solve_fdm(cache, q, problem, anchor_positions, perturbation)?;
+
+        // Update sizing mu from current forces if applicable
+        if let Some(SelfWeightParams::Sizing { rho, sigma, .. }) = &problem.self_weight {
+            update_sizing_mu(cache, *rho, *sigma);
+        }
+
+        // Save current pn, then rebuild from base + geometry-dependent loads
+        let pn_old = cache.pn.clone();
+        cache.pn.assign(&cache.pn_base);
+
+        if let Some(sw) = &problem.self_weight {
+            accumulate_self_weight_loads(cache, sw.gravity());
+        }
+        if let Some(pr) = &problem.pressure {
+            accumulate_pressure_loads(cache, pr);
+        }
+
+        // Convergence: relative change in load vector
+        let mut delta_sq = 0.0;
+        let mut pn_norm_sq = 0.0;
+        for i in 0..nn_free {
+            for d in 0..3 {
+                let diff = cache.pn[[i, d]] - pn_old[[i, d]];
+                delta_sq += diff * diff;
+                pn_norm_sq += cache.pn[[i, d]] * cache.pn[[i, d]];
+            }
+        }
+        if pn_norm_sq > 0.0 && delta_sq / pn_norm_sq < tolerance * tolerance {
+            break;
+        }
+
+        // Relaxation: blend new loads with old
+        if relaxation < 1.0 {
+            for i in 0..nn_free {
+                for d in 0..3 {
+                    cache.pn[[i, d]] = relaxation * cache.pn[[i, d]]
+                        + (1.0 - relaxation) * pn_old[[i, d]];
+                }
+            }
+        }
+    }
+
+    // Final solve with converged loads
+    solve_fdm(cache, q, problem, anchor_positions, perturbation)
 }
 
 // ─────────────────────────────────────────────────────────────

@@ -161,6 +161,53 @@ internal static class TheseusInterop
         nuint max_iterations, double abs_tol, double rel_tol,
         double barrier_weight, double barrier_sharpness);
 
+    // ── Self-weight configuration ────────────────────────────
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_set_self_weight_prescribed(
+        IntPtr handle,
+        double[] linear_densities, double[] gravity,
+        nuint max_iters, double tolerance, double relaxation);
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_set_self_weight_sizing(
+        IntPtr handle,
+        double rho, double sigma, double[] gravity,
+        nuint max_iters, double tolerance, double relaxation);
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_clear_self_weight(IntPtr handle);
+
+    // ── Pressure load configuration ──────────────────────────
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_set_pressure(
+        IntPtr handle,
+        nuint num_faces,
+        nuint[] face_offsets, nuint[] face_vertices,
+        double[] pressures,
+        nuint max_iters, double tolerance, double relaxation);
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_set_pressure_hydrostatic(
+        IntPtr handle,
+        nuint num_faces,
+        nuint[] face_offsets, nuint[] face_vertices,
+        double rho_fluid, double g_magnitude, double z_datum,
+        double[] up_direction,
+        nuint max_iters, double tolerance, double relaxation);
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_set_pressure_directional(
+        IntPtr handle,
+        nuint num_faces,
+        nuint[] face_offsets, nuint[] face_vertices,
+        double[] pressures, double[] direction,
+        nuint max_iters, double tolerance, double relaxation);
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_clear_pressure(IntPtr handle);
+
     // ── Progress callback ────────────────────────────────────
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]

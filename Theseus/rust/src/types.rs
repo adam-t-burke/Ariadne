@@ -310,6 +310,143 @@ impl AnchorInfo {
 }
 
 // ─────────────────────────────────────────────────────────────
+//  Self-weight parameters
+// ─────────────────────────────────────────────────────────────
+
+/// Self-weight configuration.  When present on a [`Problem`], the forward
+/// solve iterates until loads and geometry are mutually consistent.
+#[derive(Debug, Clone)]
+pub enum SelfWeightParams {
+    /// User-prescribed linear density (mass/length) per edge.
+    /// `pn_sw` depends on node positions `x` only.
+    Prescribed {
+        linear_densities: Vec<f64>,
+        gravity: [f64; 3],
+        max_iters: usize,
+        tolerance: f64,
+        relaxation: f64,
+    },
+    /// Cross-section derived from forces: `A_k = |F_k| / sigma`.
+    /// Linear density becomes `mu_k = rho * |q_k| * L_k / sigma`,
+    /// so `pn_sw` depends on both `x` and `q`.
+    Sizing {
+        rho: f64,
+        sigma: f64,
+        gravity: [f64; 3],
+        max_iters: usize,
+        tolerance: f64,
+        relaxation: f64,
+    },
+}
+
+impl SelfWeightParams {
+    pub fn gravity(&self) -> &[f64; 3] {
+        match self {
+            Self::Prescribed { gravity, .. } | Self::Sizing { gravity, .. } => gravity,
+        }
+    }
+    pub fn max_iters(&self) -> usize {
+        match self {
+            Self::Prescribed { max_iters, .. } | Self::Sizing { max_iters, .. } => *max_iters,
+        }
+    }
+    pub fn tolerance(&self) -> f64 {
+        match self {
+            Self::Prescribed { tolerance, .. } | Self::Sizing { tolerance, .. } => *tolerance,
+        }
+    }
+    pub fn relaxation(&self) -> f64 {
+        match self {
+            Self::Prescribed { relaxation, .. } | Self::Sizing { relaxation, .. } => *relaxation,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Pressure load parameters
+// ─────────────────────────────────────────────────────────────
+
+/// Face topology for pressure loads: each face is an ordered list of
+/// global vertex indices forming a closed polygon.
+#[derive(Debug, Clone)]
+pub struct FaceTopology {
+    /// `faces[f]` = ordered vertex indices for face `f`.
+    pub faces: Vec<Vec<usize>>,
+}
+
+/// Pressure load configuration.  When present on a [`Problem`], the forward
+/// solve iterates until pressure loads and geometry converge.
+#[derive(Debug, Clone)]
+pub enum PressureParams {
+    /// Constant pressure along each face's outward normal.
+    /// `F_f = p_f * n_f` (Newell area-weighted normal).
+    Normal {
+        face_topology: FaceTopology,
+        pressures: Vec<f64>,
+        max_iters: usize,
+        tolerance: f64,
+        relaxation: f64,
+    },
+    /// Hydrostatic pressure varying linearly with depth below a datum.
+    /// `p_f = rho_fluid * g_magnitude * max(0, z_datum - z_centroid)`,
+    /// applied along each face's outward normal.
+    Hydrostatic {
+        face_topology: FaceTopology,
+        rho_fluid: f64,
+        g_magnitude: f64,
+        z_datum: f64,
+        /// Unit "up" direction (default `[0,0,1]`).  Depth is measured
+        /// opposite to this direction from the datum.
+        up_direction: [f64; 3],
+        max_iters: usize,
+        tolerance: f64,
+        relaxation: f64,
+    },
+    /// Uniform directional pressure proportional to projected face area.
+    /// `F_f = p * max(0, n_f · d_hat) * d_hat` per vertex.
+    Directional {
+        face_topology: FaceTopology,
+        pressures: Vec<f64>,
+        /// Unit load direction (e.g. `[0,0,-1]` for gravity dead load).
+        direction: [f64; 3],
+        max_iters: usize,
+        tolerance: f64,
+        relaxation: f64,
+    },
+}
+
+impl PressureParams {
+    pub fn face_topology(&self) -> &FaceTopology {
+        match self {
+            Self::Normal { face_topology, .. }
+            | Self::Hydrostatic { face_topology, .. }
+            | Self::Directional { face_topology, .. } => face_topology,
+        }
+    }
+    pub fn max_iters(&self) -> usize {
+        match self {
+            Self::Normal { max_iters, .. }
+            | Self::Hydrostatic { max_iters, .. }
+            | Self::Directional { max_iters, .. } => *max_iters,
+        }
+    }
+    pub fn tolerance(&self) -> f64 {
+        match self {
+            Self::Normal { tolerance, .. }
+            | Self::Hydrostatic { tolerance, .. }
+            | Self::Directional { tolerance, .. } => *tolerance,
+        }
+    }
+    pub fn relaxation(&self) -> f64 {
+        match self {
+            Self::Normal { relaxation, .. }
+            | Self::Hydrostatic { relaxation, .. }
+            | Self::Directional { relaxation, .. } => *relaxation,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
 //  Problem definition  (immutable after construction)
 // ─────────────────────────────────────────────────────────────
 
@@ -322,6 +459,8 @@ pub struct Problem {
     pub objectives: Vec<Box<dyn ObjectiveTrait>>,
     pub bounds: Bounds,
     pub solver: SolverOptions,
+    pub self_weight: Option<SelfWeightParams>,
+    pub pressure: Option<PressureParams>,
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -605,6 +744,16 @@ pub struct FdmCache {
 
     // ── Factorization ──────────────────────────────────────
     pub strategy: FactorizationStrategy,
+
+    // ── Self-weight / pressure iteration buffers ──────────
+    /// Copy of the original (user-specified) free-node loads, used as the
+    /// base when self-weight or pressure loads are added iteratively.
+    pub pn_base: Array2<f64>,  // nn_free × 3
+    /// Per-edge linear density (mass/length).  In prescribed mode this is
+    /// constant; in sizing mode it is updated each self-weight iteration.
+    pub sw_mu: Vec<f64>,
+    /// Per-edge cross-section area (populated in sizing mode, zero otherwise).
+    pub cross_section_areas: Vec<f64>,
 }
 
 impl FdmCache {
@@ -686,6 +835,13 @@ impl FdmCache {
         let cf = topo.fixed_incidence.clone();
         let cn_owned = topo.free_incidence.clone();
 
+        let sw_mu = match &problem.self_weight {
+            Some(SelfWeightParams::Prescribed { linear_densities, .. }) => {
+                linear_densities.clone()
+            }
+            _ => vec![0.0; ne],
+        };
+
         Ok(FdmCache {
             a_matrix,
             factorization: None,
@@ -711,6 +867,9 @@ impl FdmCache {
             nf_fixed: Array2::zeros((nn_fixed, 3)),
             rhs: Array2::zeros((nn_free, 3)),
             strategy,
+            pn_base: problem.free_node_loads.clone(),
+            sw_mu,
+            cross_section_areas: vec![0.0; ne],
         })
     }
 }
@@ -767,6 +926,8 @@ pub struct SolverResult {
     pub iterations: usize,
     pub converged: bool,
     pub termination_reason: String,
+    /// Per-edge cross-section areas (populated in self-weight sizing mode).
+    pub cross_section_areas: Vec<f64>,
 }
 
 // ─────────────────────────────────────────────────────────────

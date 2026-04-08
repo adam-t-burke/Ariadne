@@ -257,10 +257,9 @@ pub fn optimize(
         .ok_or_else(|| TheseusError::Solver("L-BFGS returned no best parameters".into()))?;
     let (q, anchors) = unpack_parameters(problem, best_param);
 
-    // Final forward solve to get geometry
+    // Final forward solve to get geometry (with self-weight/pressure if active)
     let mut final_cache = FdmCache::new(problem)?;
-    crate::fdm::solve_fdm(&mut final_cache, &q, problem, &anchors, 1e-12)?;
-    crate::fdm::compute_geometry(&mut final_cache, problem);
+    crate::fdm::solve_fdm_with_loads(&mut final_cache, &q, problem, &anchors, 1e-12)?;
 
     let termination_status = result.state().get_termination_status();
     let converged = matches!(
@@ -281,13 +280,14 @@ pub fn optimize(
     Ok(SolverResult {
         q,
         anchor_positions: anchors,
-        xyz: final_cache.nf,
-        member_lengths: final_cache.member_lengths,
-        member_forces: final_cache.member_forces,
-        reactions: final_cache.reactions,
+        xyz: final_cache.nf.clone(),
+        member_lengths: final_cache.member_lengths.clone(),
+        member_forces: final_cache.member_forces.clone(),
+        reactions: final_cache.reactions.clone(),
         loss_trace,
         iterations: state.iterations,
         converged,
         termination_reason,
+        cross_section_areas: final_cache.cross_section_areas.clone(),
     })
 }

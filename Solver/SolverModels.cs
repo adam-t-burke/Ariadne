@@ -55,6 +55,81 @@ public sealed record OptimizationConfig
 }
 
 /// <summary>
+/// Self-weight configuration.
+/// </summary>
+public abstract record SelfWeightConfig
+{
+    /// <summary>Gravity vector (default [0, 0, -9.81]).</summary>
+    public Vector3d Gravity { get; init; } = new(0, 0, -9.81);
+    /// <summary>Maximum self-weight iterations.</summary>
+    public int MaxIters { get; init; } = 50;
+    /// <summary>Convergence tolerance for load iteration.</summary>
+    public double Tolerance { get; init; } = 1e-6;
+    /// <summary>Relaxation factor (1.0 = no relaxation).</summary>
+    public double Relaxation { get; init; } = 1.0;
+
+    /// <summary>Prescribed linear density (mass/length) per edge.</summary>
+    public sealed record Prescribed : SelfWeightConfig
+    {
+        /// <summary>Linear density per edge (kg/m). One value = uniform.</summary>
+        public required List<double> LinearDensities { get; init; }
+    }
+
+    /// <summary>Force-based sizing: A_k = |F_k| / sigma.</summary>
+    public sealed record Sizing : SelfWeightConfig
+    {
+        /// <summary>Material density (kg/m^3).</summary>
+        public required double Rho { get; init; }
+        /// <summary>Allowable stress (Pa or consistent units).</summary>
+        public required double Sigma { get; init; }
+    }
+}
+
+/// <summary>
+/// Pressure load configuration.
+/// </summary>
+public abstract record PressureConfig
+{
+    /// <summary>Face topology: each inner list is ordered vertex indices for one face.</summary>
+    public required List<List<int>> Faces { get; init; }
+    /// <summary>Maximum pressure iteration count.</summary>
+    public int MaxIters { get; init; } = 50;
+    /// <summary>Convergence tolerance.</summary>
+    public double Tolerance { get; init; } = 1e-6;
+    /// <summary>Relaxation factor.</summary>
+    public double Relaxation { get; init; } = 1.0;
+
+    /// <summary>Constant pressure along each face's outward normal.</summary>
+    public sealed record Normal : PressureConfig
+    {
+        /// <summary>Pressure magnitude per face (positive = along outward normal).</summary>
+        public required List<double> Pressures { get; init; }
+    }
+
+    /// <summary>Hydrostatic pressure varying linearly with depth (e.g. fabric formwork).</summary>
+    public sealed record Hydrostatic : PressureConfig
+    {
+        /// <summary>Fluid density (e.g. 2400 kg/m^3 for wet concrete).</summary>
+        public required double RhoFluid { get; init; }
+        /// <summary>Gravitational acceleration magnitude (default 9.81).</summary>
+        public double GMagnitude { get; init; } = 9.81;
+        /// <summary>Free surface elevation (top of pour) along the up direction.</summary>
+        public required double ZDatum { get; init; }
+        /// <summary>Unit "up" direction (default Z-axis). Depth is measured opposite to this.</summary>
+        public Vector3d UpDirection { get; init; } = new(0, 0, 1);
+    }
+
+    /// <summary>Directional pressure proportional to projected face area (e.g. dead load, soil pressure).</summary>
+    public sealed record Directional : PressureConfig
+    {
+        /// <summary>Pressure magnitude per face.</summary>
+        public required List<double> Pressures { get; init; }
+        /// <summary>Unit load direction (e.g. [0,0,-1] for gravity dead load).</summary>
+        public required Vector3d Direction { get; init; }
+    }
+}
+
+/// <summary>
 /// Inputs required for the solver. Bounds are nullable: null means
 /// unconstrained (forward-only), non-null means optimization bounds.
 /// </summary>
@@ -72,6 +147,10 @@ public sealed record SolverInputs
     public List<double>? UpperBounds { get; init; }
     /// <summary>Objectives to minimize when optimizing.</summary>
     public List<Objective> Objectives { get; init; } = [];
+    /// <summary>Self-weight configuration (null = no self-weight).</summary>
+    public SelfWeightConfig? SelfWeight { get; init; }
+    /// <summary>Pressure load configuration (null = no pressure loads).</summary>
+    public PressureConfig? Pressure { get; init; }
 }
 
 /// <summary>

@@ -478,6 +478,262 @@ namespace Ariadne.Graphs
                 OutputEdgeTree.Append(Edges[edgeIdx], path);
             }
         }
+
+        // ── Face-finding from 3D graph topology ──────────────────
+
+        /// <summary>
+        /// Result of the face-finding algorithm.
+        /// </summary>
+        public class FaceFindResult
+        {
+            /// <summary>Bounded face cycles as ordered lists of node indices.</summary>
+            public List<List<int>> Faces { get; init; } = [];
+            /// <summary>Euler characteristic (V - E + F, including exterior face).</summary>
+            public int EulerCharacteristic { get; init; }
+            /// <summary>True if the graph appears to be a valid 2-manifold.</summary>
+            public bool IsManifold { get; init; }
+            /// <summary>Edges shared by more than 2 faces (non-manifold).</summary>
+            public List<(int, int)> NonManifoldEdges { get; init; } = [];
+            /// <summary>Warning messages for the user.</summary>
+            public List<string> Warnings { get; init; } = [];
+        }
+
+        /// <summary>
+        /// Find all bounded face cycles in a topologically planar graph embedded in 3D.
+        /// Uses local tangent frames at each vertex for angular sorting, then walks
+        /// half-edges to extract faces. No global projection is needed.
+        /// </summary>
+        public static FaceFindResult FindFaces(Graph graph)
+        {
+            int V = graph.Nn;
+            int E = graph.Ne;
+            var warnings = new List<string>();
+
+            // Build adjacency: for each node, list of (neighbor_index, edge_index)
+            var adj = new List<List<(int neighbor, int edgeIdx)>>(V);
+            for (int i = 0; i < V; i++)
+                adj.Add(new List<(int, int)>());
+
+            for (int e = 0; e < E; e++)
+            {
+                int s = graph.Edges[e].Start.Index;
+                int t = graph.Edges[e].End.Index;
+                adj[s].Add((t, e));
+                adj[t].Add((s, e));
+            }
+
+            // Compute local normal at each vertex from cross products of successive edge pairs
+            var localNormals = new Vector3d[V];
+            for (int v = 0; v < V; v++)
+            {
+                var neighbors = adj[v];
+                var pos = graph.Nodes[v].Value;
+                var normal = Vector3d.Zero;
+
+                if (neighbors.Count >= 2)
+                {
+                    for (int i = 0; i < neighbors.Count; i++)
+                    {
+                        int j = (i + 1) % neighbors.Count;
+                        var u1 = graph.Nodes[neighbors[i].neighbor].Value - pos;
+                        var u2 = graph.Nodes[neighbors[j].neighbor].Value - pos;
+                        normal += Vector3d.CrossProduct(u1, u2);
+                    }
+                }
+
+                if (normal.Length < 1e-12)
+                {
+                    // Fallback: pick an arbitrary normal perpendicular to the first edge
+                    if (neighbors.Count > 0)
+                    {
+                        var edge = graph.Nodes[neighbors[0].neighbor].Value - pos;
+                        normal = PerpVector(edge);
+                    }
+                    else
+                    {
+                        normal = Vector3d.ZAxis;
+                    }
+                }
+
+                normal.Unitize();
+                localNormals[v] = normal;
+            }
+
+            // Build local tangent frame at each vertex and sort edges by angle
+            // sortedAdj[v] = list of neighbor indices sorted by angle in local tangent plane
+            var sortedAdj = new List<int>[V];
+            for (int v = 0; v < V; v++)
+            {
+                var neighbors = adj[v];
+                var pos = graph.Nodes[v].Value;
+                var n = localNormals[v];
+
+                // Build orthonormal tangent frame
+                Vector3d t1, t2;
+                if (neighbors.Count > 0)
+                {
+                    var firstEdge = graph.Nodes[neighbors[0].neighbor].Value - pos;
+                    t1 = firstEdge - (firstEdge * n) * n;
+                    if (t1.Length < 1e-12)
+                        t1 = PerpVector(n);
+                    t1.Unitize();
+                }
+                else
+                {
+                    t1 = PerpVector(n);
+                    t1.Unitize();
+                }
+                t2 = Vector3d.CrossProduct(n, t1);
+                t2.Unitize();
+
+                // Sort neighbors by angle in (t1, t2) plane
+                var angles = new List<(double angle, int neighbor)>(neighbors.Count);
+                foreach (var (nb, _) in neighbors)
+                {
+                    var dir = graph.Nodes[nb].Value - pos;
+                    double x = dir * t1;
+                    double y = dir * t2;
+                    angles.Add((Math.Atan2(y, x), nb));
+                }
+                angles.Sort((a, b) => a.angle.CompareTo(b.angle));
+                sortedAdj[v] = angles.Select(a => a.neighbor).ToList();
+            }
+
+            // Walk half-edges to find face cycles.
+            // A half-edge is (from, to). For each unvisited half-edge, walk the face.
+            var visited = new HashSet<(int, int)>();
+            var allFaces = new List<List<int>>();
+
+            for (int v = 0; v < V; v++)
+            {
+                foreach (int nb in sortedAdj[v])
+                {
+                    if (visited.Contains((v, nb)))
+                        continue;
+
+                    var face = WalkFace(v, nb, sortedAdj, visited);
+                    if (face != null)
+                        allFaces.Add(face);
+                }
+            }
+
+            // Count half-edge usage per undirected edge to detect non-manifold
+            var edgeUsage = new Dictionary<(int, int), int>();
+            foreach (var face in allFaces)
+            {
+                for (int i = 0; i < face.Count; i++)
+                {
+                    int a = face[i];
+                    int b = face[(i + 1) % face.Count];
+                    var key = a < b ? (a, b) : (b, a);
+                    edgeUsage.TryGetValue(key, out int count);
+                    edgeUsage[key] = count + 1;
+                }
+            }
+
+            var nonManifold = new List<(int, int)>();
+            foreach (var (key, count) in edgeUsage)
+            {
+                if (count > 2)
+                    nonManifold.Add(key);
+            }
+
+            if (nonManifold.Count > 0)
+                warnings.Add($"{nonManifold.Count} non-manifold edge(s) found (shared by >2 faces).");
+
+            // Identify and discard the exterior face (largest face by vertex count)
+            int totalFaces = allFaces.Count;
+            if (totalFaces > 0)
+            {
+                int maxIdx = 0;
+                int maxLen = allFaces[0].Count;
+                for (int i = 1; i < totalFaces; i++)
+                {
+                    if (allFaces[i].Count > maxLen)
+                    {
+                        maxLen = allFaces[i].Count;
+                        maxIdx = i;
+                    }
+                }
+                allFaces.RemoveAt(maxIdx);
+            }
+
+            // Euler formula check: V - E + F = chi
+            // totalFaces includes the exterior face we just removed, so F_total = allFaces.Count + 1
+            int F_total = allFaces.Count + 1;
+            int chi = V - E + F_total;
+            bool isManifold = nonManifold.Count == 0 && (chi == 1 || chi == 2);
+
+            if (chi != 1 && chi != 2)
+                warnings.Add($"Euler characteristic χ = {chi} (expected 1 for open surface, 2 for closed). Graph may be non-planar or have higher genus.");
+
+            return new FaceFindResult
+            {
+                Faces = allFaces,
+                EulerCharacteristic = chi,
+                IsManifold = isManifold,
+                NonManifoldEdges = nonManifold,
+                Warnings = warnings,
+            };
+        }
+
+        /// <summary>
+        /// Walk a face cycle starting from half-edge (start -> current).
+        /// At each vertex, find the predecessor of the reverse half-edge in the
+        /// sorted adjacency (turn right relative to local normal).
+        /// </summary>
+        private static List<int>? WalkFace(
+            int start, int next,
+            List<int>[] sortedAdj,
+            HashSet<(int, int)> visited)
+        {
+            var face = new List<int>();
+            int from = start;
+            int to = next;
+            int maxSteps = 0;
+            int totalEdges = visited.Count + sortedAdj.Sum(a => a.Count);
+
+            while (true)
+            {
+                if (visited.Contains((from, to)))
+                    break;
+
+                visited.Add((from, to));
+                face.Add(from);
+
+                // At vertex 'to', find reverse half-edge (to -> from) in sorted adjacency
+                var adjList = sortedAdj[to];
+                int reverseIdx = adjList.IndexOf(from);
+                if (reverseIdx < 0)
+                    return null; // broken topology
+
+                // Next half-edge: predecessor in cyclic order (turn right)
+                int prevIdx = (reverseIdx - 1 + adjList.Count) % adjList.Count;
+                int nextNode = adjList[prevIdx];
+
+                from = to;
+                to = nextNode;
+
+                maxSteps++;
+                if (maxSteps > totalEdges)
+                    return null; // infinite loop guard
+
+                if (from == start && to == next)
+                    break;
+            }
+
+            return face.Count >= 3 ? face : null;
+        }
+
+        /// <summary>
+        /// Returns an arbitrary vector perpendicular to the given vector.
+        /// </summary>
+        private static Vector3d PerpVector(Vector3d v)
+        {
+            if (Math.Abs(v.X) < 0.9)
+                return Vector3d.CrossProduct(v, Vector3d.XAxis);
+            return Vector3d.CrossProduct(v, Vector3d.YAxis);
+        }
     }
 
     /// <summary>

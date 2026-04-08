@@ -9,7 +9,7 @@
 //! All gradients derived analytically — no AD framework needed.
 
 use crate::objectives::{softplus_grad, bounds_penalty_grad};
-use crate::types::{FdmCache, GeometrySnapshot, Problem, TheseusError};
+use crate::types::{FdmCache, GeometrySnapshot, Problem, SelfWeightParams, PressureParams, TheseusError};
 use ndarray::Array2;
 
 // ─────────────────────────────────────────────────────────────
@@ -38,6 +38,397 @@ pub fn solve_adjoint(cache: &mut FdmCache) -> Result<(), TheseusError> {
     }
 
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Modified adjoint for geometry-dependent loads
+// ─────────────────────────────────────────────────────────────
+
+/// Apply `(dpn_sw/dx)^T * v` for self-weight, accumulating into `out`.
+///
+/// For edge k with linear density mu_k, length L_k, gravity g:
+///   dpn_sw_s[d] / dx_e[d'] = (1/2) mu_k g[d] (x_e[d'] - x_s[d']) / L_k
+/// The transpose maps a vector `v` (indexed by free-node, dimension) to
+/// contributions at the edge endpoints.
+fn dpn_sw_dx_transpose_matvec(
+    cache: &FdmCache,
+    _problem: &Problem,
+    gravity: &[f64; 3],
+    v: &Array2<f64>,      // nn_free × 3
+    out: &mut Array2<f64>, // nn_free × 3  (accumulated, not zeroed)
+) {
+    let ne = cache.member_lengths.len();
+    for k in 0..ne {
+        let mu_k = cache.sw_mu[k];
+        let l_k = cache.member_lengths[k];
+        if l_k < f64::EPSILON { continue; }
+
+        let s = cache.edge_starts[k];
+        let e = cache.edge_ends[k];
+        let s_free = cache.node_to_free_idx[s];
+        let e_free = cache.node_to_free_idx[e];
+
+        // Compute g^T * v_s_free and g^T * v_e_free (the load-direction
+        // components of v at the two endpoints)
+        let mut g_dot_v_s = 0.0;
+        let mut g_dot_v_e = 0.0;
+        if let Some(sf) = s_free {
+            for d in 0..3 {
+                g_dot_v_s += gravity[d] * v[[sf, d]];
+            }
+        }
+        if let Some(ef) = e_free {
+            for d in 0..3 {
+                g_dot_v_e += gravity[d] * v[[ef, d]];
+            }
+        }
+
+        let coeff = 0.5 * mu_k / l_k;
+        // dpn_sw/dx is: for each endpoint, rank-1 contribution g ⊗ e_hat
+        // The transpose maps v -> (g^T v) * e_hat contributions
+        let combined = coeff * (g_dot_v_s + g_dot_v_e);
+
+        for dp in 0..3 {
+            let delta = cache.nf[[e, dp]] - cache.nf[[s, dp]];
+            let contrib = combined * delta;
+            if let Some(ef) = e_free {
+                out[[ef, dp]] += contrib;
+            }
+            if let Some(sf) = s_free {
+                out[[sf, dp]] -= contrib;
+            }
+        }
+    }
+}
+
+/// Apply `(dpn_pressure/dx)^T * v` for pressure loads, accumulating into `out`.
+/// Dispatches on the pressure mode (Normal / Hydrostatic / Directional).
+fn dpn_pressure_dx_transpose_matvec(
+    cache: &FdmCache,
+    pressure: &PressureParams,
+    v: &Array2<f64>,
+    out: &mut Array2<f64>,
+) {
+    match pressure {
+        PressureParams::Normal { face_topology, pressures, .. } => {
+            dpn_pressure_normal_transpose(cache, &face_topology.faces, pressures, v, out);
+        }
+        PressureParams::Hydrostatic {
+            face_topology, rho_fluid, g_magnitude, z_datum, up_direction, ..
+        } => {
+            dpn_pressure_hydrostatic_transpose(
+                cache, &face_topology.faces,
+                *rho_fluid, *g_magnitude, *z_datum, up_direction, v, out,
+            );
+        }
+        PressureParams::Directional {
+            face_topology, pressures, direction, ..
+        } => {
+            dpn_pressure_directional_transpose(
+                cache, &face_topology.faces, pressures, direction, v, out,
+            );
+        }
+    }
+}
+
+/// Normal mode: `(dpn/dx)^T v` where load = `p_f * n_f / nv`.
+/// Derivative through Newell normal only.
+fn dpn_pressure_normal_transpose(
+    cache: &FdmCache,
+    faces: &[Vec<usize>],
+    pressures: &[f64],
+    v: &Array2<f64>,
+    out: &mut Array2<f64>,
+) {
+    for (f_idx, face) in faces.iter().enumerate() {
+        let p_f = pressures[f_idx];
+        let nv = face.len();
+        if nv < 3 { continue; }
+        let scale = p_f / (nv as f64);
+
+        let mut v_sum = [0.0f64; 3];
+        for &vi in face {
+            if let Some(fi) = cache.node_to_free_idx[vi] {
+                for d in 0..3 { v_sum[d] += v[[fi, d]]; }
+            }
+        }
+
+        newell_skew_transpose(cache, face, scale, &v_sum, out);
+    }
+}
+
+/// Hydrostatic mode: product rule `d(p_f * n_f / nv)/dv_j`.
+///   = (1/nv) * [p_f * dn_f/dv_j  +  dp_f/dv_j * n_f]
+/// where `dp_f/dv_j = rho * g * (-1/nv) * up_hat` (if depth > 0).
+fn dpn_pressure_hydrostatic_transpose(
+    cache: &FdmCache,
+    faces: &[Vec<usize>],
+    rho_fluid: f64,
+    g_magnitude: f64,
+    z_datum: f64,
+    up_direction: &[f64; 3],
+    v: &Array2<f64>,
+    out: &mut Array2<f64>,
+) {
+    for face in faces {
+        let nv = face.len();
+        if nv < 3 { continue; }
+        let nv_f = nv as f64;
+
+        // Centroid depth
+        let mut centroid_up = 0.0;
+        for &vi in face {
+            for d in 0..3 {
+                centroid_up += cache.nf[[vi, d]] * up_direction[d];
+            }
+        }
+        centroid_up /= nv_f;
+        let depth = z_datum - centroid_up;
+        if depth <= 0.0 { continue; }
+
+        let p_f = rho_fluid * g_magnitude * depth;
+        let n = crate::fdm::newell_normal(face, &cache.nf);
+
+        // Term 1: p_f * dn_f/dv_j  (same as normal mode with scale = p_f / nv)
+        let scale1 = p_f / nv_f;
+        let mut v_sum = [0.0f64; 3];
+        for &vi in face {
+            if let Some(fi) = cache.node_to_free_idx[vi] {
+                for d in 0..3 { v_sum[d] += v[[fi, d]]; }
+            }
+        }
+        newell_skew_transpose(cache, face, scale1, &v_sum, out);
+
+        // Term 2: dp_f/dv_j * n_f / nv
+        // dp_f/dv_j = rho * g * (-1/nv) * up_hat  for each vertex j in face
+        // So the load derivative for vertex i from vertex j is:
+        //   (1/nv) * dp_f/dv_j * n_f = (1/nv) * rho*g*(-1/nv) * (up_hat · e_j) * n_f
+        // Transpose: out[v_j] += sum_i v[free_i] · [(rho*g / nv^2) * (-up_hat) ⊗ n_f]
+        //          = (-rho*g / nv^2) * (v_sum · n_f) * up_hat
+        // But up_hat is a 3-vector applied at v_j's position dimensions.
+        let coeff = -rho_fluid * g_magnitude / (nv_f * nv_f);
+        let v_dot_n: f64 = (0..3).map(|d| v_sum[d] * n[d]).sum();
+        for &vj in face {
+            if let Some(jf) = cache.node_to_free_idx[vj] {
+                for d in 0..3 {
+                    out[[jf, d]] += coeff * v_dot_n * up_direction[d];
+                }
+            }
+        }
+    }
+}
+
+/// Directional mode: `d(p * max(0, n_f·d) * d / nv) / dv_j`.
+///   = (p / nv) * (d · dn_f/dv_j) * d   (when A_proj > 0)
+/// Since the load direction d is constant, the derivative only acts through
+/// the projected area `n_f · d`.
+fn dpn_pressure_directional_transpose(
+    cache: &FdmCache,
+    faces: &[Vec<usize>],
+    pressures: &[f64],
+    direction: &[f64; 3],
+    v: &Array2<f64>,
+    out: &mut Array2<f64>,
+) {
+    for (f_idx, face) in faces.iter().enumerate() {
+        let p_f = pressures[f_idx];
+        let nv = face.len();
+        if nv < 3 { continue; }
+        let nv_f = nv as f64;
+
+        let n = crate::fdm::newell_normal(face, &cache.nf);
+        let a_proj: f64 = (0..3).map(|d| n[d] * direction[d]).sum();
+        if a_proj <= 0.0 { continue; }
+
+        // The load at vertex i is (p_f * a_proj / nv) * direction[d].
+        // d(a_proj)/dv_j = direction · dn_f/dv_j = direction · (1/2) skew(v_{j-1} - v_{j+1})
+        // Transpose: for each v_j, we need:
+        //   out[v_j] += (p_f / nv) * sum_i [v[i] · direction] * (1/2) * (v_{j-1} - v_{j+1}) × direction
+        // Simplify: let scalar = sum_i v[free_i] · direction
+        let mut v_dot_dir = 0.0;
+        for &vi in face {
+            if let Some(fi) = cache.node_to_free_idx[vi] {
+                for d in 0..3 { v_dot_dir += v[[fi, d]] * direction[d]; }
+            }
+        }
+
+        let scale = p_f / nv_f;
+        for j in 0..nv {
+            let vj = face[j];
+            if let Some(jf) = cache.node_to_free_idx[vj] {
+                let prev = face[(j + nv - 1) % nv];
+                let next = face[(j + 1) % nv];
+                let a = [
+                    cache.nf[[prev, 0]] - cache.nf[[next, 0]],
+                    cache.nf[[prev, 1]] - cache.nf[[next, 1]],
+                    cache.nf[[prev, 2]] - cache.nf[[next, 2]],
+                ];
+                // cross = a × direction
+                let cross = [
+                    a[1] * direction[2] - a[2] * direction[1],
+                    a[2] * direction[0] - a[0] * direction[2],
+                    a[0] * direction[1] - a[1] * direction[0],
+                ];
+                for d in 0..3 {
+                    out[[jf, d]] += 0.5 * scale * v_dot_dir * cross[d];
+                }
+            }
+        }
+    }
+}
+
+/// Shared helper: apply the Newell skew-symmetric transpose contribution.
+/// For each vertex v_j in the face:
+///   out[v_j] += scale * (1/2) * (v_{j-1} - v_{j+1}) × v_sum
+fn newell_skew_transpose(
+    cache: &FdmCache,
+    face: &[usize],
+    scale: f64,
+    v_sum: &[f64; 3],
+    out: &mut Array2<f64>,
+) {
+    let nv = face.len();
+    for j in 0..nv {
+        let vj = face[j];
+        if let Some(jf) = cache.node_to_free_idx[vj] {
+            let prev = face[(j + nv - 1) % nv];
+            let next = face[(j + 1) % nv];
+            let a = [
+                cache.nf[[prev, 0]] - cache.nf[[next, 0]],
+                cache.nf[[prev, 1]] - cache.nf[[next, 1]],
+                cache.nf[[prev, 2]] - cache.nf[[next, 2]],
+            ];
+            let cross = [
+                a[1] * v_sum[2] - a[2] * v_sum[1],
+                a[2] * v_sum[0] - a[0] * v_sum[2],
+                a[0] * v_sum[1] - a[1] * v_sum[0],
+            ];
+            for d in 0..3 {
+                out[[jf, d]] += 0.5 * scale * cross[d];
+            }
+        }
+    }
+}
+
+/// Solve the modified adjoint system via Neumann iteration:
+///   (A - dpn/dx)^T λ = dJ/dx
+///
+/// Rewritten as: A^T λ = dJ/dx + (dpn/dx)^T λ
+/// Starting from λ_0 = A^{-T} dJ/dx (the standard adjoint, already in cache.lambda).
+fn solve_modified_adjoint(
+    cache: &mut FdmCache,
+    problem: &Problem,
+    max_iters: usize,
+    tolerance: f64,
+) -> Result<(), TheseusError> {
+    let n = cache.a_matrix.nrows;
+    let nn_free = n;
+
+    for _iter in 0..max_iters {
+        // Compute correction = (dpn/dx)^T * lambda
+        let mut correction = Array2::<f64>::zeros((nn_free, 3));
+
+        if let Some(sw) = &problem.self_weight {
+            dpn_sw_dx_transpose_matvec(cache, problem, sw.gravity(), &cache.lambda, &mut correction);
+        }
+        if let Some(pr) = &problem.pressure {
+            dpn_pressure_dx_transpose_matvec(cache, pr, &cache.lambda, &mut correction);
+        }
+
+        // Check convergence: ||correction|| / ||grad_x|| < tol
+        let corr_norm_sq: f64 = correction.iter().map(|v| v * v).sum();
+        let grad_norm_sq: f64 = cache.grad_x.iter().map(|v| v * v).sum();
+        if grad_norm_sq > 0.0 && corr_norm_sq / grad_norm_sq < tolerance * tolerance {
+            break;
+        }
+
+        // New RHS = dJ/dx + correction
+        let mut rhs_flat = Vec::with_capacity(n * 3);
+        for d in 0..3 {
+            for i in 0..n {
+                rhs_flat.push(cache.grad_x[[i, d]] + correction[[i, d]]);
+            }
+        }
+
+        // Solve A^T lambda = new_rhs (reuse existing factorization)
+        let fac = cache.factorization.as_ref()
+            .ok_or(TheseusError::MissingFactorization)?;
+        let solutions = fac.solve_batch(&rhs_flat, 3);
+        for (d, x) in solutions.into_iter().enumerate() {
+            for i in 0..n {
+                cache.lambda[[i, d]] = x[i];
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Dispatch to standard or modified adjoint based on whether
+/// geometry-dependent loads are active.
+fn solve_adjoint_with_loads(
+    cache: &mut FdmCache,
+    problem: &Problem,
+) -> Result<(), TheseusError> {
+    // Always start with the standard adjoint
+    solve_adjoint(cache)?;
+
+    // If geometry-dependent loads are active, refine via Neumann iteration
+    if problem.self_weight.is_some() || problem.pressure.is_some() {
+        let max_iters = match (&problem.self_weight, &problem.pressure) {
+            (Some(sw), Some(pr)) => sw.max_iters().max(pr.max_iters()),
+            (Some(sw), None) => sw.max_iters(),
+            (None, Some(pr)) => pr.max_iters(),
+            (None, None) => unreachable!(),
+        };
+        let tolerance = match (&problem.self_weight, &problem.pressure) {
+            (Some(sw), Some(pr)) => sw.tolerance().min(pr.tolerance()),
+            (Some(sw), None) => sw.tolerance(),
+            (None, Some(pr)) => pr.tolerance(),
+            (None, None) => unreachable!(),
+        };
+        solve_modified_adjoint(cache, problem, max_iters, tolerance)?;
+    }
+
+    Ok(())
+}
+
+/// Accumulate the explicit dpn_sw/dq_k gradient term (sizing mode only).
+///
+/// In sizing mode: w_k = rho * |q_k| * L_k^2 / sigma
+///   dw_k/dq_k = rho * sign(q_k) * L_k^2 / sigma
+/// The load contribution to node s from edge k is (w_k/2) * g[d],
+/// so dpn_sw/dq_k at node s,d = (1/2) * dw_k/dq_k * g[d].
+fn accumulate_self_weight_dq(
+    cache: &mut FdmCache,
+    problem: &Problem,
+) {
+    if let Some(SelfWeightParams::Sizing { rho, sigma, gravity, .. }) = &problem.self_weight {
+        let ne = problem.topology.num_edges;
+        for k in 0..ne {
+            let l_k = cache.member_lengths[k];
+            let q_k = cache.q[k];
+            let dw_dq = rho * q_k.signum() * l_k * l_k / sigma;
+
+            let s = cache.edge_starts[k];
+            let e = cache.edge_ends[k];
+
+            // dpn_sw/dq_k is a vector: (dw_dq/2) * g at each endpoint
+            // grad_q[k] -= lambda^T * dpn_sw/dq_k
+            let mut dot = 0.0;
+            if let Some(sf) = cache.node_to_free_idx[s] {
+                for d in 0..3 {
+                    dot += cache.lambda[[sf, d]] * 0.5 * dw_dq * gravity[d];
+                }
+            }
+            if let Some(ef) = cache.node_to_free_idx[e] {
+                for d in 0..3 {
+                    dot += cache.lambda[[ef, d]] * 0.5 * dw_dq * gravity[d];
+                }
+            }
+            cache.grad_q[k] -= dot;
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -630,8 +1021,8 @@ pub fn value_and_gradient(
         Array2::<f64>::zeros((0, 3))
     };
 
-    // 2. Forward solve
-    crate::fdm::solve_fdm(cache, q, problem, &anchor_positions, 1e-12)?;
+    // 2. Forward solve (with self-weight/pressure iteration if active)
+    crate::fdm::solve_fdm_with_loads(cache, q, problem, &anchor_positions, 1e-12)?;
 
     // 3. Build snapshot and evaluate loss
     let snap = GeometrySnapshot {
@@ -651,11 +1042,14 @@ pub fn value_and_gradient(
     cache.grad_nf.fill(0.0);
     accumulate_explicit_gradients(cache, problem);
 
-    // 5. Adjoint solve
-    solve_adjoint(cache)?;
+    // 5. Adjoint solve (standard or modified Neumann iteration)
+    solve_adjoint_with_loads(cache, problem)?;
 
-    // 6. Implicit gradients
+    // 6. Implicit gradients (standard A(q) coupling)
     accumulate_implicit_gradients(cache, problem);
+
+    // 6b. Self-weight dq term (sizing mode: dpn_sw/dq_k)
+    accumulate_self_weight_dq(cache, problem);
 
     // 7. Pack into output gradient
     grad.fill(0.0);

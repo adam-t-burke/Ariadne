@@ -63,9 +63,13 @@ public class TheseusSolveComponent : GH_Component
         pManager.AddVectorParameter("Loads", "Loads", "Loads on free nodes", GH_ParamAccess.list, new Vector3d(0, 0, -1));
         pManager.AddPointParameter("Load Nodes", "LN", "Nodes to apply loads to (optional; if empty, loads apply to all free nodes)", GH_ParamAccess.list);
         pManager.AddGenericParameter("Opt Config", "OptConfig", "Optimization configuration (optional, connect for optimization)", GH_ParamAccess.item);
+        pManager.AddGenericParameter("Self-Weight", "SW", "Self-weight configuration (optional)", GH_ParamAccess.item);
+        pManager.AddGenericParameter("Pressure", "Press", "Pressure load configuration (optional)", GH_ParamAccess.item);
 
         pManager[3].Optional = true;
         pManager[4].Optional = true;
+        pManager[5].Optional = true;
+        pManager[6].Optional = true;
     }
 
     protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -90,6 +94,8 @@ public class TheseusSolveComponent : GH_Component
         List<Vector3d> loads = [];
         List<Point3d> loadNodes = [];
         OptimizationConfig? config = null;
+        SelfWeightConfig? selfWeight = null;
+        PressureConfig? pressure = null;
 
         if (_state != SolverState.Done)
         {
@@ -98,6 +104,8 @@ public class TheseusSolveComponent : GH_Component
             DA.GetDataList(2, loads);
             DA.GetDataList(3, loadNodes);
             DA.GetData(4, ref config);
+            DA.GetData(5, ref selfWeight);
+            DA.GetData(6, ref pressure);
 
             if (network == null || !network.Valid)
             {
@@ -131,7 +139,7 @@ public class TheseusSolveComponent : GH_Component
                 Message = "";
             }
             _lastWasOptimization = false;
-            var snap = new SolveSnapshot(network!, q.AsReadOnly(), loads.AsReadOnly(), loadNodes.AsReadOnly(), null);
+            var snap = new SolveSnapshot(network!, q.AsReadOnly(), loads.AsReadOnly(), loadNodes.AsReadOnly(), null, selfWeight, pressure);
             var result = RunSolve(snap, null);
             _cachedResult = result;
             OutputResult(DA, result);
@@ -149,7 +157,7 @@ public class TheseusSolveComponent : GH_Component
             {
                 _consumedGeneration = _triggerGeneration;
                 _lastInputHash = inputHash;
-                StartOptimization(network!, q, loads, loadNodes, config);
+                StartOptimization(network!, q, loads, loadNodes, config, selfWeight, pressure);
             }
 
             OutputIntermediateOrCached(DA);
@@ -170,7 +178,7 @@ public class TheseusSolveComponent : GH_Component
             AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
                 "No objectives provided. Falling back to forward solve.");
             _lastWasOptimization = false;
-            var snap = new SolveSnapshot(network!, q.AsReadOnly(), loads.AsReadOnly(), loadNodes.AsReadOnly(), null);
+            var snap = new SolveSnapshot(network!, q.AsReadOnly(), loads.AsReadOnly(), loadNodes.AsReadOnly(), null, selfWeight, pressure);
             var result = RunSolve(snap, null);
             _cachedResult = result;
             OutputResult(DA, result);
@@ -195,14 +203,15 @@ public class TheseusSolveComponent : GH_Component
         }
 
         // ── Start background optimization ────────────────────────
-        StartOptimization(network!, q, loads, loadNodes, config);
+        StartOptimization(network!, q, loads, loadNodes, config, selfWeight, pressure);
         OutputIntermediateOrCached(DA);
     }
 
     // ── Async optimization lifecycle ─────────────────────────────────
 
     private void StartOptimization(
-        FDM_Network network, List<double> q, List<Vector3d> loads, List<Point3d> loadNodes, OptimizationConfig config)
+        FDM_Network network, List<double> q, List<Vector3d> loads, List<Point3d> loadNodes,
+        OptimizationConfig config, SelfWeightConfig? selfWeight, PressureConfig? pressure)
     {
         CancelAndDisposeCts();
         _expirePending = false;
@@ -228,7 +237,7 @@ public class TheseusSolveComponent : GH_Component
             return true;
         };
 
-        var snap = new SolveSnapshot(network, q.AsReadOnly(), loads.AsReadOnly(), loadNodes.AsReadOnly(), config);
+        var snap = new SolveSnapshot(network, q.AsReadOnly(), loads.AsReadOnly(), loadNodes.AsReadOnly(), config, selfWeight, pressure);
 
         _state = SolverState.Running;
         Message = "Solving...";
@@ -426,6 +435,8 @@ public class TheseusSolveComponent : GH_Component
                 LowerBounds = cfg.LowerBounds.ToList(),
                 UpperBounds = cfg.UpperBounds.ToList(),
                 Objectives = cfg.Objectives.ToList(),
+                SelfWeight = snap.SelfWeight,
+                Pressure = snap.Pressure,
             };
             var options = new SolverOptions
             {
@@ -444,6 +455,8 @@ public class TheseusSolveComponent : GH_Component
             QInit = snap.Q.ToList(),
             Loads = snap.Loads.ToList(),
             LoadNodeIndices = loadNodeIndices,
+            SelfWeight = snap.SelfWeight,
+            Pressure = snap.Pressure,
         };
         return TheseusSolverService.SolveForward(snap.Network, fwdInputs);
     }
@@ -485,4 +498,6 @@ internal sealed record SolveSnapshot(
     IReadOnlyList<double> Q,
     IReadOnlyList<Vector3d> Loads,
     IReadOnlyList<Point3d> LoadNodes,
-    OptimizationConfig? Config);
+    OptimizationConfig? Config,
+    SelfWeightConfig? SelfWeight = null,
+    PressureConfig? Pressure = null);

@@ -242,6 +242,8 @@ unsafe fn create_inner(
         objectives: Vec::new(),
         bounds,
         solver: SolverOptions::default(),
+        self_weight: None,
+        pressure: None,
     };
 
     let state = OptimizationState::new(q_slice.to_vec(), Array2::zeros((0, 3)));
@@ -699,6 +701,249 @@ pub unsafe extern "C" fn theseus_set_solver_options(
 }
 
 // ─────────────────────────────────────────────────────────────
+//  Self-weight configuration
+// ─────────────────────────────────────────────────────────────
+
+/// Configure prescribed-density self-weight.
+///
+/// `linear_densities` must point to `num_edges` doubles (mass/length per edge).
+/// `gravity` must point to 3 doubles (gravity vector, e.g. [0, 0, -9.81]).
+///
+/// # Safety
+/// Valid handle and buffers.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_set_self_weight_prescribed(
+    handle: *mut TheseusHandle,
+    linear_densities: *const f64,
+    gravity: *const f64,
+    max_iters: usize,
+    tolerance: f64,
+    relaxation: f64,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let h = &mut *handle;
+        let ne = h.problem.topology.num_edges;
+        let mu = slice::from_raw_parts(linear_densities, ne).to_vec();
+        let g = slice::from_raw_parts(gravity, 3);
+        h.problem.self_weight = Some(SelfWeightParams::Prescribed {
+            linear_densities: mu,
+            gravity: [g[0], g[1], g[2]],
+            max_iters,
+            tolerance,
+            relaxation,
+        });
+        Ok(())
+    }))
+}
+
+/// Configure force-based sizing self-weight.
+///
+/// Cross-section area is derived as `A_k = |F_k| / sigma`, giving
+/// linear density `mu_k = rho * A_k`.
+///
+/// # Safety
+/// Valid handle.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_set_self_weight_sizing(
+    handle: *mut TheseusHandle,
+    rho: f64,
+    sigma: f64,
+    gravity: *const f64,
+    max_iters: usize,
+    tolerance: f64,
+    relaxation: f64,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let h = &mut *handle;
+        let g = slice::from_raw_parts(gravity, 3);
+        h.problem.self_weight = Some(SelfWeightParams::Sizing {
+            rho,
+            sigma,
+            gravity: [g[0], g[1], g[2]],
+            max_iters,
+            tolerance,
+            relaxation,
+        });
+        Ok(())
+    }))
+}
+
+/// Clear self-weight configuration (revert to no self-weight).
+///
+/// # Safety
+/// Valid handle.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_clear_self_weight(
+    handle: *mut TheseusHandle,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let h = &mut *handle;
+        h.problem.self_weight = None;
+        Ok(())
+    }))
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Pressure load configuration
+// ─────────────────────────────────────────────────────────────
+
+/// Configure pressure loads on faces.
+///
+/// `face_offsets` is a prefix-sum array of length `num_faces + 1`:
+///   face `f` has vertices `face_vertices[face_offsets[f] .. face_offsets[f+1]]`.
+/// `face_vertices` contains the ordered vertex indices (global node indices).
+/// `pressures` has length `num_faces`.
+///
+/// # Safety
+/// Valid handle and buffers.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_set_pressure(
+    handle: *mut TheseusHandle,
+    num_faces: usize,
+    face_offsets: *const usize,
+    face_vertices: *const usize,
+    pressures: *const f64,
+    max_iters: usize,
+    tolerance: f64,
+    relaxation: f64,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let h = &mut *handle;
+        let offsets = slice::from_raw_parts(face_offsets, num_faces + 1);
+        let total_verts = offsets[num_faces];
+        let verts = slice::from_raw_parts(face_vertices, total_verts);
+        let press = slice::from_raw_parts(pressures, num_faces);
+
+        let mut faces = Vec::with_capacity(num_faces);
+        for f in 0..num_faces {
+            let start = offsets[f];
+            let end = offsets[f + 1];
+            faces.push(verts[start..end].to_vec());
+        }
+
+        h.problem.pressure = Some(PressureParams::Normal {
+            face_topology: FaceTopology { faces },
+            pressures: press.to_vec(),
+            max_iters,
+            tolerance,
+            relaxation,
+        });
+        Ok(())
+    }))
+}
+
+/// Configure hydrostatic pressure loads on faces.
+///
+/// Pressure varies linearly with depth below `z_datum`:
+///   `p_f = rho_fluid * g_magnitude * max(0, z_datum - centroid_depth)`.
+///
+/// `up_direction` must point to 3 doubles (unit "up" vector, e.g. `[0,0,1]`).
+///
+/// # Safety
+/// Valid handle and buffers.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_set_pressure_hydrostatic(
+    handle: *mut TheseusHandle,
+    num_faces: usize,
+    face_offsets: *const usize,
+    face_vertices: *const usize,
+    rho_fluid: f64,
+    g_magnitude: f64,
+    z_datum: f64,
+    up_direction: *const f64,
+    max_iters: usize,
+    tolerance: f64,
+    relaxation: f64,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let h = &mut *handle;
+        let offsets = slice::from_raw_parts(face_offsets, num_faces + 1);
+        let total_verts = offsets[num_faces];
+        let verts = slice::from_raw_parts(face_vertices, total_verts);
+        let up = slice::from_raw_parts(up_direction, 3);
+
+        let mut faces = Vec::with_capacity(num_faces);
+        for f in 0..num_faces {
+            faces.push(verts[offsets[f]..offsets[f + 1]].to_vec());
+        }
+
+        h.problem.pressure = Some(PressureParams::Hydrostatic {
+            face_topology: FaceTopology { faces },
+            rho_fluid,
+            g_magnitude,
+            z_datum,
+            up_direction: [up[0], up[1], up[2]],
+            max_iters,
+            tolerance,
+            relaxation,
+        });
+        Ok(())
+    }))
+}
+
+/// Configure directional pressure loads on faces.
+///
+/// Load on each face is `p * max(0, n_f · d_hat) * d_hat`, proportional
+/// to the face's projected area in the given direction.
+///
+/// `direction` must point to 3 doubles (unit load direction).
+/// `pressures` has length `num_faces`.
+///
+/// # Safety
+/// Valid handle and buffers.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_set_pressure_directional(
+    handle: *mut TheseusHandle,
+    num_faces: usize,
+    face_offsets: *const usize,
+    face_vertices: *const usize,
+    pressures: *const f64,
+    direction: *const f64,
+    max_iters: usize,
+    tolerance: f64,
+    relaxation: f64,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let h = &mut *handle;
+        let offsets = slice::from_raw_parts(face_offsets, num_faces + 1);
+        let total_verts = offsets[num_faces];
+        let verts = slice::from_raw_parts(face_vertices, total_verts);
+        let press = slice::from_raw_parts(pressures, num_faces);
+        let dir = slice::from_raw_parts(direction, 3);
+
+        let mut faces = Vec::with_capacity(num_faces);
+        for f in 0..num_faces {
+            faces.push(verts[offsets[f]..offsets[f + 1]].to_vec());
+        }
+
+        h.problem.pressure = Some(PressureParams::Directional {
+            face_topology: FaceTopology { faces },
+            pressures: press.to_vec(),
+            direction: [dir[0], dir[1], dir[2]],
+            max_iters,
+            tolerance,
+            relaxation,
+        });
+        Ok(())
+    }))
+}
+
+/// Clear pressure load configuration.
+///
+/// # Safety
+/// Valid handle.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_clear_pressure(
+    handle: *mut TheseusHandle,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let h = &mut *handle;
+        h.problem.pressure = None;
+        Ok(())
+    }))
+}
+
+// ─────────────────────────────────────────────────────────────
 //  Progress callback
 // ─────────────────────────────────────────────────────────────
 
@@ -806,7 +1051,7 @@ pub unsafe extern "C" fn theseus_solve_forward(
         let mut cache = FdmCache::new(&h.problem)?;
         let anchors = h.state.variable_anchor_positions.clone();
 
-        crate::fdm::solve_fdm(&mut cache, &h.state.force_densities, &h.problem, &anchors, 1e-12)?;
+        crate::fdm::solve_fdm_with_loads(&mut cache, &h.state.force_densities, &h.problem, &anchors, 1e-12)?;
 
         let nn = h.problem.topology.num_nodes;
         let ne = h.problem.topology.num_edges;
@@ -891,10 +1136,10 @@ pub unsafe extern "C" fn theseus_solve_pseudoinverse(
             enforce_zero_rz != 0, solve_for_q != 0,
         )?;
 
-        // Forward solve with the computed q
+        // Forward solve with the computed q (with self-weight/pressure if active)
         let mut cache = FdmCache::new(&h.problem)?;
         let anchors = h.state.variable_anchor_positions.clone();
-        crate::fdm::solve_fdm(&mut cache, &q, &h.problem, &anchors, 1e-12)?;
+        crate::fdm::solve_fdm_with_loads(&mut cache, &q, &h.problem, &anchors, 1e-12)?;
 
         // Copy outputs
         slice::from_raw_parts_mut(out_q, ne).copy_from_slice(&q);
@@ -955,10 +1200,10 @@ pub unsafe extern "C" fn theseus_solve_nnls(
 
         let q = crate::inverse::solve_nnls(&h.problem, &target, max_iter, tol)?;
 
-        // Forward solve with the computed q
+        // Forward solve with the computed q (with self-weight/pressure if active)
         let mut cache = FdmCache::new(&h.problem)?;
         let anchors = h.state.variable_anchor_positions.clone();
-        crate::fdm::solve_fdm(&mut cache, &q, &h.problem, &anchors, 1e-12)?;
+        crate::fdm::solve_fdm_with_loads(&mut cache, &q, &h.problem, &anchors, 1e-12)?;
 
         // Copy outputs
         slice::from_raw_parts_mut(out_q, ne).copy_from_slice(&q);
