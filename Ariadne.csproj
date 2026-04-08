@@ -22,11 +22,6 @@
     <None Include="Theseus\theseus.dll" Link="theseus.dll" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Theseus\libtheseus.dylib" Link="libtheseus.dylib" CopyToOutputDirectory="PreserveNewest" Condition="Exists('Theseus\libtheseus.dylib')" />
   </ItemGroup>
-
-  <!-- Copy native TetGen wrapper to output -->
-  <ItemGroup>
-    <None Include="TetGen\tetgen_wrapper.dll" Link="tetgen_wrapper.dll" CopyToOutputDirectory="PreserveNewest" />
-  </ItemGroup>
   
   <ItemGroup>
     <PackageReference Include="Grasshopper" Version="8.21.25188.17001" />
