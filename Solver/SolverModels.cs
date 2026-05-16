@@ -1,6 +1,8 @@
 namespace Ariadne.Solver;
 
+using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using Ariadne.FDM;
 using Ariadne.Graphs;
 using Rhino.Geometry;
@@ -20,7 +22,7 @@ public sealed record SolverOptions
     public double BarrierWeight { get; init; } = 10.0;
     /// <summary>Barrier function sharpness.</summary>
     public double BarrierSharpness { get; init; } = 10.0;
-    /// <summary>Invoke progress callback every N evaluations (0 = every evaluation).</summary>
+    /// <summary>Invoke progress callback every N accepted L-BFGS iterations (0 = every iteration).</summary>
     public int ReportFrequency { get; init; } = 10;
 }
 
@@ -46,12 +48,101 @@ public sealed record OptimizationConfig
     public double BarrierWeight { get; init; } = 10.0;
     /// <summary>Barrier function sharpness.</summary>
     public double BarrierSharpness { get; init; } = 10.0;
-    /// <summary>Progress callback frequency (evaluations between callbacks).</summary>
+    /// <summary>Progress callback frequency (accepted L-BFGS iterations between callbacks).</summary>
     public int ReportFrequency { get; init; } = 10;
     /// <summary>When true, optimization runs (e.g. from a button or toggle).</summary>
     public bool Run { get; init; } = false;
     /// <summary>When true, stream intermediate results to outputs during optimization.</summary>
     public bool StreamPreview { get; init; } = true;
+    /// <summary>Variable support definitions (optional).</summary>
+    public IReadOnlyList<VariableSupportConfig> VariableSupports { get; init; } = [];
+}
+
+/// <summary>
+/// Base definition for variable supports attached to fixed nodes.
+/// </summary>
+public abstract record VariableSupportConfig
+{
+    /// <summary>Fixed nodes this support definition applies to.</summary>
+    public required List<Node> Nodes { get; init; }
+
+    public virtual int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(GetType());
+        foreach (var node in Nodes)
+            h.Add(RuntimeHelpers.GetHashCode(node));
+        return h.ToHashCode();
+    }
+}
+
+/// <summary>
+/// Spherical support around each node's initial position.
+/// </summary>
+public sealed record SphereVariableSupport : VariableSupportConfig
+{
+    /// <summary>Maximum relative radius from initial node position.</summary>
+    public required double Radius { get; init; }
+
+    public override int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(base.GetContentHashCode());
+        h.Add(Radius);
+        return h.ToHashCode();
+    }
+}
+
+/// <summary>
+/// Roller-style support with per-axis relative bounds from initial node position.
+/// Disabled axes remain fixed.
+/// </summary>
+public sealed record RollerVariableSupport : VariableSupportConfig
+{
+    public bool FreeX { get; init; } = true;
+    public bool FreeY { get; init; } = true;
+    public bool FreeZ { get; init; } = true;
+    public Interval DomainX { get; init; } = new(-1.0, 1.0);
+    public Interval DomainY { get; init; } = new(-1.0, 1.0);
+    public Interval DomainZ { get; init; } = new(-1.0, 1.0);
+
+    public override int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(base.GetContentHashCode());
+        h.Add(FreeX);
+        h.Add(FreeY);
+        h.Add(FreeZ);
+        h.Add(DomainX.T0);
+        h.Add(DomainX.T1);
+        h.Add(DomainY.T0);
+        h.Add(DomainY.T1);
+        h.Add(DomainZ.T0);
+        h.Add(DomainZ.T1);
+        return h.ToHashCode();
+    }
+}
+
+/// <summary>
+/// Rail support constrained to a provided line segment.
+/// </summary>
+public sealed record RailVariableSupport : VariableSupportConfig
+{
+    /// <summary>Line segment that constrains node movement.</summary>
+    public required Line Rail { get; init; }
+
+    public override int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(base.GetContentHashCode());
+        h.Add(Rail.FromX);
+        h.Add(Rail.FromY);
+        h.Add(Rail.FromZ);
+        h.Add(Rail.ToX);
+        h.Add(Rail.ToY);
+        h.Add(Rail.ToZ);
+        return h.ToHashCode();
+    }
 }
 
 /// <summary>
@@ -68,11 +159,33 @@ public abstract record SelfWeightConfig
     /// <summary>Relaxation factor (1.0 = no relaxation).</summary>
     public double Relaxation { get; init; } = 1.0;
 
+    public virtual int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(GetType());
+        h.Add(Gravity.X);
+        h.Add(Gravity.Y);
+        h.Add(Gravity.Z);
+        h.Add(MaxIters);
+        h.Add(Tolerance);
+        h.Add(Relaxation);
+        return h.ToHashCode();
+    }
+
     /// <summary>Prescribed linear density (mass/length) per edge.</summary>
     public sealed record Prescribed : SelfWeightConfig
     {
         /// <summary>Linear density per edge (kg/m). One value = uniform.</summary>
         public required List<double> LinearDensities { get; init; }
+
+        public override int GetContentHashCode()
+        {
+            var h = new HashCode();
+            h.Add(base.GetContentHashCode());
+            foreach (var density in LinearDensities)
+                h.Add(density);
+            return h.ToHashCode();
+        }
     }
 
     /// <summary>Force-based sizing: A_k = |F_k| / sigma.</summary>
@@ -82,6 +195,15 @@ public abstract record SelfWeightConfig
         public required double Rho { get; init; }
         /// <summary>Allowable stress (Pa or consistent units).</summary>
         public required double Sigma { get; init; }
+
+        public override int GetContentHashCode()
+        {
+            var h = new HashCode();
+            h.Add(base.GetContentHashCode());
+            h.Add(Rho);
+            h.Add(Sigma);
+            return h.ToHashCode();
+        }
     }
 }
 
@@ -99,11 +221,36 @@ public abstract record PressureConfig
     /// <summary>Relaxation factor.</summary>
     public double Relaxation { get; init; } = 1.0;
 
+    public virtual int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(GetType());
+        h.Add(MaxIters);
+        h.Add(Tolerance);
+        h.Add(Relaxation);
+        foreach (var face in Faces)
+        {
+            h.Add(face.Count);
+            foreach (var vertex in face)
+                h.Add(vertex);
+        }
+        return h.ToHashCode();
+    }
+
     /// <summary>Constant pressure along each face's outward normal.</summary>
     public sealed record Normal : PressureConfig
     {
         /// <summary>Pressure magnitude per face (positive = along outward normal).</summary>
         public required List<double> Pressures { get; init; }
+
+        public override int GetContentHashCode()
+        {
+            var h = new HashCode();
+            h.Add(base.GetContentHashCode());
+            foreach (var pressure in Pressures)
+                h.Add(pressure);
+            return h.ToHashCode();
+        }
     }
 
     /// <summary>Hydrostatic pressure varying linearly with depth (e.g. fabric formwork).</summary>
@@ -117,6 +264,19 @@ public abstract record PressureConfig
         public required double ZDatum { get; init; }
         /// <summary>Unit "up" direction (default Z-axis). Depth is measured opposite to this.</summary>
         public Vector3d UpDirection { get; init; } = new(0, 0, 1);
+
+        public override int GetContentHashCode()
+        {
+            var h = new HashCode();
+            h.Add(base.GetContentHashCode());
+            h.Add(RhoFluid);
+            h.Add(GMagnitude);
+            h.Add(ZDatum);
+            h.Add(UpDirection.X);
+            h.Add(UpDirection.Y);
+            h.Add(UpDirection.Z);
+            return h.ToHashCode();
+        }
     }
 
     /// <summary>Directional pressure proportional to projected face area (e.g. dead load, soil pressure).</summary>
@@ -126,6 +286,18 @@ public abstract record PressureConfig
         public required List<double> Pressures { get; init; }
         /// <summary>Unit load direction (e.g. [0,0,-1] for gravity dead load).</summary>
         public required Vector3d Direction { get; init; }
+
+        public override int GetContentHashCode()
+        {
+            var h = new HashCode();
+            h.Add(base.GetContentHashCode());
+            foreach (var pressure in Pressures)
+                h.Add(pressure);
+            h.Add(Direction.X);
+            h.Add(Direction.Y);
+            h.Add(Direction.Z);
+            return h.ToHashCode();
+        }
     }
 }
 
@@ -151,6 +323,8 @@ public sealed record SolverInputs
     public SelfWeightConfig? SelfWeight { get; init; }
     /// <summary>Pressure load configuration (null = no pressure loads).</summary>
     public PressureConfig? Pressure { get; init; }
+    /// <summary>Variable support definitions (null/empty = no variable anchors).</summary>
+    public List<VariableSupportConfig>? VariableSupports { get; init; }
 }
 
 /// <summary>
@@ -172,6 +346,8 @@ public sealed record SolveResult
     public required int Iterations { get; init; }
     /// <summary>True if the optimizer converged (or N/A for forward-only).</summary>
     public required bool Converged { get; init; }
+    /// <summary>Native optimizer termination reason when available.</summary>
+    public string TerminationReason { get; init; } = "";
 
     /// <summary>
     /// Node positions as Point3d list (convenience accessor).
@@ -200,4 +376,12 @@ internal sealed record SolverData(
     double[] FixedPositions,
     double[] QInit,
     double[] LowerBounds,
-    double[] UpperBounds);
+    double[] UpperBounds,
+    int[] VariableNodeIndices,
+    int[] VariableSupportKinds,
+    double[] SphereRadii,
+    byte[] RollerEnabled,
+    double[] RollerLower,
+    double[] RollerUpper,
+    double[] RailStart,
+    double[] RailEnd);

@@ -12,17 +12,18 @@
 //!   3.  TargetPlane
 //!   4.  PlanarConstraintAlongDirection
 //!   5.  TargetLength
-//!   6.  LengthVariation
-//!   7.  ForceVariation
-//!   8.  SumForceLength
-//!   9.  MinLength
-//!  10.  MaxLength
-//!  11.  MinForce
-//!  12.  MaxForce
-//!  13.  RigidSetCompare
-//!  14.  ReactionDirection
-//!  15.  ReactionDirectionMagnitude
-//!  16.  Kitchen-sink combined (all objectives at once)
+//!   6.  TargetForce
+//!   7.  LengthVariation
+//!   8.  ForceVariation
+//!   9.  SumForceLength
+//!  10.  MinLength
+//!  11.  MaxLength
+//!  12.  MinForce
+//!  13.  MaxForce
+//!  14.  RigidSetCompare
+//!  15.  ReactionDirection
+//!  16.  ReactionDirectionMagnitude
+//!  17.  Kitchen-sink combined (all objectives at once)
 
 use ndarray::Array2;
 use theseus::sparse::SparseColMatOwned;
@@ -101,6 +102,8 @@ fn make_arch_problem(bounds: Bounds, objectives: Vec<Box<dyn ObjectiveTrait>>) -
         objectives,
         bounds,
         solver: SolverOptions::default(),
+        self_weight: None,
+        pressure: None,
     }
 }
 
@@ -277,7 +280,23 @@ fn fdm_fd_target_length() {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  6. LengthVariation
+//  6. TargetForce
+// ─────────────────────────────────────────────────────────────
+
+#[test]
+fn fdm_fd_target_force() {
+    let ne = 8;
+    let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(TargetForce {
+        weight: 1.0,
+        edge_indices: (0..ne).collect(),
+        target: vec![1.0, -0.5, 2.0, 1.5, -1.0, 2.5, 0.75, -0.25],
+    })];
+    let p = make_arch_problem(default_bounds(), obj);
+    fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "TargetForce");
+}
+
+// ─────────────────────────────────────────────────────────────
+//  7. LengthVariation
 // ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -291,7 +310,7 @@ fn fdm_fd_length_variation() {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  7. ForceVariation
+//  8. ForceVariation
 // ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -305,7 +324,7 @@ fn fdm_fd_force_variation() {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  8. SumForceLength
+//  9. SumForceLength
 // ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -319,7 +338,7 @@ fn fdm_fd_sum_force_length() {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  9. MinLength
+//  10. MinLength
 // ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -336,7 +355,7 @@ fn fdm_fd_min_length() {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  10. MaxLength
+//  11. MaxLength
 // ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -353,7 +372,7 @@ fn fdm_fd_max_length() {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  11. MinForce
+//  12. MinForce
 // ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -370,7 +389,7 @@ fn fdm_fd_min_force() {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  12. MaxForce
+//  13. MaxForce
 // ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -387,7 +406,7 @@ fn fdm_fd_max_force() {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  13. RigidSetCompare
+//  14. RigidSetCompare
 // ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -405,7 +424,7 @@ fn fdm_fd_rigid_set_compare() {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  14. ReactionDirection
+//  15. ReactionDirection
 // ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -422,7 +441,7 @@ fn fdm_fd_reaction_direction() {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  15. ReactionDirectionMagnitude
+//  16. ReactionDirectionMagnitude
 // ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -442,7 +461,7 @@ fn fdm_fd_reaction_direction_magnitude() {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  16. Kitchen sink: ALL objectives combined
+//  17. Kitchen sink: ALL objectives combined
 // ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -480,6 +499,11 @@ fn fdm_fd_all_objectives_combined() {
             direction: [0.0,0.0,1.0],
         }),
         Box::new(TargetLength { weight: 0.4, edge_indices: (0..ne).collect(), target: vec![1.5; ne] }),
+        Box::new(TargetForce {
+            weight: 0.25,
+            edge_indices: (0..ne).collect(),
+            target: vec![1.0, -0.5, 2.0, 1.5, -1.0, 2.5, 0.75, -0.25],
+        }),
         Box::new(LengthVariation { weight: 0.3, edge_indices: (0..ne).collect(), sharpness: 20.0 }),
         Box::new(ForceVariation { weight: 0.2, edge_indices: (0..ne).collect(), sharpness: 15.0 }),
         Box::new(SumForceLength { weight: 0.1, edge_indices: (0..ne).collect() }),
@@ -495,7 +519,7 @@ fn fdm_fd_all_objectives_combined() {
         }),
     ];
     let p = make_arch_problem(default_bounds(), obj);
-    fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "ALL 15 objectives combined");
+    fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "ALL 16 objectives combined");
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -509,6 +533,17 @@ fn fdm_fd_target_length_subset() {
     })];
     let p = make_arch_problem(default_bounds(), obj);
     fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "TargetLength (subset)");
+}
+
+#[test]
+fn fdm_fd_target_force_subset() {
+    let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(TargetForce {
+        weight: 1.0,
+        edge_indices: vec![0, 2, 5, 7],
+        target: vec![1.0, -0.5, 2.0, -1.25],
+    })];
+    let p = make_arch_problem(default_bounds(), obj);
+    fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "TargetForce (subset)");
 }
 
 #[test]

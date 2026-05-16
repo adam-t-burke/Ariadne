@@ -7,7 +7,7 @@
 use rayon::prelude::*;
 use crate::types::{
     GeometrySnapshot, ObjectiveTrait, FdmCache, Problem,
-    TargetXYZ, TargetXY, TargetPlane, PlanarConstraintAlongDirection, TargetLength, LengthVariation, ForceVariation,
+    TargetXYZ, TargetXY, TargetPlane, PlanarConstraintAlongDirection, TargetLength, TargetForce, LengthVariation, ForceVariation,
     SumForceLength, MinLength, MaxLength, MinForce, MaxForce,
     RigidSetCompare, ReactionDirection, ReactionDirectionMagnitude,
 };
@@ -181,6 +181,16 @@ fn target_length_loss(lengths: &[f64], edge_indices: &[usize], target: &[f64]) -
     let mut loss = 0.0;
     for (i, &idx) in edge_indices.iter().enumerate() {
         let diff = lengths[idx] - target[i];
+        loss += diff * diff;
+    }
+    loss
+}
+
+/// TargetForce:  Σ_i (f[idx_i] − target_i)²
+fn target_force_loss(forces: &[f64], edge_indices: &[usize], target: &[f64]) -> f64 {
+    let mut loss = 0.0;
+    for (i, &idx) in edge_indices.iter().enumerate() {
+        let diff = forces[idx] - target[i];
         loss += diff * diff;
     }
     loss
@@ -415,6 +425,16 @@ impl ObjectiveTrait for TargetLength {
     }
     fn accumulate_gradient(&self, cache: &mut FdmCache, _problem: &Problem) {
         gradients::grad_target_length(cache, self.weight, &self.edge_indices, &self.target);
+    }
+    fn weight(&self) -> f64 { self.weight }
+}
+
+impl ObjectiveTrait for TargetForce {
+    fn loss(&self, snap: &GeometrySnapshot) -> f64 {
+        self.weight * target_force_loss(snap.member_forces, &self.edge_indices, &self.target)
+    }
+    fn accumulate_gradient(&self, cache: &mut FdmCache, _problem: &Problem) {
+        gradients::grad_target_force(cache, self.weight, &self.edge_indices, &self.target);
     }
     fn weight(&self) -> f64 { self.weight }
 }

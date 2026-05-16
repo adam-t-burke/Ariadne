@@ -26,9 +26,9 @@
 //!     by Rust via `theseus_free`.
 //!   - No JSON, no WebSocket — pure value types over the boundary.
 
+use crate::optimizer;
 use crate::sparse::SparseColMatOwned;
 use crate::types::*;
-use crate::optimizer;
 use ndarray::Array2;
 use std::cell::RefCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -99,8 +99,8 @@ pub unsafe extern "C" fn theseus_last_error(buf: *mut u8, buf_len: usize) -> i32
 
 /// C-callable progress callback.
 ///
-/// Called every `report_frequency` evaluations during optimization with:
-///   - `iteration`: evaluation count (1-based)
+/// Called every `report_frequency` accepted L-BFGS iterations during optimization with:
+///   - `iteration`: completed major iteration count (1-based)
 ///   - `loss`: current objective value
 ///   - `xyz`: pointer to `num_nodes * 3` doubles (row-major node positions)
 ///   - `num_nodes`: total number of nodes
@@ -121,6 +121,7 @@ pub struct TheseusHandle {
     pub state: OptimizationState,
     pub progress_callback: Option<ProgressCallback>,
     pub report_frequency: usize,
+    pub last_termination_reason: String,
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -158,11 +159,21 @@ pub unsafe extern "C" fn theseus_create(
 ) -> *mut TheseusHandle {
     let result = catch_unwind(AssertUnwindSafe(|| {
         create_inner(
-            num_edges, num_nodes, num_free,
-            coo_rows, coo_cols, coo_vals, coo_nnz,
-            free_node_indices, fixed_node_indices, num_fixed,
-            loads, fixed_positions,
-            q_init, lower_bounds, upper_bounds,
+            num_edges,
+            num_nodes,
+            num_free,
+            coo_rows,
+            coo_cols,
+            coo_vals,
+            coo_nnz,
+            free_node_indices,
+            fixed_node_indices,
+            num_fixed,
+            loads,
+            fixed_positions,
+            q_init,
+            lower_bounds,
+            upper_bounds,
         )
     }));
 
@@ -179,14 +190,163 @@ pub unsafe extern "C" fn theseus_create(
     }
 }
 
+/// Create a new problem with variable support definitions.
+///
+/// `support_kinds`: 0 = Sphere, 1 = Roller, 2 = Rail.
+///
+/// For each support i:
+/// - `variable_node_indices[i]` is the global node index.
+/// - Sphere uses `sphere_radii[i]`.
+/// - Roller uses `roller_enabled[i*3..i*3+3]`, `roller_lower[...]`, `roller_upper[...]`.
+/// - Rail uses `rail_start[i*3..]` and `rail_end[i*3..]`.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_create_with_variable_supports(
+    // ── Incidence (COO triplets) ──
+    num_edges: usize,
+    num_nodes: usize,
+    num_free: usize,
+    coo_rows: *const usize,
+    coo_cols: *const usize,
+    coo_vals: *const f64,
+    coo_nnz: usize,
+    free_node_indices: *const usize,
+    fixed_node_indices: *const usize,
+    num_fixed: usize,
+    // ── Loads & geometry ──
+    loads: *const f64,
+    fixed_positions: *const f64,
+    // ── Initial q ──
+    q_init: *const f64,
+    // ── Bounds ──
+    lower_bounds: *const f64,
+    upper_bounds: *const f64,
+    // ── Variable supports ──
+    num_variable_supports: usize,
+    variable_node_indices: *const usize,
+    support_kinds: *const i32,
+    sphere_radii: *const f64,
+    roller_enabled: *const u8,
+    roller_lower: *const f64,
+    roller_upper: *const f64,
+    rail_start: *const f64,
+    rail_end: *const f64,
+) -> *mut TheseusHandle {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        create_inner_with_variable_supports(
+            num_edges,
+            num_nodes,
+            num_free,
+            coo_rows,
+            coo_cols,
+            coo_vals,
+            coo_nnz,
+            free_node_indices,
+            fixed_node_indices,
+            num_fixed,
+            loads,
+            fixed_positions,
+            q_init,
+            lower_bounds,
+            upper_bounds,
+            num_variable_supports,
+            variable_node_indices,
+            support_kinds,
+            sphere_radii,
+            roller_enabled,
+            roller_lower,
+            roller_upper,
+            rail_start,
+            rail_end,
+        )
+    }));
+
+    match result {
+        Ok(Ok(ptr)) => ptr,
+        Ok(Err(e)) => {
+            set_last_error(&e.to_string());
+            std::ptr::null_mut()
+        }
+        Err(_panic) => {
+            set_last_error(
+                "internal panic in theseus_create_with_variable_supports (this is a bug)",
+            );
+            std::ptr::null_mut()
+        }
+    }
+}
+
 /// Safe inner function for `theseus_create`.  All pointer-to-slice
 /// conversion happens here; everything downstream is pure safe Rust.
 unsafe fn create_inner(
-    num_edges: usize, num_nodes: usize, num_free: usize,
-    coo_rows: *const usize, coo_cols: *const usize, coo_vals: *const f64, coo_nnz: usize,
-    free_node_indices: *const usize, fixed_node_indices: *const usize, num_fixed: usize,
-    loads: *const f64, fixed_positions: *const f64,
-    q_init: *const f64, lower_bounds: *const f64, upper_bounds: *const f64,
+    num_edges: usize,
+    num_nodes: usize,
+    num_free: usize,
+    coo_rows: *const usize,
+    coo_cols: *const usize,
+    coo_vals: *const f64,
+    coo_nnz: usize,
+    free_node_indices: *const usize,
+    fixed_node_indices: *const usize,
+    num_fixed: usize,
+    loads: *const f64,
+    fixed_positions: *const f64,
+    q_init: *const f64,
+    lower_bounds: *const f64,
+    upper_bounds: *const f64,
+) -> Result<*mut TheseusHandle, TheseusError> {
+    create_inner_with_variable_supports(
+        num_edges,
+        num_nodes,
+        num_free,
+        coo_rows,
+        coo_cols,
+        coo_vals,
+        coo_nnz,
+        free_node_indices,
+        fixed_node_indices,
+        num_fixed,
+        loads,
+        fixed_positions,
+        q_init,
+        lower_bounds,
+        upper_bounds,
+        0,
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null(),
+    )
+}
+
+unsafe fn create_inner_with_variable_supports(
+    num_edges: usize,
+    num_nodes: usize,
+    num_free: usize,
+    coo_rows: *const usize,
+    coo_cols: *const usize,
+    coo_vals: *const f64,
+    coo_nnz: usize,
+    free_node_indices: *const usize,
+    fixed_node_indices: *const usize,
+    num_fixed: usize,
+    loads: *const f64,
+    fixed_positions: *const f64,
+    q_init: *const f64,
+    lower_bounds: *const f64,
+    upper_bounds: *const f64,
+    num_variable_supports: usize,
+    variable_node_indices: *const usize,
+    support_kinds: *const i32,
+    sphere_radii: *const f64,
+    roller_enabled: *const u8,
+    roller_lower: *const f64,
+    roller_upper: *const f64,
+    rail_start: *const f64,
+    rail_end: *const f64,
 ) -> Result<*mut TheseusHandle, TheseusError> {
     let rows = slice::from_raw_parts(coo_rows, coo_nnz);
     let cols = slice::from_raw_parts(coo_cols, coo_nnz);
@@ -200,13 +360,8 @@ unsafe fn create_inner(
     let ub_slice = slice::from_raw_parts(upper_bounds, num_edges);
 
     // Build incidence matrix from COO
-    let incidence = SparseColMatOwned::from_coo(
-        num_edges,
-        num_nodes,
-        rows,
-        cols,
-        vals,
-    ).map_err(|e| TheseusError::Shape(e))?;
+    let incidence = SparseColMatOwned::from_coo(num_edges, num_nodes, rows, cols, vals)
+        .map_err(|e| TheseusError::Shape(e))?;
 
     let free_inc = incidence.extract_columns(&free_idx);
     let fixed_inc = incidence.extract_columns(&fixed_idx);
@@ -227,13 +382,117 @@ unsafe fn create_inner(
     let fixed_node_positions = Array2::from_shape_vec((num_fixed, 3), fixed_pos_slice.to_vec())
         .map_err(|e| TheseusError::Shape(format!("fixed_positions: {e}")))?;
 
-    let anchors = AnchorInfo::all_fixed(fixed_node_positions.clone());
+    let (anchors, latent_init) = if num_variable_supports == 0 {
+        (
+            AnchorInfo::all_fixed(fixed_node_positions.clone()),
+            Vec::new(),
+        )
+    } else {
+        let var_nodes =
+            slice::from_raw_parts(variable_node_indices, num_variable_supports).to_vec();
+        let kinds = slice::from_raw_parts(support_kinds, num_variable_supports);
+        let radii = slice::from_raw_parts(sphere_radii, num_variable_supports);
+        let roller_en = slice::from_raw_parts(roller_enabled, num_variable_supports * 3);
+        let roller_lb = slice::from_raw_parts(roller_lower, num_variable_supports * 3);
+        let roller_ub = slice::from_raw_parts(roller_upper, num_variable_supports * 3);
+        let rail_s = slice::from_raw_parts(rail_start, num_variable_supports * 3);
+        let rail_e = slice::from_raw_parts(rail_end, num_variable_supports * 3);
+
+        // Validate variable nodes are fixed support nodes.
+        for &node in &var_nodes {
+            if !fixed_idx.contains(&node) {
+                return Err(TheseusError::Shape(format!(
+                    "variable support node index {node} is not in fixed_node_indices"
+                )));
+            }
+        }
+        {
+            let mut dedup = var_nodes.clone();
+            dedup.sort_unstable();
+            dedup.dedup();
+            if dedup.len() != var_nodes.len() {
+                return Err(TheseusError::Shape(
+                    "variable support node indices must be unique".into(),
+                ));
+            }
+        }
+
+        let mut supports = Vec::with_capacity(num_variable_supports);
+        let mut init_positions = Array2::zeros((num_variable_supports, 3));
+        for i in 0..num_variable_supports {
+            let node = var_nodes[i];
+            let fixed_row = fixed_idx.iter().position(|&n| n == node).ok_or_else(|| {
+                TheseusError::Shape(format!(
+                    "variable support node index {node} not found in fixed index lookup"
+                ))
+            })?;
+            let x0 = [
+                fixed_node_positions[[fixed_row, 0]],
+                fixed_node_positions[[fixed_row, 1]],
+                fixed_node_positions[[fixed_row, 2]],
+            ];
+            init_positions[[i, 0]] = x0[0];
+            init_positions[[i, 1]] = x0[1];
+            init_positions[[i, 2]] = x0[2];
+
+            let kind = match kinds[i] {
+                0 => {
+                    if !radii[i].is_finite() || radii[i] <= 0.0 {
+                        return Err(TheseusError::Shape(format!(
+                            "sphere support at index {i} must have positive finite radius"
+                        )));
+                    }
+                    VariableSupportKind::Sphere { radius: radii[i] }
+                }
+                1 => {
+                    let e0 = roller_en[i * 3] != 0;
+                    let e1 = roller_en[i * 3 + 1] != 0;
+                    let e2 = roller_en[i * 3 + 2] != 0;
+                    if !(e0 || e1 || e2) {
+                        return Err(TheseusError::Shape(format!(
+                            "roller support at index {i} must enable at least one axis"
+                        )));
+                    }
+                    VariableSupportKind::Roller {
+                        enabled: [e0, e1, e2],
+                        lower: [roller_lb[i * 3], roller_lb[i * 3 + 1], roller_lb[i * 3 + 2]],
+                        upper: [roller_ub[i * 3], roller_ub[i * 3 + 1], roller_ub[i * 3 + 2]],
+                    }
+                }
+                2 => VariableSupportKind::Rail {
+                    start: [rail_s[i * 3], rail_s[i * 3 + 1], rail_s[i * 3 + 2]],
+                    end: [rail_e[i * 3], rail_e[i * 3 + 1], rail_e[i * 3 + 2]],
+                },
+                k => {
+                    return Err(TheseusError::Shape(format!(
+                        "unknown variable support kind code {k} at index {i}"
+                    )));
+                }
+            };
+            supports.push(VariableSupport {
+                node_index: node,
+                reference_position: x0,
+                kind,
+            });
+        }
+
+        let anchors = AnchorInfo {
+            variable_indices: var_nodes,
+            fixed_indices: fixed_idx.clone(),
+            reference_positions: fixed_node_positions.clone(),
+            initial_variable_positions: init_positions,
+            variable_supports: supports,
+        };
+        let latent_init = crate::variable_supports::initial_latents(&anchors)?;
+        (anchors, latent_init)
+    };
 
     let bounds = Bounds {
         lower: lb_slice.to_vec(),
         upper: ub_slice.to_vec(),
     };
 
+    let initial_var_positions = anchors.initial_variable_positions.clone();
     let problem = Problem {
         topology,
         free_node_loads,
@@ -246,13 +505,19 @@ unsafe fn create_inner(
         pressure: None,
     };
 
-    let state = OptimizationState::new(q_slice.to_vec(), Array2::zeros((0, 3)));
+    let mut state = OptimizationState::new(q_slice.to_vec(), initial_var_positions);
+    if !latent_init.is_empty() {
+        state.variable_anchor_latents = latent_init.clone();
+        state.variable_anchor_positions =
+            crate::variable_supports::map_latents_to_positions(&problem, &latent_init)?;
+    }
 
     Ok(Box::into_raw(Box::new(TheseusHandle {
         problem,
         state,
         progress_callback: None,
         report_frequency: 1,
+        last_termination_reason: "not run".to_string(),
     })))
 }
 
@@ -262,7 +527,9 @@ unsafe fn create_inner(
 /// `handle` must be a pointer returned by `theseus_create`, or null.
 #[no_mangle]
 pub unsafe extern "C" fn theseus_free(handle: *mut TheseusHandle) {
-    if handle.is_null() { return; }
+    if handle.is_null() {
+        return;
+    }
     let _ = catch_unwind(AssertUnwindSafe(|| {
         drop(Box::from_raw(handle));
     }));
@@ -290,8 +557,13 @@ pub unsafe extern "C" fn theseus_add_target_xyz(
         let target = Array2::from_shape_vec(
             (num_nodes, 3),
             slice::from_raw_parts(target_xyz, num_nodes * 3).to_vec(),
-        ).map_err(|e| TheseusError::Shape(format!("target_xyz: {e}")))?;
-        h.problem.objectives.push(Box::new(TargetXYZ { weight, node_indices: idx, target }));
+        )
+        .map_err(|e| TheseusError::Shape(format!("target_xyz: {e}")))?;
+        h.problem.objectives.push(Box::new(TargetXYZ {
+            weight,
+            node_indices: idx,
+            target,
+        }));
         Ok(())
     }))
 }
@@ -312,7 +584,36 @@ pub unsafe extern "C" fn theseus_add_target_length(
         let h = &mut *handle;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         let tgt = slice::from_raw_parts(targets, num_edges).to_vec();
-        h.problem.objectives.push(Box::new(TargetLength { weight, edge_indices: idx, target: tgt }));
+        h.problem.objectives.push(Box::new(TargetLength {
+            weight,
+            edge_indices: idx,
+            target: tgt,
+        }));
+        Ok(())
+    }))
+}
+
+/// Add a TargetForce objective.  Returns 0 on success.
+///
+/// # Safety
+/// Valid handle and arrays.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_add_target_force(
+    handle: *mut TheseusHandle,
+    weight: f64,
+    edge_indices: *const usize,
+    num_edges: usize,
+    targets: *const f64,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let h = &mut *handle;
+        let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
+        let tgt = slice::from_raw_parts(targets, num_edges).to_vec();
+        h.problem.objectives.push(Box::new(TargetForce {
+            weight,
+            edge_indices: idx,
+            target: tgt,
+        }));
         Ok(())
     }))
 }
@@ -335,7 +636,10 @@ pub unsafe extern "C" fn theseus_add_min_length(
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         let thr = slice::from_raw_parts(thresholds, num_edges).to_vec();
         h.problem.objectives.push(Box::new(MinLength {
-            weight, edge_indices: idx, threshold: thr, sharpness,
+            weight,
+            edge_indices: idx,
+            threshold: thr,
+            sharpness,
         }));
         Ok(())
     }))
@@ -363,8 +667,13 @@ pub unsafe extern "C" fn theseus_add_target_xy(
         let target = Array2::from_shape_vec(
             (num_nodes, 3),
             slice::from_raw_parts(target_xy, num_nodes * 3).to_vec(),
-        ).map_err(|e| TheseusError::Shape(format!("target_xy: {e}")))?;
-        h.problem.objectives.push(Box::new(TargetXY { weight, node_indices: idx, target }));
+        )
+        .map_err(|e| TheseusError::Shape(format!("target_xy: {e}")))?;
+        h.problem.objectives.push(Box::new(TargetXY {
+            weight,
+            node_indices: idx,
+            target,
+        }));
         Ok(())
     }))
 }
@@ -437,14 +746,16 @@ pub unsafe extern "C" fn theseus_add_planar_constraint_along_direction(
         let x_axis_arr: [f64; 3] = [*x_axis.add(0), *x_axis.add(1), *x_axis.add(2)];
         let y_axis_arr: [f64; 3] = [*y_axis.add(0), *y_axis.add(1), *y_axis.add(2)];
         let direction_arr: [f64; 3] = [*direction.add(0), *direction.add(1), *direction.add(2)];
-        h.problem.objectives.push(Box::new(PlanarConstraintAlongDirection {
-            weight,
-            node_indices: idx,
-            origin: origin_arr,
-            x_axis: x_axis_arr,
-            y_axis: y_axis_arr,
-            direction: direction_arr,
-        }));
+        h.problem
+            .objectives
+            .push(Box::new(PlanarConstraintAlongDirection {
+                weight,
+                node_indices: idx,
+                origin: origin_arr,
+                x_axis: x_axis_arr,
+                y_axis: y_axis_arr,
+                direction: direction_arr,
+            }));
         Ok(())
     }))
 }
@@ -465,7 +776,9 @@ pub unsafe extern "C" fn theseus_add_length_variation(
         let h = &mut *handle;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         h.problem.objectives.push(Box::new(LengthVariation {
-            weight, edge_indices: idx, sharpness,
+            weight,
+            edge_indices: idx,
+            sharpness,
         }));
         Ok(())
     }))
@@ -487,7 +800,9 @@ pub unsafe extern "C" fn theseus_add_force_variation(
         let h = &mut *handle;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         h.problem.objectives.push(Box::new(ForceVariation {
-            weight, edge_indices: idx, sharpness,
+            weight,
+            edge_indices: idx,
+            sharpness,
         }));
         Ok(())
     }))
@@ -508,7 +823,8 @@ pub unsafe extern "C" fn theseus_add_sum_force_length(
         let h = &mut *handle;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         h.problem.objectives.push(Box::new(SumForceLength {
-            weight, edge_indices: idx,
+            weight,
+            edge_indices: idx,
         }));
         Ok(())
     }))
@@ -532,7 +848,10 @@ pub unsafe extern "C" fn theseus_add_max_length(
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         let thr = slice::from_raw_parts(thresholds, num_edges).to_vec();
         h.problem.objectives.push(Box::new(MaxLength {
-            weight, edge_indices: idx, threshold: thr, sharpness,
+            weight,
+            edge_indices: idx,
+            threshold: thr,
+            sharpness,
         }));
         Ok(())
     }))
@@ -556,7 +875,10 @@ pub unsafe extern "C" fn theseus_add_min_force(
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         let thr = slice::from_raw_parts(thresholds, num_edges).to_vec();
         h.problem.objectives.push(Box::new(MinForce {
-            weight, edge_indices: idx, threshold: thr, sharpness,
+            weight,
+            edge_indices: idx,
+            threshold: thr,
+            sharpness,
         }));
         Ok(())
     }))
@@ -580,7 +902,10 @@ pub unsafe extern "C" fn theseus_add_max_force(
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         let thr = slice::from_raw_parts(thresholds, num_edges).to_vec();
         h.problem.objectives.push(Box::new(MaxForce {
-            weight, edge_indices: idx, threshold: thr, sharpness,
+            weight,
+            edge_indices: idx,
+            threshold: thr,
+            sharpness,
         }));
         Ok(())
     }))
@@ -607,8 +932,13 @@ pub unsafe extern "C" fn theseus_add_rigid_set_compare(
         let target = Array2::from_shape_vec(
             (num_nodes, 3),
             slice::from_raw_parts(target_xyz, num_nodes * 3).to_vec(),
-        ).map_err(|e| TheseusError::Shape(format!("rigid_set target: {e}")))?;
-        h.problem.objectives.push(Box::new(RigidSetCompare { weight, node_indices: idx, target }));
+        )
+        .map_err(|e| TheseusError::Shape(format!("rigid_set target: {e}")))?;
+        h.problem.objectives.push(Box::new(RigidSetCompare {
+            weight,
+            node_indices: idx,
+            target,
+        }));
         Ok(())
     }))
 }
@@ -633,9 +963,12 @@ pub unsafe extern "C" fn theseus_add_reaction_direction(
         let dirs = Array2::from_shape_vec(
             (num_anchors, 3),
             slice::from_raw_parts(target_dirs, num_anchors * 3).to_vec(),
-        ).map_err(|e| TheseusError::Shape(format!("reaction_direction targets: {e}")))?;
+        )
+        .map_err(|e| TheseusError::Shape(format!("reaction_direction targets: {e}")))?;
         h.problem.objectives.push(Box::new(ReactionDirection {
-            weight, anchor_indices: idx, target_directions: dirs,
+            weight,
+            anchor_indices: idx,
+            target_directions: dirs,
         }));
         Ok(())
     }))
@@ -664,11 +997,17 @@ pub unsafe extern "C" fn theseus_add_reaction_direction_magnitude(
         let dirs = Array2::from_shape_vec(
             (num_anchors, 3),
             slice::from_raw_parts(target_dirs, num_anchors * 3).to_vec(),
-        ).map_err(|e| TheseusError::Shape(format!("reaction_dir_mag targets: {e}")))?;
+        )
+        .map_err(|e| TheseusError::Shape(format!("reaction_dir_mag targets: {e}")))?;
         let mags = slice::from_raw_parts(target_mags, num_anchors).to_vec();
-        h.problem.objectives.push(Box::new(ReactionDirectionMagnitude {
-            weight, anchor_indices: idx, target_directions: dirs, target_magnitudes: mags,
-        }));
+        h.problem
+            .objectives
+            .push(Box::new(ReactionDirectionMagnitude {
+                weight,
+                anchor_indices: idx,
+                target_directions: dirs,
+                target_magnitudes: mags,
+            }));
         Ok(())
     }))
 }
@@ -773,9 +1112,7 @@ pub unsafe extern "C" fn theseus_set_self_weight_sizing(
 /// # Safety
 /// Valid handle.
 #[no_mangle]
-pub unsafe extern "C" fn theseus_clear_self_weight(
-    handle: *mut TheseusHandle,
-) -> i32 {
+pub unsafe extern "C" fn theseus_clear_self_weight(handle: *mut TheseusHandle) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
         let h = &mut *handle;
         h.problem.self_weight = None;
@@ -933,9 +1270,7 @@ pub unsafe extern "C" fn theseus_set_pressure_directional(
 /// # Safety
 /// Valid handle.
 #[no_mangle]
-pub unsafe extern "C" fn theseus_clear_pressure(
-    handle: *mut TheseusHandle,
-) -> i32 {
+pub unsafe extern "C" fn theseus_clear_pressure(handle: *mut TheseusHandle) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
         let h = &mut *handle;
         h.problem.pressure = None;
@@ -947,7 +1282,7 @@ pub unsafe extern "C" fn theseus_clear_pressure(
 //  Progress callback
 // ─────────────────────────────────────────────────────────────
 
-/// Register a progress callback invoked every `frequency` evaluations.
+/// Register a progress callback invoked every `frequency` accepted L-BFGS iterations.
 ///
 /// Pass a null function pointer to clear the callback.
 ///
@@ -966,6 +1301,34 @@ pub unsafe extern "C" fn theseus_set_progress_callback(
         h.report_frequency = if frequency == 0 { 1 } else { frequency };
         Ok(())
     }))
+}
+
+/// Retrieve the termination reason from the most recent optimization run.
+///
+/// Returns the number of bytes written (excluding null terminator), or -1 if
+/// the handle is null or the buffer is too small.
+///
+/// # Safety
+/// `buf` must point to at least `buf_len` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_get_termination_reason(
+    handle: *const TheseusHandle,
+    buf: *mut u8,
+    buf_len: usize,
+) -> i32 {
+    if handle.is_null() {
+        set_last_error("null handle");
+        return -1;
+    }
+    let msg = &(*handle).last_termination_reason;
+    let bytes = msg.as_bytes();
+    if buf_len < bytes.len() + 1 {
+        return -1;
+    }
+    let out = slice::from_raw_parts_mut(buf, buf_len);
+    out[..bytes.len()].copy_from_slice(bytes);
+    out[bytes.len()] = 0;
+    bytes.len() as i32
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -995,6 +1358,7 @@ pub unsafe extern "C" fn theseus_optimize(
         let cb = h.progress_callback;
         let freq = h.report_frequency;
         let result = optimizer::optimize(&h.problem, &mut h.state, cb, freq)?;
+        h.last_termination_reason = result.termination_reason.clone();
 
         let nn = h.problem.topology.num_nodes;
         let ne = h.problem.topology.num_edges;
@@ -1049,9 +1413,18 @@ pub unsafe extern "C" fn theseus_solve_forward(
     ffi_guard(AssertUnwindSafe(|| {
         let h = &mut *handle;
         let mut cache = FdmCache::new(&h.problem)?;
-        let anchors = h.state.variable_anchor_positions.clone();
+        let anchors = crate::variable_supports::map_latents_to_positions(
+            &h.problem,
+            &h.state.variable_anchor_latents,
+        )?;
 
-        crate::fdm::solve_fdm_with_loads(&mut cache, &h.state.force_densities, &h.problem, &anchors, 1e-12)?;
+        crate::fdm::solve_fdm_with_loads(
+            &mut cache,
+            &h.state.force_densities,
+            &h.problem,
+            &anchors,
+            1e-12,
+        )?;
 
         let nn = h.problem.topology.num_nodes;
         let ne = h.problem.topology.num_edges;
@@ -1076,7 +1449,6 @@ pub unsafe extern "C" fn theseus_solve_forward(
         Ok(())
     }))
 }
-
 
 // ─────────────────────────────────────────────────────────────
 //  Inverse solvers  (experimental)
@@ -1128,17 +1500,28 @@ pub unsafe extern "C" fn theseus_solve_pseudoinverse(
         let target = Array2::from_shape_vec(
             (nn_free, 3),
             slice::from_raw_parts(target_free_xyz, nn_free * 3).to_vec(),
-        ).map_err(|e| TheseusError::Shape(format!("target_free_xyz: {e}")))?;
+        )
+        .map_err(|e| TheseusError::Shape(format!("target_free_xyz: {e}")))?;
 
         let q = crate::inverse::solve_pseudoinverse_dispatch(
-            &h.problem, &target, regularization, use_l2 != 0, max_l1_iter,
-            use_augmented != 0, enforce_zero_rx != 0, enforce_zero_ry != 0,
-            enforce_zero_rz != 0, solve_for_q != 0,
+            &h.problem,
+            &target,
+            regularization,
+            use_l2 != 0,
+            max_l1_iter,
+            use_augmented != 0,
+            enforce_zero_rx != 0,
+            enforce_zero_ry != 0,
+            enforce_zero_rz != 0,
+            solve_for_q != 0,
         )?;
 
         // Forward solve with the computed q (with self-weight/pressure if active)
         let mut cache = FdmCache::new(&h.problem)?;
-        let anchors = h.state.variable_anchor_positions.clone();
+        let anchors = crate::variable_supports::map_latents_to_positions(
+            &h.problem,
+            &h.state.variable_anchor_latents,
+        )?;
         crate::fdm::solve_fdm_with_loads(&mut cache, &q, &h.problem, &anchors, 1e-12)?;
 
         // Copy outputs
@@ -1196,13 +1579,17 @@ pub unsafe extern "C" fn theseus_solve_nnls(
         let target = Array2::from_shape_vec(
             (nn_free, 3),
             slice::from_raw_parts(target_free_xyz, nn_free * 3).to_vec(),
-        ).map_err(|e| TheseusError::Shape(format!("target_free_xyz: {e}")))?;
+        )
+        .map_err(|e| TheseusError::Shape(format!("target_free_xyz: {e}")))?;
 
         let q = crate::inverse::solve_nnls(&h.problem, &target, max_iter, tol)?;
 
         // Forward solve with the computed q (with self-weight/pressure if active)
         let mut cache = FdmCache::new(&h.problem)?;
-        let anchors = h.state.variable_anchor_positions.clone();
+        let anchors = crate::variable_supports::map_latents_to_positions(
+            &h.problem,
+            &h.state.variable_anchor_latents,
+        )?;
         crate::fdm::solve_fdm_with_loads(&mut cache, &q, &h.problem, &anchors, 1e-12)?;
 
         // Copy outputs
@@ -1227,4 +1614,3 @@ pub unsafe extern "C" fn theseus_solve_nnls(
         Ok(())
     }))
 }
-

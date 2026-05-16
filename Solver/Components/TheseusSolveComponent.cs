@@ -48,7 +48,7 @@ public class TheseusSolveComponent : GH_Component
         List<double> Q,
         List<double> Forces,
         List<double> Lengths,
-        int EvalCount);
+        int Iterations);
 
     public TheseusSolveComponent()
         : base("Theseus Solve", "Theseus",
@@ -150,7 +150,7 @@ public class TheseusSolveComponent : GH_Component
         if (_state == SolverState.Running)
         {
             bool newTrigger = _triggerGeneration != _consumedGeneration;
-            int inputHash = ComputeInputHash(network!, q, loads, loadNodes, config);
+            int inputHash = ComputeInputHash(network!, q, loads, loadNodes, config, selfWeight, pressure);
             bool inputsChanged = inputHash != _lastInputHash;
 
             if (newTrigger || (currentRun && inputsChanged))
@@ -187,7 +187,7 @@ public class TheseusSolveComponent : GH_Component
 
         if (_triggerGeneration == _consumedGeneration)
         {
-            int inputHash = ComputeInputHash(network!, q, loads, loadNodes, config);
+            int inputHash = ComputeInputHash(network!, q, loads, loadNodes, config, selfWeight, pressure);
             if (inputHash == _lastInputHash)
             {
                 if (_cachedResult != null)
@@ -199,7 +199,7 @@ public class TheseusSolveComponent : GH_Component
         else
         {
             _consumedGeneration = _triggerGeneration;
-            _lastInputHash = ComputeInputHash(network!, q, loads, loadNodes, config);
+            _lastInputHash = ComputeInputHash(network!, q, loads, loadNodes, config, selfWeight, pressure);
         }
 
         // ── Start background optimization ────────────────────────
@@ -298,8 +298,11 @@ public class TheseusSolveComponent : GH_Component
                 }
                 else
                 {
+                    var reason = string.IsNullOrWhiteSpace(_cachedResult.TerminationReason)
+                        ? ""
+                        : $": {_cachedResult.TerminationReason}";
                     AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
-                        $"Did not converge after {_cachedResult.Iterations} iterations");
+                        $"Did not converge after {_cachedResult.Iterations} iterations{reason}");
                 }
             }
             return;
@@ -311,7 +314,7 @@ public class TheseusSolveComponent : GH_Component
 
     // ── Progress callback ────────────────────────────────────────────
 
-    private void OnProgress(int evalCount, double loss, double[] xyz, double[] qVals, (int start, int end)[] edgeIndices)
+    private void OnProgress(int iteration, double loss, double[] xyz, double[] qVals, (int start, int end)[] edgeIndices)
     {
         int nn = xyz.Length / 3;
         var nodes = new List<Point3d>(nn);
@@ -334,7 +337,7 @@ public class TheseusSolveComponent : GH_Component
             forces.Add(i < qVals.Length ? qVals[i] * len : 0.0);
         }
 
-        var intermediate = new IntermediateOutput(nodes, edges, qList, forces, lengths, evalCount);
+        var intermediate = new IntermediateOutput(nodes, edges, qList, forces, lengths, iteration);
 
         lock (_intermediateLock)
             _intermediateOutput = intermediate;
@@ -365,7 +368,7 @@ public class TheseusSolveComponent : GH_Component
             DA.SetDataList(3, intermediate.Q);
             DA.SetDataList(4, intermediate.Forces);
             DA.SetDataList(5, intermediate.Lengths);
-            DA.SetData(6, intermediate.EvalCount);
+            DA.SetData(6, intermediate.Iterations);
             DA.SetData(7, false);
         }
         else if (_cachedResult != null)
@@ -382,7 +385,13 @@ public class TheseusSolveComponent : GH_Component
     }
 
     private static int ComputeInputHash(
-        FDM_Network network, List<double> q, List<Vector3d> loads, List<Point3d> loadNodes, OptimizationConfig config)
+        FDM_Network network,
+        List<double> q,
+        List<Vector3d> loads,
+        List<Point3d> loadNodes,
+        OptimizationConfig config,
+        SelfWeightConfig? selfWeight,
+        PressureConfig? pressure)
     {
         var hash = new HashCode();
         hash.Add(RuntimeHelpers.GetHashCode(network));
@@ -394,10 +403,16 @@ public class TheseusSolveComponent : GH_Component
         hash.Add(config.RelTol);
         hash.Add(config.BarrierWeight);
         hash.Add(config.BarrierSharpness);
+        hash.Add(config.ReportFrequency);
+        hash.Add(config.StreamPreview);
         foreach (var obj in config.Objectives)
             hash.Add(obj.GetContentHashCode());
+        foreach (var support in config.VariableSupports)
+            hash.Add(support.GetContentHashCode());
         foreach (var lb in config.LowerBounds) hash.Add(lb);
         foreach (var ub in config.UpperBounds) hash.Add(ub);
+        hash.Add(selfWeight?.GetContentHashCode() ?? 0);
+        hash.Add(pressure?.GetContentHashCode() ?? 0);
         return hash.ToHashCode();
     }
 
@@ -437,6 +452,7 @@ public class TheseusSolveComponent : GH_Component
                 Objectives = cfg.Objectives.ToList(),
                 SelfWeight = snap.SelfWeight,
                 Pressure = snap.Pressure,
+                VariableSupports = cfg.VariableSupports.ToList(),
             };
             var options = new SolverOptions
             {

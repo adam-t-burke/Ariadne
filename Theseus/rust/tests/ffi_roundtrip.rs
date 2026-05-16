@@ -316,6 +316,7 @@ fn ffi_register_all_objectives() {
         assert_eq!(0, theseus_add_target_xyz(h, 1.0, node_idx.as_ptr(), node_idx.len(), target_3x3.as_ptr()));
         assert_eq!(0, theseus_add_target_xy(h, 1.0, node_idx.as_ptr(), node_idx.len(), target_3x3.as_ptr()));
         assert_eq!(0, theseus_add_target_length(h, 1.0, edge_idx.as_ptr(), edge_idx.len(), targets_3.as_ptr()));
+        assert_eq!(0, theseus_add_target_force(h, 1.0, edge_idx.as_ptr(), edge_idx.len(), targets_3.as_ptr()));
         assert_eq!(0, theseus_add_length_variation(h, 0.5, edge_idx.as_ptr(), edge_idx.len(), 20.0));
         assert_eq!(0, theseus_add_force_variation(h, 0.5, edge_idx.as_ptr(), edge_idx.len(), 20.0));
         assert_eq!(0, theseus_add_sum_force_length(h, 0.01, edge_idx.as_ptr(), edge_idx.len()));
