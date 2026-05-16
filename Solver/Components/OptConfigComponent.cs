@@ -24,6 +24,7 @@ public class OptConfigComponent : GH_Component
     protected override void RegisterInputParams(GH_InputParamManager pManager)
     {
         pManager.AddGenericParameter("Objectives", "OBJ", "Objective functions to minimize (flattened automatically)", GH_ParamAccess.tree);
+        pManager.AddGenericParameter("Variable Supports", "VS", "Variable support definitions (optional, flattened)", GH_ParamAccess.tree);
         pManager.AddNumberParameter("Lower Bounds", "qMin", "Lower bounds on force densities", GH_ParamAccess.list, 0.1);
         pManager.AddNumberParameter("Upper Bounds", "qMax", "Upper bounds on force densities", GH_ParamAccess.list, 100.0);
         pManager.AddIntegerParameter("Max Iterations", "MaxIter", "Maximum solver iterations", GH_ParamAccess.item, 500);
@@ -31,9 +32,10 @@ public class OptConfigComponent : GH_Component
         pManager.AddNumberParameter("Relative Tolerance", "RelTol", "Relative convergence tolerance", GH_ParamAccess.item, 1e-6);
         pManager.AddNumberParameter("Barrier Weight", "BW", "Barrier function weight", GH_ParamAccess.item, 10.0);
         pManager.AddNumberParameter("Barrier Sharpness", "BS", "Barrier function sharpness", GH_ParamAccess.item, 10.0);
-        pManager.AddIntegerParameter("Report Frequency", "ReportFreq", "Invoke progress callback every N evaluations (0 = every evaluation)", GH_ParamAccess.item, 10);
+        pManager.AddIntegerParameter("Report Frequency", "ReportFreq", "Invoke progress callback every N accepted L-BFGS iterations (0 = every iteration)", GH_ParamAccess.item, 10);
         pManager.AddBooleanParameter("Run", "Run", "Toggle true for open-loop optimization; use a button for single-trigger", GH_ParamAccess.item, false);
         pManager.AddBooleanParameter("Stream Preview", "Stream", "Stream intermediate results to outputs during optimization (false = only output final result)", GH_ParamAccess.item, true);
+        pManager[1].Optional = true;
     }
 
     protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -44,6 +46,7 @@ public class OptConfigComponent : GH_Component
     protected override void SolveInstance(IGH_DataAccess DA)
     {
         List<Objective> objectives = [];
+        List<VariableSupportConfig> variableSupports = [];
         List<double> lb = [];
         List<double> ub = [];
         int maxIter = 500;
@@ -68,16 +71,31 @@ public class OptConfigComponent : GH_Component
                     objectives.Add(obj);
             }
         }
-        DA.GetDataList(1, lb);
-        DA.GetDataList(2, ub);
-        DA.GetData(3, ref maxIter);
-        DA.GetData(4, ref absTol);
-        DA.GetData(5, ref relTol);
-        DA.GetData(6, ref barrierWeight);
-        DA.GetData(7, ref barrierSharpness);
-        DA.GetData(8, ref reportFreq);
-        DA.GetData(9, ref run);
-        DA.GetData(10, ref streamPreview);
+        var vsTree = new GH_Structure<IGH_Goo>();
+        if (DA.GetDataTree(1, out vsTree))
+        {
+            vsTree.Flatten();
+            variableSupports.Clear();
+            foreach (var branch in vsTree.Branches)
+            {
+                foreach (var goo in branch)
+                {
+                    if (goo?.ScriptVariable() is VariableSupportConfig vs)
+                        variableSupports.Add(vs);
+                }
+            }
+        }
+
+        DA.GetDataList(2, lb);
+        DA.GetDataList(3, ub);
+        DA.GetData(4, ref maxIter);
+        DA.GetData(5, ref absTol);
+        DA.GetData(6, ref relTol);
+        DA.GetData(7, ref barrierWeight);
+        DA.GetData(8, ref barrierSharpness);
+        DA.GetData(9, ref reportFreq);
+        DA.GetData(10, ref run);
+        DA.GetData(11, ref streamPreview);
 
         if (objectives.Count == 0)
         {
@@ -110,6 +128,7 @@ public class OptConfigComponent : GH_Component
             ReportFrequency = reportFreq,
             Run = run,
             StreamPreview = streamPreview,
+            VariableSupports = variableSupports.AsReadOnly(),
         };
 
         DA.SetData(0, config);

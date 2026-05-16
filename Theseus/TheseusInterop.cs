@@ -59,6 +59,23 @@ internal static class TheseusInterop
         double[] q_init, double[] lower_bounds, double[] upper_bounds);
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr theseus_create_with_variable_supports(
+        nuint num_edges, nuint num_nodes, nuint num_free,
+        nuint[] coo_rows, nuint[] coo_cols, double[] coo_vals, nuint coo_nnz,
+        nuint[] free_node_indices, nuint[] fixed_node_indices, nuint num_fixed,
+        double[] loads, double[] fixed_positions,
+        double[] q_init, double[] lower_bounds, double[] upper_bounds,
+        nuint num_variable_supports,
+        nuint[] variable_node_indices,
+        int[] support_kinds,
+        double[] sphere_radii,
+        byte[] roller_enabled,
+        double[] roller_lower,
+        double[] roller_upper,
+        double[] rail_start,
+        double[] rail_end);
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
     public static extern void theseus_free(IntPtr handle);
 
     // ── Objective registration ───────────────────────────────
@@ -90,6 +107,12 @@ internal static class TheseusInterop
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
     public static extern int theseus_add_target_length(
+        IntPtr handle, double weight,
+        nuint[] edge_indices, nuint num_edges,
+        double[] targets);
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_add_target_force(
         IntPtr handle, double weight,
         nuint[] edge_indices, nuint num_edges,
         double[] targets);
@@ -212,7 +235,7 @@ internal static class TheseusInterop
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate byte NativeProgressCallback(
-        nuint iteration, double loss, IntPtr xyz, nuint numNodes,
+        nuint majorIteration, double loss, IntPtr xyz, nuint numNodes,
         IntPtr q, nuint numEdges);
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
@@ -229,6 +252,12 @@ internal static class TheseusInterop
         double[] out_xyz, double[] out_lengths, double[] out_forces,
         double[] out_q, double[] out_reactions,
         ref nuint out_iterations, ref byte out_converged);
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_get_termination_reason(
+        IntPtr handle,
+        byte[] buffer,
+        nuint buffer_len);
 
     // ── Forward solve ────────────────────────────────────────
 

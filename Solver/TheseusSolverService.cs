@@ -21,8 +21,8 @@ public static class TheseusSolverService
     /// <param name="inputs">Solver inputs including loads, bounds, and objectives.</param>
     /// <param name="options">Optional solver options (iterations, tolerances, etc.).</param>
     /// <param name="progressCallback">
-    /// Optional callback invoked every ReportFrequency evaluations with
-    /// (iteration, loss, xyz[numNodes*3], q[numEdges]).
+    /// Optional callback invoked every ReportFrequency accepted L-BFGS iterations with
+    /// (majorIteration, loss, xyz[numNodes*3], q[numEdges]).
     /// Return <c>true</c> to continue, <c>false</c> to cancel.
     /// </param>
     public static SolveResult Solve(
@@ -43,7 +43,9 @@ public static class TheseusSolverService
             data.CooRows, data.CooCols, data.CooVals,
             data.FreeIndices, data.FixedIndices,
             data.Loads, data.FixedPositions,
-            data.QInit, data.LowerBounds, data.UpperBounds);
+            data.QInit, data.LowerBounds, data.UpperBounds,
+            data.VariableNodeIndices, data.VariableSupportKinds, data.SphereRadii,
+            data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd);
 
         foreach (var objective in inputs.Objectives)
         {
@@ -84,7 +86,9 @@ public static class TheseusSolverService
             data.CooRows, data.CooCols, data.CooVals,
             data.FreeIndices, data.FixedIndices,
             data.Loads, data.FixedPositions,
-            data.QInit, data.LowerBounds, data.UpperBounds);
+            data.QInit, data.LowerBounds, data.UpperBounds,
+            data.VariableNodeIndices, data.VariableSupportKinds, data.SphereRadii,
+            data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd);
 
         ApplyLoadConfig(solver, inputs, context);
 
@@ -120,7 +124,9 @@ public static class TheseusSolverService
             data.CooRows, data.CooCols, data.CooVals,
             data.FreeIndices, data.FixedIndices,
             data.Loads, data.FixedPositions,
-            data.QInit, data.LowerBounds, data.UpperBounds);
+            data.QInit, data.LowerBounds, data.UpperBounds,
+            data.VariableNodeIndices, data.VariableSupportKinds, data.SphereRadii,
+            data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd);
 
         ApplyLoadConfig(solver, inputs, context);
 
@@ -150,7 +156,9 @@ public static class TheseusSolverService
             data.CooRows, data.CooCols, data.CooVals,
             data.FreeIndices, data.FixedIndices,
             data.Loads, data.FixedPositions,
-            data.QInit, data.LowerBounds, data.UpperBounds);
+            data.QInit, data.LowerBounds, data.UpperBounds,
+            data.VariableNodeIndices, data.VariableSupportKinds, data.SphereRadii,
+            data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd);
 
         ApplyLoadConfig(solver, inputs, context);
 
@@ -310,6 +318,8 @@ public static class TheseusSolverService
             ? Expand(inputs.UpperBounds, numEdges)
             : ExpandConstant(double.PositiveInfinity, numEdges);
 
+        var supportData = BuildVariableSupportData(inputs.VariableSupports, network, context);
+
         return new SolverData(
             numEdges, numNodes, numFree,
             cooRows, cooCols, cooVals,
@@ -317,7 +327,139 @@ public static class TheseusSolverService
             loads, fixedPos,
             Expand(inputs.QInit, numEdges),
             lowerBounds,
-            upperBounds);
+            upperBounds,
+            supportData.VariableNodeIndices,
+            supportData.VariableSupportKinds,
+            supportData.SphereRadii,
+            supportData.RollerEnabled,
+            supportData.RollerLower,
+            supportData.RollerUpper,
+            supportData.RailStart,
+            supportData.RailEnd);
+    }
+
+    private readonly record struct VariableSupportData(
+        int[] VariableNodeIndices,
+        int[] VariableSupportKinds,
+        double[] SphereRadii,
+        byte[] RollerEnabled,
+        double[] RollerLower,
+        double[] RollerUpper,
+        double[] RailStart,
+        double[] RailEnd);
+
+    private static VariableSupportData BuildVariableSupportData(
+        List<VariableSupportConfig>? supports,
+        FDM_Network network,
+        SolverContext context)
+    {
+        if (supports == null || supports.Count == 0)
+        {
+            return new VariableSupportData(
+                [],
+                [],
+                [],
+                [],
+                [],
+                [],
+                [],
+                []);
+        }
+
+        var nodeIndices = new List<int>();
+        var kinds = new List<int>();
+        var sphereRadii = new List<double>();
+        var rollerEnabled = new List<byte>();
+        var rollerLower = new List<double>();
+        var rollerUpper = new List<double>();
+        var railStart = new List<double>();
+        var railEnd = new List<double>();
+
+        var seen = new HashSet<int>();
+        foreach (var support in supports)
+        {
+            if (support.Nodes == null || support.Nodes.Count == 0)
+                continue;
+
+            foreach (var node in support.Nodes)
+            {
+                if (!context.NodeIndexMap.TryGetValue(node, out int nodeIdx))
+                    throw new ArgumentException("Variable support node is not part of the current network.");
+                if (!network.FixedNodes.Contains(nodeIdx))
+                    throw new ArgumentException("Variable supports can only target fixed nodes.");
+                if (!seen.Add(nodeIdx))
+                    throw new ArgumentException($"Node index {nodeIdx} has multiple variable support definitions.");
+
+                nodeIndices.Add(nodeIdx);
+
+                switch (support)
+                {
+                    case SphereVariableSupport sphere:
+                        if (!double.IsFinite(sphere.Radius) || sphere.Radius <= 0.0)
+                            throw new ArgumentException("Sphere variable support radius must be positive and finite.");
+                        kinds.Add(0);
+                        sphereRadii.Add(sphere.Radius);
+                        rollerEnabled.AddRange([0, 0, 0]);
+                        rollerLower.AddRange([0.0, 0.0, 0.0]);
+                        rollerUpper.AddRange([0.0, 0.0, 0.0]);
+                        railStart.AddRange([0.0, 0.0, 0.0]);
+                        railEnd.AddRange([0.0, 0.0, 0.0]);
+                        break;
+
+                    case RollerVariableSupport roller:
+                        if (!(roller.FreeX || roller.FreeY || roller.FreeZ))
+                            throw new ArgumentException("Roller variable support must free at least one axis.");
+                        if ((roller.FreeX && !roller.DomainX.IsIncreasing) ||
+                            (roller.FreeY && !roller.DomainY.IsIncreasing) ||
+                            (roller.FreeZ && !roller.DomainZ.IsIncreasing))
+                            throw new ArgumentException("Roller enabled-axis domains must be increasing.");
+
+                        kinds.Add(1);
+                        sphereRadii.Add(0.0);
+                        rollerEnabled.Add((byte)(roller.FreeX ? 1 : 0));
+                        rollerEnabled.Add((byte)(roller.FreeY ? 1 : 0));
+                        rollerEnabled.Add((byte)(roller.FreeZ ? 1 : 0));
+                        rollerLower.Add(roller.DomainX.T0);
+                        rollerLower.Add(roller.DomainY.T0);
+                        rollerLower.Add(roller.DomainZ.T0);
+                        rollerUpper.Add(roller.DomainX.T1);
+                        rollerUpper.Add(roller.DomainY.T1);
+                        rollerUpper.Add(roller.DomainZ.T1);
+                        railStart.AddRange([0.0, 0.0, 0.0]);
+                        railEnd.AddRange([0.0, 0.0, 0.0]);
+                        break;
+
+                    case RailVariableSupport rail:
+                        if (!rail.Rail.IsValid || rail.Rail.Length <= 1e-12)
+                            throw new ArgumentException("Rail variable support requires a non-degenerate line segment.");
+                        kinds.Add(2);
+                        sphereRadii.Add(0.0);
+                        rollerEnabled.AddRange([0, 0, 0]);
+                        rollerLower.AddRange([0.0, 0.0, 0.0]);
+                        rollerUpper.AddRange([0.0, 0.0, 0.0]);
+                        railStart.Add(rail.Rail.FromX);
+                        railStart.Add(rail.Rail.FromY);
+                        railStart.Add(rail.Rail.FromZ);
+                        railEnd.Add(rail.Rail.ToX);
+                        railEnd.Add(rail.Rail.ToY);
+                        railEnd.Add(rail.Rail.ToZ);
+                        break;
+
+                    default:
+                        throw new ArgumentException($"Unsupported variable support type {support.GetType().Name}.");
+                }
+            }
+        }
+
+        return new VariableSupportData(
+            [.. nodeIndices],
+            [.. kinds],
+            [.. sphereRadii],
+            [.. rollerEnabled],
+            [.. rollerLower],
+            [.. rollerUpper],
+            [.. railStart],
+            [.. railEnd]);
     }
 
     private static void ApplyLoadConfig(TheseusSolver solver, SolverInputs inputs, SolverContext context)
@@ -413,7 +555,8 @@ public static class TheseusSolverService
             MemberLengths = result.MemberLengths,
             Reactions = result.Reactions,
             Iterations = result.Iterations,
-            Converged = result.Converged
+            Converged = result.Converged,
+            TerminationReason = result.TerminationReason
         };
     }
 

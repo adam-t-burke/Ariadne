@@ -11,14 +11,15 @@
 //! All public functions return `Result<_, TheseusError>` — the crate never
 //! panics in normal operation.
 
+pub mod fdm;
+pub mod ffi;
+pub mod gradients;
+pub mod inverse;
+pub mod objectives;
+pub mod optimizer;
 pub mod sparse;
 pub mod types;
-pub mod fdm;
-pub mod objectives;
-pub mod gradients;
-pub mod optimizer;
-pub mod inverse;
-pub mod ffi;
+pub mod variable_supports;
 
-pub use types::TheseusError;
 pub use types::ObjectiveTrait;
+pub use types::TheseusError;

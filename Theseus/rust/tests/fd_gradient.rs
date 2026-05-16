@@ -116,14 +116,8 @@ fn make_arch_problem(bounds: Bounds, objectives: Vec<Box<dyn ObjectiveTrait>>) -
     // Fixed-node positions:
     //   node 0  at (0, 0, 0)    left support
     //   node 6  at (6, 0, 0)    right support
-    let fixed_node_positions = Array2::from_shape_vec(
-        (2, 3),
-        vec![
-            0.0, 0.0, 0.0,
-            6.0, 0.0, 0.0,
-        ],
-    )
-    .unwrap();
+    let fixed_node_positions =
+        Array2::from_shape_vec((2, 3), vec![0.0, 0.0, 0.0, 6.0, 0.0, 0.0]).unwrap();
 
     let anchors = AnchorInfo::all_fixed(fixed_node_positions.clone());
 
@@ -135,7 +129,36 @@ fn make_arch_problem(bounds: Bounds, objectives: Vec<Box<dyn ObjectiveTrait>>) -
         objectives,
         bounds,
         solver: SolverOptions::default(),
+        self_weight: None,
+        pressure: None,
     }
+}
+
+fn make_variable_rail_arch_problem(objectives: Vec<Box<dyn ObjectiveTrait>>) -> Problem {
+    let mut problem = make_arch_problem(
+        Bounds {
+            lower: vec![0.1; 8],
+            upper: vec![100.0; 8],
+        },
+        objectives,
+    );
+    let reference_positions = problem.anchors.reference_positions.clone();
+    let initial_variable_positions = Array2::from_shape_vec((1, 3), vec![6.0, 0.0, 0.0]).unwrap();
+    problem.anchors = AnchorInfo {
+        variable_indices: vec![6],
+        fixed_indices: vec![0, 6],
+        reference_positions,
+        initial_variable_positions,
+        variable_supports: vec![VariableSupport {
+            node_index: 6,
+            reference_position: [6.0, 0.0, 0.0],
+            kind: VariableSupportKind::Rail {
+                start: [5.0, -1.0, 0.0],
+                end: [7.0, 1.0, 0.0],
+            },
+        }],
+    };
+    problem
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -144,34 +167,42 @@ fn make_arch_problem(bounds: Bounds, objectives: Vec<Box<dyn ObjectiveTrait>>) -
 
 /// Evaluate loss-only at θ (without gradient — fresh cache each call so the
 /// Factorization is clean).
-fn eval_loss(problem: &Problem, theta: &[f64], lb: &[f64], ub: &[f64], lb_idx: &[usize], ub_idx: &[usize]) -> f64 {
+fn eval_loss(
+    problem: &Problem,
+    theta: &[f64],
+    lb: &[f64],
+    ub: &[f64],
+    lb_idx: &[usize],
+    ub_idx: &[usize],
+) -> f64 {
     let mut cache = FdmCache::new(problem).unwrap();
     let mut grad = vec![0.0; theta.len()];
     theseus::gradients::value_and_gradient(
         &mut cache, problem, theta, &mut grad, lb, ub, lb_idx, ub_idx,
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 /// Central-difference gradient test.
 ///
 /// Returns (max_abs_error, max_rel_error) over all components.
-fn fd_gradient_check(
-    problem: &Problem,
-    theta: &[f64],
-    h: f64,
-    tol_abs: f64,
-    tol_rel: f64,
-) {
+fn fd_gradient_check(problem: &Problem, theta: &[f64], h: f64, tol_abs: f64, tol_rel: f64) {
     let ne = problem.topology.num_edges;
     let n = theta.len();
 
     // Bound arrays (for barrier — use wide bounds so barrier is negligible)
-    let lb: Vec<f64> = problem.bounds.lower.iter()
+    let lb: Vec<f64> = problem
+        .bounds
+        .lower
+        .iter()
         .chain(std::iter::repeat(&f64::NEG_INFINITY).take(n - ne))
         .take(n)
         .copied()
         .collect();
-    let ub: Vec<f64> = problem.bounds.upper.iter()
+    let ub: Vec<f64> = problem
+        .bounds
+        .upper
+        .iter()
         .chain(std::iter::repeat(&f64::INFINITY).take(n - ne))
         .take(n)
         .copied()
@@ -185,8 +216,16 @@ fn fd_gradient_check(
     let mut cache = FdmCache::new(problem).unwrap();
     let mut grad_analytic = vec![0.0; n];
     let _loss = theseus::gradients::value_and_gradient(
-        &mut cache, problem, theta, &mut grad_analytic, &lb, &ub, &lb_idx, &ub_idx,
-    ).unwrap();
+        &mut cache,
+        problem,
+        theta,
+        &mut grad_analytic,
+        &lb,
+        &ub,
+        &lb_idx,
+        &ub_idx,
+    )
+    .unwrap();
 
     // FD gradient
     let mut grad_fd = vec![0.0; n];
@@ -232,8 +271,16 @@ fn fd_gradient_check(
         let abs_err = (grad_analytic[i] - grad_fd[i]).abs();
         let denom = grad_fd[i].abs().max(grad_analytic[i].abs()).max(1e-14);
         let rel_err = abs_err / denom;
-        let tag = if i < ne { format!("q[{i}]") } else { format!("a[{}]", i - ne) };
-        let flag = if abs_err > tol_abs && rel_err > tol_rel { " <<<" } else { "" };
+        let tag = if i < ne {
+            format!("q[{i}]")
+        } else {
+            format!("a[{}]", i - ne)
+        };
+        let flag = if abs_err > tol_abs && rel_err > tol_rel {
+            " <<<"
+        } else {
+            ""
+        };
         eprintln!(
             "  {tag:>6}  analytic={:+12.6e}  fd={:+12.6e}  abs={:.2e}  rel={:.2e}{flag}",
             grad_analytic[i], grad_fd[i], abs_err, rel_err,
@@ -249,7 +296,10 @@ fn fd_gradient_check(
         assert!(
             abs_err < tol_abs || rel_err < tol_rel,
             "Component {i}: analytic={:.8e}, fd={:.8e}, abs_err={:.3e}, rel_err={:.3e}",
-            grad_analytic[i], grad_fd[i], abs_err, rel_err,
+            grad_analytic[i],
+            grad_fd[i],
+            abs_err,
+            rel_err,
         );
     }
 }
@@ -263,7 +313,7 @@ fn fd_gradient_check(
 fn fd_cholesky_target_xyz() {
     let ne = 8;
     let bounds = Bounds {
-        lower: vec![0.1; ne],      // all positive → Cholesky
+        lower: vec![0.1; ne], // all positive → Cholesky
         upper: vec![100.0; ne],
     };
 
@@ -271,11 +321,11 @@ fn fd_cholesky_target_xyz() {
     let target = Array2::from_shape_vec(
         (5, 3),
         vec![
-            1.0, 0.0, 1.0,  // node 1
-            2.0, 0.0, 2.0,  // node 2
-            3.0, 0.0, 2.5,  // node 3  (crown)
-            4.0, 0.0, 2.0,  // node 4
-            5.0, 0.0, 1.0,  // node 5
+            1.0, 0.0, 1.0, // node 1
+            2.0, 0.0, 2.0, // node 2
+            3.0, 0.0, 2.5, // node 3  (crown)
+            4.0, 0.0, 2.0, // node 4
+            5.0, 0.0, 1.0, // node 5
         ],
     )
     .unwrap();
@@ -310,6 +360,32 @@ fn fd_cholesky_target_length() {
         weight: 1.0,
         edge_indices: (0..ne).collect(),
         target: vec![1.0; ne],
+    })];
+
+    let problem = make_arch_problem(bounds, objectives);
+    assert_eq!(
+        FactorizationStrategy::from_bounds(&problem.bounds),
+        FactorizationStrategy::Cholesky,
+    );
+
+    let theta: Vec<f64> = vec![1.0, 2.0, 1.5, 2.5, 3.0, 1.2, 2.0, 1.8];
+
+    fd_gradient_check(&problem, &theta, 1e-6, 1e-4, 1e-3);
+}
+
+/// TargetForce objective — Cholesky path.
+#[test]
+fn fd_cholesky_target_force() {
+    let ne = 8;
+    let bounds = Bounds {
+        lower: vec![0.5; ne],
+        upper: vec![50.0; ne],
+    };
+
+    let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(TargetForce {
+        weight: 1.0,
+        edge_indices: (0..ne).collect(),
+        target: vec![1.0, -0.5, 2.0, 1.5, -1.0, 2.5, 0.75, -0.25],
     })];
 
     let problem = make_arch_problem(bounds, objectives);
@@ -360,11 +436,7 @@ fn fd_cholesky_combined() {
     let target_xyz = Array2::from_shape_vec(
         (5, 3),
         vec![
-            1.0, 0.0, 0.8,
-            2.0, 0.0, 1.5,
-            3.0, 0.0, 2.0,
-            4.0, 0.0, 1.5,
-            5.0, 0.0, 0.8,
+            1.0, 0.0, 0.8, 2.0, 0.0, 1.5, 3.0, 0.0, 2.0, 4.0, 0.0, 1.5, 5.0, 0.0, 0.8,
         ],
     )
     .unwrap();
@@ -413,11 +485,7 @@ fn fd_ldl_target_xyz() {
     let target = Array2::from_shape_vec(
         (5, 3),
         vec![
-            1.0, 0.0, 1.0,
-            2.0, 0.0, 2.0,
-            3.0, 0.0, 2.5,
-            4.0, 0.0, 2.0,
-            5.0, 0.0, 1.0,
+            1.0, 0.0, 1.0, 2.0, 0.0, 2.0, 3.0, 0.0, 2.5, 4.0, 0.0, 2.0, 5.0, 0.0, 1.0,
         ],
     )
     .unwrap();
@@ -453,6 +521,32 @@ fn fd_ldl_target_length() {
         weight: 1.0,
         edge_indices: (0..ne).collect(),
         target: vec![1.0; ne],
+    })];
+
+    let problem = make_arch_problem(bounds, objectives);
+    assert_eq!(
+        FactorizationStrategy::from_bounds(&problem.bounds),
+        FactorizationStrategy::LDL,
+    );
+
+    let theta: Vec<f64> = vec![1.0, 2.0, 1.5, 2.5, 3.0, 1.2, 2.0, 1.8];
+
+    fd_gradient_check(&problem, &theta, 1e-6, 1e-4, 1e-3);
+}
+
+/// TargetForce — LDL path.
+#[test]
+fn fd_ldl_target_force() {
+    let ne = 8;
+    let bounds = Bounds {
+        lower: vec![-10.0; ne],
+        upper: vec![10.0; ne],
+    };
+
+    let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(TargetForce {
+        weight: 1.0,
+        edge_indices: (0..ne).collect(),
+        target: vec![1.0, -0.5, 2.0, 1.5, -1.0, 2.5, 0.75, -0.25],
     })];
 
     let problem = make_arch_problem(bounds, objectives);
@@ -503,11 +597,7 @@ fn fd_ldl_combined() {
     let target_xyz = Array2::from_shape_vec(
         (5, 3),
         vec![
-            1.0, 0.0, 0.8,
-            2.0, 0.0, 1.5,
-            3.0, 0.0, 2.0,
-            4.0, 0.0, 1.5,
-            5.0, 0.0, 0.8,
+            1.0, 0.0, 0.8, 2.0, 0.0, 1.5, 3.0, 0.0, 2.0, 4.0, 0.0, 1.5, 5.0, 0.0, 0.8,
         ],
     )
     .unwrap();
@@ -660,11 +750,7 @@ fn fd_cholesky_combined_with_variation() {
     let target_xyz = Array2::from_shape_vec(
         (5, 3),
         vec![
-            1.0, 0.0, 0.8,
-            2.0, 0.0, 1.5,
-            3.0, 0.0, 2.0,
-            4.0, 0.0, 1.5,
-            5.0, 0.0, 0.8,
+            1.0, 0.0, 0.8, 2.0, 0.0, 1.5, 3.0, 0.0, 2.0, 4.0, 0.0, 1.5, 5.0, 0.0, 0.8,
         ],
     )
     .unwrap();
@@ -711,11 +797,7 @@ fn cholesky_ldl_consistency() {
     let target = Array2::from_shape_vec(
         (5, 3),
         vec![
-            1.0, 0.0, 1.0,
-            2.0, 0.0, 2.0,
-            3.0, 0.0, 2.5,
-            4.0, 0.0, 2.0,
-            5.0, 0.0, 1.0,
+            1.0, 0.0, 1.0, 2.0, 0.0, 2.0, 3.0, 0.0, 2.5, 4.0, 0.0, 2.0, 5.0, 0.0, 1.0,
         ],
     )
     .unwrap();
@@ -773,16 +855,30 @@ fn cholesky_ldl_consistency() {
     let mut cache_chol = FdmCache::new(&problem_chol).unwrap();
     let mut grad_chol = vec![0.0; ne];
     let _loss_chol = theseus::gradients::value_and_gradient(
-        &mut cache_chol, &problem_chol, &theta, &mut grad_chol,
-        &lb_chol, &ub_chol, &lb_idx_chol, &ub_idx_chol,
-    ).unwrap();
+        &mut cache_chol,
+        &problem_chol,
+        &theta,
+        &mut grad_chol,
+        &lb_chol,
+        &ub_chol,
+        &lb_idx_chol,
+        &ub_idx_chol,
+    )
+    .unwrap();
 
     let mut cache_ldl = FdmCache::new(&problem_ldl).unwrap();
     let mut grad_ldl = vec![0.0; ne];
     let _loss_ldl = theseus::gradients::value_and_gradient(
-        &mut cache_ldl, &problem_ldl, &theta, &mut grad_ldl,
-        &lb_ldl, &ub_ldl, &lb_idx_ldl, &ub_idx_ldl,
-    ).unwrap();
+        &mut cache_ldl,
+        &problem_ldl,
+        &theta,
+        &mut grad_ldl,
+        &lb_ldl,
+        &ub_ldl,
+        &lb_idx_ldl,
+        &ub_idx_ldl,
+    )
+    .unwrap();
 
     // Positions should match (same q, same network)
     let nn = problem_chol.topology.num_nodes;
@@ -792,7 +888,8 @@ fn cholesky_ldl_consistency() {
             assert!(
                 diff < 1e-12,
                 "Position mismatch at node {i} dim {d}: chol={:.8e} ldl={:.8e}",
-                cache_chol.nf[[i, d]], cache_ldl.nf[[i, d]],
+                cache_chol.nf[[i, d]],
+                cache_ldl.nf[[i, d]],
             );
         }
     }
@@ -820,31 +917,93 @@ fn cholesky_ldl_consistency() {
     eprintln!("Cholesky/LDL consistency on arch: positions match within 1e-12, geometric loss match within 1e-12");
 }
 
+#[test]
+fn fd_variable_rail_joint_q_anchor_combined_objectives() {
+    let ne = 8;
+    let target_xyz = Array2::from_shape_vec(
+        (5, 3),
+        vec![
+            1.0, 0.0, 0.8, 2.0, 0.0, 1.5, 3.0, 0.0, 2.0, 4.0, 0.0, 1.5, 5.0, 0.0, 0.8,
+        ],
+    )
+    .unwrap();
+    let rigid_target =
+        Array2::from_shape_vec((3, 3), vec![1.0, 0.0, 0.8, 3.0, 0.0, 2.0, 6.2, 0.2, 0.0]).unwrap();
+    let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![
+        Box::new(TargetXYZ {
+            weight: 1.0,
+            node_indices: vec![1, 2, 3, 4, 5],
+            target: target_xyz,
+        }),
+        Box::new(TargetLength {
+            weight: 0.25,
+            edge_indices: (0..ne).collect(),
+            target: vec![1.25; ne],
+        }),
+        Box::new(SumForceLength {
+            weight: 0.05,
+            edge_indices: (0..ne).collect(),
+        }),
+        Box::new(RigidSetCompare {
+            weight: 0.2,
+            node_indices: vec![1, 3, 6],
+            target: rigid_target,
+        }),
+    ];
+    let problem = make_variable_rail_arch_problem(objectives);
+    let theta: Vec<f64> = vec![1.5, 2.0, 2.5, 3.0, 1.4, 1.7, 2.2, 1.8, 0.2];
+
+    fd_gradient_check(&problem, &theta, 1e-6, 5e-4, 5e-3);
+}
+
 // ─────────────────────────────────────────────────────────────
 //  Factorization strategy dispatch tests
 // ─────────────────────────────────────────────────────────────
 
 #[test]
 fn strategy_all_positive() {
-    let b = Bounds { lower: vec![0.1, 0.5], upper: vec![10.0, 20.0] };
-    assert_eq!(FactorizationStrategy::from_bounds(&b), FactorizationStrategy::Cholesky);
+    let b = Bounds {
+        lower: vec![0.1, 0.5],
+        upper: vec![10.0, 20.0],
+    };
+    assert_eq!(
+        FactorizationStrategy::from_bounds(&b),
+        FactorizationStrategy::Cholesky
+    );
 }
 
 #[test]
 fn strategy_all_negative() {
-    let b = Bounds { lower: vec![-10.0, -5.0], upper: vec![-0.1, -0.5] };
-    assert_eq!(FactorizationStrategy::from_bounds(&b), FactorizationStrategy::Cholesky);
+    let b = Bounds {
+        lower: vec![-10.0, -5.0],
+        upper: vec![-0.1, -0.5],
+    };
+    assert_eq!(
+        FactorizationStrategy::from_bounds(&b),
+        FactorizationStrategy::Cholesky
+    );
 }
 
 #[test]
 fn strategy_mixed() {
-    let b = Bounds { lower: vec![-1.0, 0.1], upper: vec![1.0, 5.0] };
-    assert_eq!(FactorizationStrategy::from_bounds(&b), FactorizationStrategy::LDL);
+    let b = Bounds {
+        lower: vec![-1.0, 0.1],
+        upper: vec![1.0, 5.0],
+    };
+    assert_eq!(
+        FactorizationStrategy::from_bounds(&b),
+        FactorizationStrategy::LDL
+    );
 }
 
 #[test]
 fn strategy_zero_lower() {
-    let b = Bounds { lower: vec![0.0, 0.0], upper: vec![10.0, 10.0] };
-    assert_eq!(FactorizationStrategy::from_bounds(&b), FactorizationStrategy::LDL);
+    let b = Bounds {
+        lower: vec![0.0, 0.0],
+        upper: vec![10.0, 10.0],
+    };
+    assert_eq!(
+        FactorizationStrategy::from_bounds(&b),
+        FactorizationStrategy::LDL
+    );
 }
-

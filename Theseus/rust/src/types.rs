@@ -33,10 +33,13 @@ impl fmt::Display for TheseusError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Linalg(e) => write!(f, "linear algebra error: {e}"),
-            Self::SparsityMismatch { edge, row, col } =>
-                write!(f, "sparsity pattern mismatch: edge {edge}, ({row},{col}) not in A"),
-            Self::MissingFactorization =>
-                write!(f, "factorization not computed (call solve_fdm first)"),
+            Self::SparsityMismatch { edge, row, col } => write!(
+                f,
+                "sparsity pattern mismatch: edge {edge}, ({row},{col}) not in A"
+            ),
+            Self::MissingFactorization => {
+                write!(f, "factorization not computed (call solve_fdm first)")
+            }
             Self::Solver(msg) => write!(f, "solver error: {msg}"),
             Self::Shape(msg) => write!(f, "shape error: {msg}"),
             Self::Cancelled => write!(f, "optimization cancelled by user"),
@@ -85,11 +88,7 @@ pub trait ObjectiveTrait: Debug + Send + Sync {
 
     /// Accumulate dJ/dx̂ into `cache.grad_x` and explicit dJ/dq into
     /// `cache.grad_q`.  Called before the adjoint solve.
-    fn accumulate_gradient(
-        &self,
-        cache: &mut FdmCache,
-        problem: &Problem,
-    );
+    fn accumulate_gradient(&self, cache: &mut FdmCache, problem: &Problem);
 
     /// Weight of this objective (used for display/debugging).
     fn weight(&self) -> f64;
@@ -139,6 +138,13 @@ pub struct PlanarConstraintAlongDirection {
 
 #[derive(Debug, Clone)]
 pub struct TargetLength {
+    pub weight: f64,
+    pub edge_indices: Vec<usize>,
+    pub target: Vec<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TargetForce {
     pub weight: f64,
     pub edge_indices: Vec<usize>,
     pub target: Vec<f64>,
@@ -264,7 +270,6 @@ impl Default for SolverOptions {
     }
 }
 
-
 // ─────────────────────────────────────────────────────────────
 //  Network topology
 // ─────────────────────────────────────────────────────────────
@@ -292,8 +297,42 @@ pub struct NetworkTopology {
 pub struct AnchorInfo {
     pub variable_indices: Vec<usize>,
     pub fixed_indices: Vec<usize>,
-    pub reference_positions: Array2<f64>,       // n_fixed × 3
+    pub reference_positions: Array2<f64>,        // n_fixed × 3
     pub initial_variable_positions: Array2<f64>, // n_var × 3
+    pub variable_supports: Vec<VariableSupport>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VariableSupport {
+    /// Global node index in the full graph.
+    pub node_index: usize,
+    /// Anchor reference position (world XYZ) used for relative constraints.
+    pub reference_position: [f64; 3],
+    pub kind: VariableSupportKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum VariableSupportKind {
+    /// Hard bounded sphere around `reference_position`.
+    Sphere { radius: f64 },
+    /// Per-axis relative offset box with optional axis locking.
+    Roller {
+        enabled: [bool; 3],
+        lower: [f64; 3],
+        upper: [f64; 3],
+    },
+    /// Hard line-segment support: x = start + t(end-start), t in (0,1).
+    Rail { start: [f64; 3], end: [f64; 3] },
+}
+
+impl VariableSupportKind {
+    pub fn latent_dim(&self) -> usize {
+        match self {
+            Self::Sphere { .. } => 3,
+            Self::Roller { enabled, .. } => enabled.iter().filter(|&&b| b).count(),
+            Self::Rail { .. } => 1,
+        }
+    }
 }
 
 impl AnchorInfo {
@@ -305,6 +344,7 @@ impl AnchorInfo {
             fixed_indices: (0..n).collect(),
             reference_positions,
             initial_variable_positions: Array2::zeros((0, 3)),
+            variable_supports: Vec::new(),
         }
     }
 }
@@ -453,7 +493,7 @@ impl PressureParams {
 #[derive(Debug)]
 pub struct Problem {
     pub topology: NetworkTopology,
-    pub free_node_loads: Array2<f64>,  // nn_free × 3
+    pub free_node_loads: Array2<f64>,      // nn_free × 3
     pub fixed_node_positions: Array2<f64>, // n_fixed × 3  (reference)
     pub anchors: AnchorInfo,
     pub objectives: Vec<Box<dyn ObjectiveTrait>>,
@@ -535,16 +575,20 @@ impl Factorization {
         a: &SparseColMatOwned,
         strategy: FactorizationStrategy,
     ) -> Result<Self, TheseusError> {
-        use faer_core::{Parallelism, Side};
-        use faer_sparse::cholesky::{factorize_symbolic_cholesky, CholeskySymbolicParams, LdltRegularization, LltRegularization};
         use dyn_stack::PodStack;
+        use faer_core::{Parallelism, Side};
+        use faer_sparse::cholesky::{
+            factorize_symbolic_cholesky, CholeskySymbolicParams, LdltRegularization,
+            LltRegularization,
+        };
 
         let a_ref = a.as_faer_ref();
         let symbolic = factorize_symbolic_cholesky(
             a_ref.symbolic(),
             Side::Upper,
             CholeskySymbolicParams::default(),
-        ).map_err(TheseusError::from)?;
+        )
+        .map_err(TheseusError::from)?;
 
         let _n = a.nrows;
         let len_values = symbolic.len_values();
@@ -553,7 +597,9 @@ impl Factorization {
         match strategy {
             FactorizationStrategy::Cholesky => {
                 let mut stack = dyn_stack::GlobalPodBuffer::new(
-                    symbolic.factorize_numeric_llt_req::<f64>(Parallelism::Rayon(0)).unwrap(),
+                    symbolic
+                        .factorize_numeric_llt_req::<f64>(Parallelism::Rayon(0))
+                        .unwrap(),
                 );
                 let _llt = symbolic.factorize_numeric_llt(
                     l_values.as_mut_slice(),
@@ -564,14 +610,13 @@ impl Factorization {
                     PodStack::new(&mut stack),
                 )?;
                 // For Cholesky we don't need to validate D - LLT fails if not SPD
-                Ok(Self::Cholesky {
-                    symbolic,
-                    l_values,
-                })
+                Ok(Self::Cholesky { symbolic, l_values })
             }
             FactorizationStrategy::LDL => {
                 let mut stack = dyn_stack::GlobalPodBuffer::new(
-                    symbolic.factorize_numeric_ldlt_req::<f64>(false, Parallelism::Rayon(0)).unwrap(),
+                    symbolic
+                        .factorize_numeric_ldlt_req::<f64>(false, Parallelism::Rayon(0))
+                        .unwrap(),
                 );
                 symbolic.factorize_numeric_ldlt(
                     l_values.as_mut_slice(),
@@ -581,26 +626,25 @@ impl Factorization {
                     Parallelism::Rayon(0),
                     PodStack::new(&mut stack),
                 );
-                Ok(Self::Ldl {
-                    symbolic,
-                    l_values,
-                })
+                Ok(Self::Ldl { symbolic, l_values })
             }
         }
     }
 
     /// Re-factor with updated numeric values (same sparsity pattern).
     pub fn update(&mut self, a: &SparseColMatOwned) -> Result<(), TheseusError> {
+        use dyn_stack::PodStack;
         use faer_core::{Parallelism, Side};
         use faer_sparse::cholesky::{LdltRegularization, LltRegularization};
-        use dyn_stack::PodStack;
 
         let a_ref = a.as_faer_ref();
 
         match self {
             Self::Cholesky { symbolic, l_values } => {
                 let mut stack = dyn_stack::GlobalPodBuffer::new(
-                    symbolic.factorize_numeric_llt_req::<f64>(Parallelism::Rayon(0)).unwrap(),
+                    symbolic
+                        .factorize_numeric_llt_req::<f64>(Parallelism::Rayon(0))
+                        .unwrap(),
                 );
                 symbolic.factorize_numeric_llt(
                     l_values.as_mut_slice(),
@@ -614,7 +658,9 @@ impl Factorization {
             }
             Self::Ldl { symbolic, l_values } => {
                 let mut stack = dyn_stack::GlobalPodBuffer::new(
-                    symbolic.factorize_numeric_ldlt_req::<f64>(false, Parallelism::Rayon(0)).unwrap(),
+                    symbolic
+                        .factorize_numeric_ldlt_req::<f64>(false, Parallelism::Rayon(0))
+                        .unwrap(),
                 );
                 symbolic.factorize_numeric_ldlt(
                     l_values.as_mut_slice(),
@@ -636,20 +682,18 @@ impl Factorization {
 
     /// Solve A X = B for multiple RHS columns. Returns one vec per column.
     pub fn solve_batch(&self, rhs: &[f64], ncols: usize) -> Vec<Vec<f64>> {
+        use dyn_stack::PodStack;
         use faer_core::{Conj, Mat, Parallelism};
         use faer_sparse::cholesky::{LdltRef, LltRef};
-        use dyn_stack::PodStack;
 
         let n = rhs.len() / ncols;
         assert_eq!(rhs.len(), n * ncols);
 
         let mut x = Mat::from_fn(n, ncols, |i, j| rhs[i + j * n]);
-        let mut stack = dyn_stack::GlobalPodBuffer::new(
-            match self {
-                Self::Cholesky { symbolic, .. } => symbolic.solve_in_place_req::<f64>(ncols).unwrap(),
-                Self::Ldl { symbolic, .. } => symbolic.solve_in_place_req::<f64>(ncols).unwrap(),
-            },
-        );
+        let mut stack = dyn_stack::GlobalPodBuffer::new(match self {
+            Self::Cholesky { symbolic, .. } => symbolic.solve_in_place_req::<f64>(ncols).unwrap(),
+            Self::Ldl { symbolic, .. } => symbolic.solve_in_place_req::<f64>(ncols).unwrap(),
+        });
 
         match self {
             Self::Cholesky { symbolic, l_values } => {
@@ -672,7 +716,9 @@ impl Factorization {
             }
         }
 
-        (0..ncols).map(|j| (0..n).map(|i| x.read(i, j)).collect()).collect()
+        (0..ncols)
+            .map(|j| (0..n).map(|i| x.read(i, j)).collect())
+            .collect()
     }
 
     /// The strategy this factorization was built with.
@@ -740,7 +786,7 @@ pub struct FdmCache {
     pub nf_fixed: Array2<f64>, // nn_fixed × 3
 
     // ── RHS buffer (reusable for linear solve input) ───────
-    pub rhs: Array2<f64>,      // nn_free × 3
+    pub rhs: Array2<f64>, // nn_free × 3
 
     // ── Factorization ──────────────────────────────────────
     pub strategy: FactorizationStrategy,
@@ -748,7 +794,7 @@ pub struct FdmCache {
     // ── Self-weight / pressure iteration buffers ──────────
     /// Copy of the original (user-specified) free-node loads, used as the
     /// base when self-weight or pressure loads are added iteratively.
-    pub pn_base: Array2<f64>,  // nn_free × 3
+    pub pn_base: Array2<f64>, // nn_free × 3
     /// Per-edge linear density (mass/length).  In prescribed mode this is
     /// constant; in sizing mode it is updated each self-weight iteration.
     pub sw_mu: Vec<f64>,
@@ -792,13 +838,12 @@ impl FdmCache {
             let nodes = &edge_to_free_nodes[k];
             for &(n1, v1) in nodes {
                 for &(n2, v2) in nodes {
-                    let nz_idx = find_nz_index(
-                        &a_matrix.col_ptrs,
-                        &a_matrix.row_indices,
-                        n1,
-                        n2,
-                    )
-                    .ok_or(TheseusError::SparsityMismatch { edge: k, row: n1, col: n2 })?;
+                    let nz_idx = find_nz_index(&a_matrix.col_ptrs, &a_matrix.row_indices, n1, n2)
+                        .ok_or(TheseusError::SparsityMismatch {
+                        edge: k,
+                        row: n1,
+                        col: n2,
+                    })?;
                     q_to_nz_entries[k].push((nz_idx, v1 * v2));
                 }
             }
@@ -836,16 +881,18 @@ impl FdmCache {
         let cn_owned = topo.free_incidence.clone();
 
         let sw_mu = match &problem.self_weight {
-            Some(SelfWeightParams::Prescribed { linear_densities, .. }) => {
-                linear_densities.clone()
-            }
+            Some(SelfWeightParams::Prescribed {
+                linear_densities, ..
+            }) => linear_densities.clone(),
             _ => vec![0.0; ne],
         };
 
         Ok(FdmCache {
             a_matrix,
             factorization: None,
-            q_to_nz: QToNz { entries: q_to_nz_entries },
+            q_to_nz: QToNz {
+                entries: q_to_nz_entries,
+            },
             edge_starts,
             edge_ends,
             node_to_free_idx,
@@ -881,10 +928,10 @@ impl FdmCache {
 /// Immutable snapshot of the geometry after a forward FDM solve.
 /// Views borrow from `FdmCache` buffers.
 pub struct GeometrySnapshot<'a> {
-    pub xyz_full: &'a Array2<f64>,     // nn × 3
+    pub xyz_full: &'a Array2<f64>, // nn × 3
     pub member_lengths: &'a [f64],
     pub member_forces: &'a [f64],
-    pub reactions: &'a Array2<f64>,     // nn × 3
+    pub reactions: &'a Array2<f64>, // nn × 3
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -895,15 +942,23 @@ pub struct GeometrySnapshot<'a> {
 pub struct OptimizationState {
     pub force_densities: Vec<f64>,
     pub variable_anchor_positions: Array2<f64>, // n_var × 3
+    pub variable_anchor_latents: Vec<f64>,
     pub loss_trace: Vec<f64>,
     pub iterations: usize,
 }
 
 impl OptimizationState {
     pub fn new(q: Vec<f64>, anchors: Array2<f64>) -> Self {
+        let mut latents = Vec::with_capacity(anchors.nrows() * 3);
+        for i in 0..anchors.nrows() {
+            latents.push(anchors[[i, 0]]);
+            latents.push(anchors[[i, 1]]);
+            latents.push(anchors[[i, 2]]);
+        }
         Self {
             force_densities: q,
             variable_anchor_positions: anchors,
+            variable_anchor_latents: latents,
             loss_trace: Vec::new(),
             iterations: 0,
         }
@@ -918,10 +973,10 @@ impl OptimizationState {
 pub struct SolverResult {
     pub q: Vec<f64>,
     pub anchor_positions: Array2<f64>,
-    pub xyz: Array2<f64>,        // nn × 3
+    pub xyz: Array2<f64>, // nn × 3
     pub member_lengths: Vec<f64>,
     pub member_forces: Vec<f64>,
-    pub reactions: Array2<f64>,  // nn × 3
+    pub reactions: Array2<f64>, // nn × 3
     pub loss_trace: Vec<f64>,
     pub iterations: usize,
     pub converged: bool,

@@ -172,6 +172,48 @@ public class TargetLengthComponent : GH_Component
 }
 
 /// <summary>
+/// Target specific signed member forces.
+/// </summary>
+public class TargetForceComponent : GH_Component
+{
+    public TargetForceComponent()
+        : base("Target Force", "TargetForce",
+            "Target specific signed member forces.",
+            "Ariadne", "Objectives")
+    { }
+
+    protected override void RegisterInputParams(GH_InputParamManager pManager)
+    {
+        pManager.AddGenericParameter("Edges", "Edges", "Edges to apply (optional, defaults to all)", GH_ParamAccess.list);
+        pManager.AddNumberParameter("Targets", "Targets", "Target signed member forces", GH_ParamAccess.list);
+        pManager.AddNumberParameter("Weight", "Weight", "Objective weight", GH_ParamAccess.item, 1.0);
+        pManager[0].Optional = true;
+    }
+
+    protected override void RegisterOutputParams(GH_OutputParamManager pManager)
+    {
+        pManager.AddGenericParameter("Objective", "OBJ", "Target Force Objective", GH_ParamAccess.item);
+    }
+
+    protected override void SolveInstance(IGH_DataAccess DA)
+    {
+        List<Edge> edges = [];
+        List<double> targets = [];
+        double weight = 1.0;
+
+        DA.GetDataList(0, edges);
+        if (!DA.GetDataList(1, targets)) return;
+        DA.GetData(2, ref weight);
+
+        var objective = new TargetForceObjective(weight, targets, edges.Count > 0 ? edges : null);
+        DA.SetData(0, objective);
+    }
+
+    protected override Bitmap Icon => Properties.Resources.minforce;
+    public override Guid ComponentGuid => new("D1E2F3A4-B5C6-7890-4012-345678901234");
+}
+
+/// <summary>
 /// Minimum length constraint with barrier penalty.
 /// </summary>
 public class MinLengthComponent : GH_Component

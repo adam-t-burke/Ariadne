@@ -81,6 +81,26 @@ public sealed class TargetLengthObjective : ThresholdEdgeObjective
 }
 
 /// <summary>
+/// Target specific signed member forces.
+/// </summary>
+public sealed class TargetForceObjective : ThresholdEdgeObjective
+{
+    public TargetForceObjective(double weight, List<double> targets, List<Edge>? edges = null)
+    {
+        Weight = weight;
+        Thresholds = targets;
+        TargetEdges = edges;
+    }
+
+    public override void ApplyTo(TheseusSolver solver, SolverContext context)
+    {
+        int[] indices = context.ResolveEdgeIndices(TargetEdges);
+        double[] targets = GetExpandedThresholds(indices.Length);
+        solver.AddTargetForce(Weight, indices, targets);
+    }
+}
+
+/// <summary>
 /// Barrier penalty for edges below minimum length threshold.
 /// </summary>
 public sealed class MinLengthObjective : ThresholdEdgeObjective
