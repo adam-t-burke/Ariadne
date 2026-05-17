@@ -34,7 +34,12 @@ fn extract_columns(mat: &SparseColMatOwned, cols: &[usize]) -> SparseColMatOwned
 }
 
 /// Build an n×n grid network.  4 corner nodes are fixed anchors.
-fn make_grid_problem(n: usize, bounds: Bounds, objectives: Vec<Box<dyn ObjectiveTrait>>, solver: SolverOptions) -> Problem {
+fn make_grid_problem(
+    n: usize,
+    bounds: Bounds,
+    objectives: Vec<Box<dyn ObjectiveTrait>>,
+    solver: SolverOptions,
+) -> Problem {
     let num_nodes = n * n;
     let mut edges = Vec::new();
 
@@ -77,12 +82,21 @@ fn make_grid_problem(n: usize, bounds: Bounds, objectives: Vec<Box<dyn Objective
     let fixed_node_positions = Array2::from_shape_vec(
         (4, 3),
         vec![
-            0.0, 0.0, 0.0,
-            (n - 1) as f64, 0.0, 0.0,
-            0.0, (n - 1) as f64, 0.0,
-            (n - 1) as f64, (n - 1) as f64, 0.0,
+            0.0,
+            0.0,
+            0.0,
+            (n - 1) as f64,
+            0.0,
+            0.0,
+            0.0,
+            (n - 1) as f64,
+            0.0,
+            (n - 1) as f64,
+            (n - 1) as f64,
+            0.0,
         ],
-    ).unwrap();
+    )
+    .unwrap();
 
     let anchors = AnchorInfo::all_fixed(fixed_node_positions.clone());
 
@@ -94,6 +108,8 @@ fn make_grid_problem(n: usize, bounds: Bounds, objectives: Vec<Box<dyn Objective
         objectives,
         bounds,
         solver,
+        self_weight: None,
+        pressure: None,
     }
 }
 
@@ -121,12 +137,22 @@ fn print_loss_trace(label: &str, result: &SolverResult) {
     eprintln!("│  iterations:  {}", result.iterations);
     eprintln!("│  converged:   {}", result.converged);
     eprintln!("│  termination: {}", result.termination_reason);
-    eprintln!("│  final loss:  {:.6e}", result.loss_trace.last().copied().unwrap_or(f64::NAN));
+    eprintln!(
+        "│  final loss:  {:.6e}",
+        result.loss_trace.last().copied().unwrap_or(f64::NAN)
+    );
     if result.loss_trace.len() > 1 {
         let initial = result.loss_trace[0];
         let final_ = *result.loss_trace.last().unwrap();
-        let reduction = if initial > 0.0 { (initial - final_) / initial * 100.0 } else { 0.0 };
-        eprintln!("│  loss reduction: {:.2}%  ({:.6e} → {:.6e})", reduction, initial, final_);
+        let reduction = if initial > 0.0 {
+            (initial - final_) / initial * 100.0
+        } else {
+            0.0
+        };
+        eprintln!(
+            "│  loss reduction: {:.2}%  ({:.6e} → {:.6e})",
+            reduction, initial, final_
+        );
     }
     eprintln!("│  loss trace ({} evals):", result.loss_trace.len());
     for (i, &loss) in result.loss_trace.iter().enumerate() {
@@ -153,16 +179,18 @@ fn diagnostic_grid_cholesky() {
         upper: vec![f64::INFINITY; num_edges],
     };
 
-    let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![
-        Box::new(make_target_xyz(&free_idx, n, -0.2)),
-    ];
+    let objectives: Vec<Box<dyn ObjectiveTrait>> =
+        vec![Box::new(make_target_xyz(&free_idx, n, -0.2))];
 
     let solver_opts = SolverOptions {
         max_iterations: 200,
         ..SolverOptions::default()
     };
 
-    assert_eq!(FactorizationStrategy::from_bounds(&bounds), FactorizationStrategy::Cholesky);
+    assert_eq!(
+        FactorizationStrategy::from_bounds(&bounds),
+        FactorizationStrategy::Cholesky
+    );
 
     let problem = make_grid_problem(n, bounds, objectives, solver_opts);
     let mut state = OptimizationState::new(vec![1.0; num_edges], Array2::zeros((0, 3)));
@@ -170,15 +198,28 @@ fn diagnostic_grid_cholesky() {
     let result = theseus::optimizer::optimize(&problem, &mut state, None, 1).unwrap();
     print_loss_trace("10×10 grid, Cholesky, barrier_weight=10", &result);
 
-    assert!(result.iterations > 3, "should run more than 3 iterations, got {}", result.iterations);
-    assert!(result.loss_trace.len() >= 2, "should have at least 2 loss evaluations");
+    assert!(
+        result.iterations > 3,
+        "should run more than 3 iterations, got {}",
+        result.iterations
+    );
+    assert!(
+        result.loss_trace.len() >= 2,
+        "should have at least 2 loss evaluations"
+    );
 
     let initial_loss = result.loss_trace[0];
     let final_loss = *result.loss_trace.last().unwrap();
-    assert!(final_loss < initial_loss, "loss should decrease: {initial_loss:.6e} → {final_loss:.6e}");
+    assert!(
+        final_loss < initial_loss,
+        "loss should decrease: {initial_loss:.6e} → {final_loss:.6e}"
+    );
 
     for &l in &result.member_lengths {
-        assert!(l.is_finite() && l > 0.0, "length must be finite positive: {l}");
+        assert!(
+            l.is_finite() && l > 0.0,
+            "length must be finite positive: {l}"
+        );
     }
     for &q in &result.q {
         assert!(q.is_finite() && q > 0.0, "q must be finite positive: {q}");
@@ -201,16 +242,18 @@ fn diagnostic_grid_ldl() {
         upper: vec![20.0; num_edges],
     };
 
-    let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![
-        Box::new(make_target_xyz(&free_idx, n, -0.2)),
-    ];
+    let objectives: Vec<Box<dyn ObjectiveTrait>> =
+        vec![Box::new(make_target_xyz(&free_idx, n, -0.2))];
 
     let solver_opts = SolverOptions {
         max_iterations: 200,
         ..SolverOptions::default()
     };
 
-    assert_eq!(FactorizationStrategy::from_bounds(&bounds), FactorizationStrategy::LDL);
+    assert_eq!(
+        FactorizationStrategy::from_bounds(&bounds),
+        FactorizationStrategy::LDL
+    );
 
     let problem = make_grid_problem(n, bounds, objectives, solver_opts);
     let mut state = OptimizationState::new(vec![1.0; num_edges], Array2::zeros((0, 3)));
@@ -218,14 +261,24 @@ fn diagnostic_grid_ldl() {
     let result = theseus::optimizer::optimize(&problem, &mut state, None, 1).unwrap();
     print_loss_trace("10×10 grid, LDL (mixed bounds), barrier_weight=10", &result);
 
-    assert!(result.iterations > 3, "should run more than 3 iterations, got {}", result.iterations);
+    assert!(
+        result.iterations > 3,
+        "should run more than 3 iterations, got {}",
+        result.iterations
+    );
 
     let initial_loss = result.loss_trace[0];
     let final_loss = *result.loss_trace.last().unwrap();
-    assert!(final_loss < initial_loss, "loss should decrease: {initial_loss:.6e} → {final_loss:.6e}");
+    assert!(
+        final_loss < initial_loss,
+        "loss should decrease: {initial_loss:.6e} → {final_loss:.6e}"
+    );
 
     for &l in &result.member_lengths {
-        assert!(l.is_finite() && l > 0.0, "length must be finite positive: {l}");
+        assert!(
+            l.is_finite() && l > 0.0,
+            "length must be finite positive: {l}"
+        );
     }
 }
 
@@ -252,9 +305,8 @@ fn diagnostic_barrier_weight_sweep() {
             upper: vec![f64::INFINITY; num_edges],
         };
 
-        let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![
-            Box::new(make_target_xyz(&free_idx, n, -0.2)),
-        ];
+        let objectives: Vec<Box<dyn ObjectiveTrait>> =
+            vec![Box::new(make_target_xyz(&free_idx, n, -0.2))];
 
         let solver_opts = SolverOptions {
             max_iterations: 200,
@@ -269,7 +321,11 @@ fn diagnostic_barrier_weight_sweep() {
 
         let initial = result.loss_trace.first().copied().unwrap_or(f64::NAN);
         let final_ = result.loss_trace.last().copied().unwrap_or(f64::NAN);
-        let reduction = if initial > 0.0 { (initial - final_) / initial * 100.0 } else { 0.0 };
+        let reduction = if initial > 0.0 {
+            (initial - final_) / initial * 100.0
+        } else {
+            0.0
+        };
 
         eprintln!(
             "║  {:>8.1} ║  {:>4}  ║ {:.2e} ║ {:.2e} ║  {:>6.2}%      ║",
@@ -297,9 +353,8 @@ fn diagnostic_cholesky_fallback() {
         upper: vec![f64::INFINITY; num_edges],
     };
 
-    let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![
-        Box::new(make_target_xyz(&free_idx, n, -0.2)),
-    ];
+    let objectives: Vec<Box<dyn ObjectiveTrait>> =
+        vec![Box::new(make_target_xyz(&free_idx, n, -0.2))];
 
     let solver_opts = SolverOptions {
         max_iterations: 200,
@@ -307,7 +362,10 @@ fn diagnostic_cholesky_fallback() {
         ..SolverOptions::default()
     };
 
-    assert_eq!(FactorizationStrategy::from_bounds(&bounds), FactorizationStrategy::Cholesky);
+    assert_eq!(
+        FactorizationStrategy::from_bounds(&bounds),
+        FactorizationStrategy::Cholesky
+    );
 
     let problem = make_grid_problem(n, bounds, objectives, solver_opts);
     let mut state = OptimizationState::new(vec![1.0; num_edges], Array2::zeros((0, 3)));
@@ -316,7 +374,10 @@ fn diagnostic_cholesky_fallback() {
     match result {
         Ok(result) => {
             print_loss_trace("Cholesky fallback test (lb=1e-6, barrier_w=1)", &result);
-            assert!(result.iterations > 0, "should complete at least 1 iteration");
+            assert!(
+                result.iterations > 0,
+                "should complete at least 1 iteration"
+            );
             for &l in &result.member_lengths {
                 assert!(l.is_finite(), "length must be finite: {l}");
             }
@@ -349,6 +410,8 @@ fn diagnostic_combined_objectives() {
             weight: 0.1,
             edge_indices: (0..num_edges).collect(),
             sharpness: 10.0,
+            use_normalized_variance: false,
+            normalization_strategy: LengthVarianceNormalizationStrategy::SquaredMean,
         }),
         Box::new(SumForceLength {
             weight: 0.001,
@@ -367,10 +430,17 @@ fn diagnostic_combined_objectives() {
     let result = theseus::optimizer::optimize(&problem, &mut state, None, 1).unwrap();
     print_loss_trace("10×10 combined (TargetXYZ + LengthVar + SumFL)", &result);
 
-    assert!(result.iterations > 0, "combined should run at least 1 iteration, got {}", result.iterations);
+    assert!(
+        result.iterations > 0,
+        "combined should run at least 1 iteration, got {}",
+        result.iterations
+    );
 
     for &l in &result.member_lengths {
-        assert!(l.is_finite() && l > 0.0, "length must be finite positive: {l}");
+        assert!(
+            l.is_finite() && l > 0.0,
+            "length must be finite positive: {l}"
+        );
     }
     for &q in &result.q {
         assert!(q.is_finite() && q > 0.0, "q must be finite positive: {q}");
@@ -379,7 +449,10 @@ fn diagnostic_combined_objectives() {
     if result.loss_trace.len() >= 2 {
         let initial_loss = result.loss_trace[0];
         let final_loss = *result.loss_trace.last().unwrap();
-        assert!(final_loss < initial_loss, "loss should decrease: {initial_loss:.6e} → {final_loss:.6e}");
+        assert!(
+            final_loss < initial_loss,
+            "loss should decrease: {initial_loss:.6e} → {final_loss:.6e}"
+        );
     }
 }
 
@@ -395,8 +468,14 @@ fn diagnostic_arch_network() {
     let num_edges = 8;
 
     let edges = vec![
-        (0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6),
-        (1, 5), (2, 4),
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 4),
+        (4, 5),
+        (5, 6),
+        (1, 5),
+        (2, 4),
     ];
 
     let free_idx: Vec<usize> = vec![1, 2, 3, 4, 5];
@@ -419,44 +498,34 @@ fn diagnostic_arch_network() {
     let free_node_loads = Array2::from_shape_vec(
         (5, 3),
         vec![
-            0.0, 0.0, -1.0,
-            0.0, 0.0, -1.0,
-            0.0, 0.0, -2.0,
-            0.0, 0.0, -1.0,
-            0.0, 0.0, -1.0,
+            0.0, 0.0, -1.0, 0.0, 0.0, -1.0, 0.0, 0.0, -2.0, 0.0, 0.0, -1.0, 0.0, 0.0, -1.0,
         ],
-    ).unwrap();
+    )
+    .unwrap();
 
-    let fixed_node_positions = Array2::from_shape_vec(
-        (2, 3),
-        vec![0.0, 0.0, 0.0, 6.0, 0.0, 0.0],
-    ).unwrap();
+    let fixed_node_positions =
+        Array2::from_shape_vec((2, 3), vec![0.0, 0.0, 0.0, 6.0, 0.0, 0.0]).unwrap();
 
     let anchors = AnchorInfo::all_fixed(fixed_node_positions.clone());
 
     let target = Array2::from_shape_vec(
         (5, 3),
         vec![
-            1.0, 0.0, 1.0,
-            2.0, 0.0, 2.0,
-            3.0, 0.0, 2.5,
-            4.0, 0.0, 2.0,
-            5.0, 0.0, 1.0,
+            1.0, 0.0, 1.0, 2.0, 0.0, 2.0, 3.0, 0.0, 2.5, 4.0, 0.0, 2.0, 5.0, 0.0, 1.0,
         ],
-    ).unwrap();
+    )
+    .unwrap();
 
     let bounds = Bounds {
         lower: vec![0.1; num_edges],
         upper: vec![100.0; num_edges],
     };
 
-    let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![
-        Box::new(TargetXYZ {
-            weight: 1.0,
-            node_indices: free_idx.clone(),
-            target,
-        }),
-    ];
+    let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(TargetXYZ {
+        weight: 1.0,
+        node_indices: free_idx.clone(),
+        target,
+    })];
 
     let problem = Problem {
         topology,
@@ -469,6 +538,8 @@ fn diagnostic_arch_network() {
             max_iterations: 200,
             ..SolverOptions::default()
         },
+        self_weight: None,
+        pressure: None,
     };
 
     let mut state = OptimizationState::new(vec![1.0; num_edges], Array2::zeros((0, 3)));
@@ -476,12 +547,19 @@ fn diagnostic_arch_network() {
     let result = theseus::optimizer::optimize(&problem, &mut state, None, 1).unwrap();
     print_loss_trace("7-node arch, TargetXYZ", &result);
 
-    assert!(result.iterations > 3, "arch should run >3 iters, got {}", result.iterations);
+    assert!(
+        result.iterations > 3,
+        "arch should run >3 iters, got {}",
+        result.iterations
+    );
     assert!(result.loss_trace.len() >= 2);
 
     let initial_loss = result.loss_trace[0];
     let final_loss = *result.loss_trace.last().unwrap();
-    assert!(final_loss < initial_loss * 0.5, "should reduce loss by at least 50%");
+    assert!(
+        final_loss < initial_loss * 0.5,
+        "should reduce loss by at least 50%"
+    );
 
     eprintln!("\n  Final node positions (arch):");
     for (i, &node) in free_idx.iter().enumerate() {

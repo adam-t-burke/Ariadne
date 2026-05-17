@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Windows.Forms;
 using Grasshopper.Kernel;
+using GH_IO.Serialization;
 using Ariadne.Graphs;
 
 namespace Ariadne.Solver.Components;
@@ -11,6 +13,9 @@ namespace Ariadne.Solver.Components;
 /// </summary>
 public class LengthVariationComponent : GH_Component
 {
+    private const string LengthNormalizationStrategyKey = "LengthNormalizationStrategy";
+    private LengthVarianceNormalizationStrategy _normalizationStrategy = LengthVarianceNormalizationStrategy.SquaredMean;
+
     public LengthVariationComponent()
         : base("Length Variation", "LenVar",
             "Minimize variation in edge lengths.",
@@ -22,6 +27,7 @@ public class LengthVariationComponent : GH_Component
         pManager.AddGenericParameter("Edges", "Edges", "Edges to apply (optional, defaults to all)", GH_ParamAccess.list);
         pManager.AddNumberParameter("Weight", "Weight", "Objective weight", GH_ParamAccess.item, 1.0);
         pManager.AddNumberParameter("Sharpness", "Sharp", "Softmax sharpness parameter", GH_ParamAccess.item, 20.0);
+        pManager.AddBooleanParameter("Use Normalized Variance", "NormVar", "Use normalized variance instead of smooth range", GH_ParamAccess.item, true);
         pManager[0].Optional = true;
     }
 
@@ -35,13 +41,66 @@ public class LengthVariationComponent : GH_Component
         List<Edge> edges = [];
         double weight = 1.0;
         double sharpness = 20.0;
+        bool useNormalizedVariance = true;
 
         DA.GetDataList(0, edges);
         DA.GetData(1, ref weight);
         DA.GetData(2, ref sharpness);
+        DA.GetData(3, ref useNormalizedVariance);
 
-        var objective = new LengthVariationObjective(weight, edges.Count > 0 ? edges : null, sharpness);
+        var objective = new LengthVariationObjective(
+            weight,
+            edges.Count > 0 ? edges : null,
+            sharpness,
+            useNormalizedVariance,
+            _normalizationStrategy);
         DA.SetData(0, objective);
+    }
+
+    protected override void AppendAdditionalComponentMenuItems(ToolStripDropDown menu)
+    {
+        base.AppendAdditionalComponentMenuItems(menu);
+        Menu_AppendSeparator(menu);
+        Menu_AppendItem(
+            menu,
+            "Squared Mean Normalization",
+            (_, _) => SetNormalizationStrategy(LengthVarianceNormalizationStrategy.SquaredMean),
+            true,
+            _normalizationStrategy == LengthVarianceNormalizationStrategy.SquaredMean);
+        Menu_AppendItem(
+            menu,
+            "No Normalization",
+            (_, _) => SetNormalizationStrategy(LengthVarianceNormalizationStrategy.None),
+            true,
+            _normalizationStrategy == LengthVarianceNormalizationStrategy.None);
+    }
+
+    private void SetNormalizationStrategy(LengthVarianceNormalizationStrategy strategy)
+    {
+        if (_normalizationStrategy == strategy)
+            return;
+
+        RecordUndoEvent("Set Length Normalization Strategy");
+        _normalizationStrategy = strategy;
+        ExpireSolution(true);
+    }
+
+    public override bool Write(GH_IWriter writer)
+    {
+        writer.SetInt32(LengthNormalizationStrategyKey, (int)_normalizationStrategy);
+        return base.Write(writer);
+    }
+
+    public override bool Read(GH_IReader reader)
+    {
+        if (reader.ItemExists(LengthNormalizationStrategyKey))
+        {
+            int value = reader.GetInt32(LengthNormalizationStrategyKey);
+            if (Enum.IsDefined(typeof(LengthVarianceNormalizationStrategy), value))
+                _normalizationStrategy = (LengthVarianceNormalizationStrategy)value;
+        }
+
+        return base.Read(reader);
     }
 
     protected override Bitmap Icon => Properties.Resources.lengthvar;
@@ -53,6 +112,9 @@ public class LengthVariationComponent : GH_Component
 /// </summary>
 public class ForceVariationComponent : GH_Component
 {
+    private const string ForceNormalizationStrategyKey = "ForceNormalizationStrategy";
+    private ForceVarianceNormalizationStrategy _normalizationStrategy = ForceVarianceNormalizationStrategy.SquaredMean;
+
     public ForceVariationComponent()
         : base("Force Variation", "ForceVar",
             "Minimize variation in member forces.",
@@ -64,6 +126,7 @@ public class ForceVariationComponent : GH_Component
         pManager.AddGenericParameter("Edges", "Edges", "Edges to apply (optional, defaults to all)", GH_ParamAccess.list);
         pManager.AddNumberParameter("Weight", "Weight", "Objective weight", GH_ParamAccess.item, 1.0);
         pManager.AddNumberParameter("Sharpness", "Sharp", "Softmax sharpness parameter", GH_ParamAccess.item, 20.0);
+        pManager.AddBooleanParameter("Use Normalized Variance", "NormVar", "Use normalized variance instead of smooth range", GH_ParamAccess.item, true);
         pManager[0].Optional = true;
     }
 
@@ -77,13 +140,72 @@ public class ForceVariationComponent : GH_Component
         List<Edge> edges = [];
         double weight = 1.0;
         double sharpness = 20.0;
+        bool useNormalizedVariance = true;
 
         DA.GetDataList(0, edges);
         DA.GetData(1, ref weight);
         DA.GetData(2, ref sharpness);
+        DA.GetData(3, ref useNormalizedVariance);
 
-        var objective = new ForceVariationObjective(weight, edges.Count > 0 ? edges : null, sharpness);
+        var objective = new ForceVariationObjective(
+            weight,
+            edges.Count > 0 ? edges : null,
+            sharpness,
+            useNormalizedVariance,
+            _normalizationStrategy);
         DA.SetData(0, objective);
+    }
+
+    protected override void AppendAdditionalComponentMenuItems(ToolStripDropDown menu)
+    {
+        base.AppendAdditionalComponentMenuItems(menu);
+        Menu_AppendSeparator(menu);
+        Menu_AppendItem(
+            menu,
+            "Squared Mean Normalization",
+            (_, _) => SetNormalizationStrategy(ForceVarianceNormalizationStrategy.SquaredMean),
+            true,
+            _normalizationStrategy == ForceVarianceNormalizationStrategy.SquaredMean);
+        Menu_AppendItem(
+            menu,
+            "Absolute Squared Mean Normalization",
+            (_, _) => SetNormalizationStrategy(ForceVarianceNormalizationStrategy.AbsoluteSquaredMean),
+            true,
+            _normalizationStrategy == ForceVarianceNormalizationStrategy.AbsoluteSquaredMean);
+        Menu_AppendItem(
+            menu,
+            "No Normalization",
+            (_, _) => SetNormalizationStrategy(ForceVarianceNormalizationStrategy.None),
+            true,
+            _normalizationStrategy == ForceVarianceNormalizationStrategy.None);
+    }
+
+    private void SetNormalizationStrategy(ForceVarianceNormalizationStrategy strategy)
+    {
+        if (_normalizationStrategy == strategy)
+            return;
+
+        RecordUndoEvent("Set Force Normalization Strategy");
+        _normalizationStrategy = strategy;
+        ExpireSolution(true);
+    }
+
+    public override bool Write(GH_IWriter writer)
+    {
+        writer.SetInt32(ForceNormalizationStrategyKey, (int)_normalizationStrategy);
+        return base.Write(writer);
+    }
+
+    public override bool Read(GH_IReader reader)
+    {
+        if (reader.ItemExists(ForceNormalizationStrategyKey))
+        {
+            int value = reader.GetInt32(ForceNormalizationStrategyKey);
+            if (Enum.IsDefined(typeof(ForceVarianceNormalizationStrategy), value))
+                _normalizationStrategy = (ForceVarianceNormalizationStrategy)value;
+        }
+
+        return base.Read(reader);
     }
 
     protected override Bitmap Icon => Properties.Resources.Forcevar;
@@ -209,7 +331,7 @@ public class TargetForceComponent : GH_Component
         DA.SetData(0, objective);
     }
 
-    protected override Bitmap Icon => Properties.Resources.minforce;
+    protected override Bitmap Icon => Properties.Resources.Target_Force;
     public override Guid ComponentGuid => new("D1E2F3A4-B5C6-7890-4012-345678901234");
 }
 

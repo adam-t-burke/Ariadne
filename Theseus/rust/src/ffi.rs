@@ -771,14 +771,20 @@ pub unsafe extern "C" fn theseus_add_length_variation(
     edge_indices: *const usize,
     num_edges: usize,
     sharpness: f64,
+    use_normalized_variance: u8,
+    normalization_strategy: i32,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
         let h = &mut *handle;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
+        let normalization_strategy =
+            LengthVarianceNormalizationStrategy::try_from(normalization_strategy)?;
         h.problem.objectives.push(Box::new(LengthVariation {
             weight,
             edge_indices: idx,
             sharpness,
+            use_normalized_variance: use_normalized_variance != 0,
+            normalization_strategy,
         }));
         Ok(())
     }))
@@ -795,14 +801,20 @@ pub unsafe extern "C" fn theseus_add_force_variation(
     edge_indices: *const usize,
     num_edges: usize,
     sharpness: f64,
+    use_normalized_variance: u8,
+    normalization_strategy: i32,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
         let h = &mut *handle;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
+        let normalization_strategy =
+            ForceVarianceNormalizationStrategy::try_from(normalization_strategy)?;
         h.problem.objectives.push(Box::new(ForceVariation {
             weight,
             edge_indices: idx,
             sharpness,
+            use_normalized_variance: use_normalized_variance != 0,
+            normalization_strategy,
         }));
         Ok(())
     }))
@@ -943,6 +955,26 @@ pub unsafe extern "C" fn theseus_add_rigid_set_compare(
     }))
 }
 
+fn validate_reaction_sign_dirs(
+    dirs: &Array2<f64>,
+    sign: ReactionMagnitudeSign,
+) -> Result<(), TheseusError> {
+    if sign != ReactionMagnitudeSign::SignedProjected {
+        return Ok(());
+    }
+
+    for row in 0..dirs.nrows() {
+        let norm =
+            (dirs[[row, 0]].powi(2) + dirs[[row, 1]].powi(2) + dirs[[row, 2]].powi(2)).sqrt();
+        if norm < f64::EPSILON {
+            return Err(TheseusError::Shape(format!(
+                "signed projected reaction magnitude requires non-zero target direction at row {row}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Add a ReactionDirection objective (align anchor reaction directions).
 ///
 /// `target_dirs` is a flat row-major `num_anchors × 3` array of unit vectors.
@@ -1007,6 +1039,91 @@ pub unsafe extern "C" fn theseus_add_reaction_direction_magnitude(
                 anchor_indices: idx,
                 target_directions: dirs,
                 target_magnitudes: mags,
+                behavior: ReactionMagnitudeBehavior::Max,
+                sign: ReactionMagnitudeSign::Unsigned,
+            }));
+        Ok(())
+    }))
+}
+
+/// Add a ReactionMagnitude objective (constrain anchor reaction magnitudes only).
+///
+/// `target_dirs` is used as the sign axis when `sign_semantics` is
+/// SignedProjected; it is ignored for Unsigned magnitude mode.
+///
+/// # Safety
+/// Valid handle and arrays.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_add_reaction_magnitude(
+    handle: *mut TheseusHandle,
+    weight: f64,
+    anchor_indices: *const usize,
+    num_anchors: usize,
+    target_dirs: *const f64,
+    target_mags: *const f64,
+    behavior: i32,
+    sign_semantics: i32,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let h = &mut *handle;
+        let behavior = ReactionMagnitudeBehavior::try_from(behavior)?;
+        let sign = ReactionMagnitudeSign::try_from(sign_semantics)?;
+        let idx = slice::from_raw_parts(anchor_indices, num_anchors).to_vec();
+        let dirs = Array2::from_shape_vec(
+            (num_anchors, 3),
+            slice::from_raw_parts(target_dirs, num_anchors * 3).to_vec(),
+        )
+        .map_err(|e| TheseusError::Shape(format!("reaction_magnitude dirs: {e}")))?;
+        validate_reaction_sign_dirs(&dirs, sign)?;
+        let mags = slice::from_raw_parts(target_mags, num_anchors).to_vec();
+        h.problem.objectives.push(Box::new(ReactionMagnitude {
+            weight,
+            anchor_indices: idx,
+            target_directions: dirs,
+            target_magnitudes: mags,
+            behavior,
+            sign,
+        }));
+        Ok(())
+    }))
+}
+
+/// Add a ReactionDirectionMagnitude objective with configurable magnitude behavior.
+///
+/// # Safety
+/// Valid handle and arrays.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_add_reaction_direction_magnitude_with_options(
+    handle: *mut TheseusHandle,
+    weight: f64,
+    anchor_indices: *const usize,
+    num_anchors: usize,
+    target_dirs: *const f64,
+    target_mags: *const f64,
+    behavior: i32,
+    sign_semantics: i32,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let h = &mut *handle;
+        let behavior = ReactionMagnitudeBehavior::try_from(behavior)?;
+        let sign = ReactionMagnitudeSign::try_from(sign_semantics)?;
+        let idx = slice::from_raw_parts(anchor_indices, num_anchors).to_vec();
+        let dirs = Array2::from_shape_vec(
+            (num_anchors, 3),
+            slice::from_raw_parts(target_dirs, num_anchors * 3).to_vec(),
+        )
+        .map_err(|e| TheseusError::Shape(format!("reaction_dir_mag targets: {e}")))?;
+        validate_reaction_sign_dirs(&dirs, sign)?;
+        let mags = slice::from_raw_parts(target_mags, num_anchors).to_vec();
+        h.problem
+            .objectives
+            .push(Box::new(ReactionDirectionMagnitude {
+                weight,
+                anchor_indices: idx,
+                target_directions: dirs,
+                target_magnitudes: mags,
+                behavior,
+                sign,
             }));
         Ok(())
     }))

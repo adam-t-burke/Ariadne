@@ -1,25 +1,58 @@
 namespace Ariadne.Solver;
 
+using System;
 using System.Collections.Generic;
 using Ariadne.Graphs;
 using Theseus.Interop;
+
+public enum LengthVarianceNormalizationStrategy
+{
+    SquaredMean = 0,
+    None = 1,
+}
+
+public enum ForceVarianceNormalizationStrategy
+{
+    SquaredMean = 0,
+    AbsoluteSquaredMean = 1,
+    None = 2,
+}
 
 /// <summary>
 /// Minimize variation in edge lengths.
 /// </summary>
 public sealed class LengthVariationObjective : EdgeObjective
 {
-    public LengthVariationObjective(double weight, List<Edge>? edges = null, double sharpness = 20.0)
+    public LengthVariationObjective(
+        double weight,
+        List<Edge>? edges = null,
+        double sharpness = 20.0,
+        bool useNormalizedVariance = true,
+        LengthVarianceNormalizationStrategy normalizationStrategy = LengthVarianceNormalizationStrategy.SquaredMean)
     {
         Weight = weight;
         TargetEdges = edges;
         Sharpness = sharpness;
+        UseNormalizedVariance = useNormalizedVariance;
+        NormalizationStrategy = normalizationStrategy;
     }
+
+    public bool UseNormalizedVariance { get; init; }
+    public LengthVarianceNormalizationStrategy NormalizationStrategy { get; init; }
 
     public override void ApplyTo(TheseusSolver solver, SolverContext context)
     {
         int[] indices = context.ResolveEdgeIndices(TargetEdges);
-        solver.AddLengthVariation(Weight, indices, Sharpness);
+        solver.AddLengthVariation(Weight, indices, Sharpness, UseNormalizedVariance, (int)NormalizationStrategy);
+    }
+
+    public override int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(base.GetContentHashCode());
+        h.Add(UseNormalizedVariance);
+        h.Add(NormalizationStrategy);
+        return h.ToHashCode();
     }
 }
 
@@ -28,17 +61,36 @@ public sealed class LengthVariationObjective : EdgeObjective
 /// </summary>
 public sealed class ForceVariationObjective : EdgeObjective
 {
-    public ForceVariationObjective(double weight, List<Edge>? edges = null, double sharpness = 20.0)
+    public ForceVariationObjective(
+        double weight,
+        List<Edge>? edges = null,
+        double sharpness = 20.0,
+        bool useNormalizedVariance = true,
+        ForceVarianceNormalizationStrategy normalizationStrategy = ForceVarianceNormalizationStrategy.SquaredMean)
     {
         Weight = weight;
         TargetEdges = edges;
         Sharpness = sharpness;
+        UseNormalizedVariance = useNormalizedVariance;
+        NormalizationStrategy = normalizationStrategy;
     }
+
+    public bool UseNormalizedVariance { get; init; }
+    public ForceVarianceNormalizationStrategy NormalizationStrategy { get; init; }
 
     public override void ApplyTo(TheseusSolver solver, SolverContext context)
     {
         int[] indices = context.ResolveEdgeIndices(TargetEdges);
-        solver.AddForceVariation(Weight, indices, Sharpness);
+        solver.AddForceVariation(Weight, indices, Sharpness, UseNormalizedVariance, (int)NormalizationStrategy);
+    }
+
+    public override int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(base.GetContentHashCode());
+        h.Add(UseNormalizedVariance);
+        h.Add(NormalizationStrategy);
+        return h.ToHashCode();
     }
 }
 

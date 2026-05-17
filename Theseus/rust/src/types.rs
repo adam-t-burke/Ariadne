@@ -150,11 +150,60 @@ pub struct TargetForce {
     pub target: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LengthVarianceNormalizationStrategy {
+    /// Divides by mean(length)^2 + eps. Existing normalized variance behavior.
+    SquaredMean,
+    /// Uses raw variance to show scale sensitivity.
+    None,
+}
+
+impl TryFrom<i32> for LengthVarianceNormalizationStrategy {
+    type Error = TheseusError;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::SquaredMean),
+            1 => Ok(Self::None),
+            _ => Err(TheseusError::Shape(format!(
+                "invalid length variance normalization strategy: {value}"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForceVarianceNormalizationStrategy {
+    /// Divides by mean(force)^2 + eps. Existing normalized variance behavior.
+    SquaredMean,
+    /// Divides by mean(abs(force))^2 + eps. Better for mixed-sign force magnitudes.
+    AbsoluteSquaredMean,
+    /// Uses raw variance without scale normalization.
+    None,
+}
+
+impl TryFrom<i32> for ForceVarianceNormalizationStrategy {
+    type Error = TheseusError;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::SquaredMean),
+            1 => Ok(Self::AbsoluteSquaredMean),
+            2 => Ok(Self::None),
+            _ => Err(TheseusError::Shape(format!(
+                "invalid force variance normalization strategy: {value}"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LengthVariation {
     pub weight: f64,
     pub edge_indices: Vec<usize>,
     pub sharpness: f64,
+    pub use_normalized_variance: bool,
+    pub normalization_strategy: LengthVarianceNormalizationStrategy,
 }
 
 #[derive(Debug, Clone)]
@@ -162,6 +211,8 @@ pub struct ForceVariation {
     pub weight: f64,
     pub edge_indices: Vec<usize>,
     pub sharpness: f64,
+    pub use_normalized_variance: bool,
+    pub normalization_strategy: ForceVarianceNormalizationStrategy,
 }
 
 #[derive(Debug, Clone)]
@@ -216,12 +267,66 @@ pub struct ReactionDirection {
     pub target_directions: Array2<f64>, // n × 3, unit rows
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReactionMagnitudeBehavior {
+    Target,
+    Max,
+    Min,
+}
+
+impl TryFrom<i32> for ReactionMagnitudeBehavior {
+    type Error = TheseusError;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Target),
+            1 => Ok(Self::Max),
+            2 => Ok(Self::Min),
+            _ => Err(TheseusError::Shape(format!(
+                "invalid reaction magnitude behavior: {value}"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReactionMagnitudeSign {
+    Unsigned,
+    SignedProjected,
+}
+
+impl TryFrom<i32> for ReactionMagnitudeSign {
+    type Error = TheseusError;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Unsigned),
+            1 => Ok(Self::SignedProjected),
+            _ => Err(TheseusError::Shape(format!(
+                "invalid reaction magnitude sign semantics: {value}"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ReactionMagnitude {
+    pub weight: f64,
+    pub anchor_indices: Vec<usize>,
+    pub target_directions: Array2<f64>,
+    pub target_magnitudes: Vec<f64>,
+    pub behavior: ReactionMagnitudeBehavior,
+    pub sign: ReactionMagnitudeSign,
+}
+
 #[derive(Debug, Clone)]
 pub struct ReactionDirectionMagnitude {
     pub weight: f64,
     pub anchor_indices: Vec<usize>,
     pub target_directions: Array2<f64>,
     pub target_magnitudes: Vec<f64>,
+    pub behavior: ReactionMagnitudeBehavior,
+    pub sign: ReactionMagnitudeSign,
 }
 
 // ─────────────────────────────────────────────────────────────

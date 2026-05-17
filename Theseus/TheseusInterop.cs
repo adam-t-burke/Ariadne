@@ -121,13 +121,17 @@ internal static class TheseusInterop
     public static extern int theseus_add_length_variation(
         IntPtr handle, double weight,
         nuint[] edge_indices, nuint num_edges,
-        double sharpness);
+        double sharpness,
+        byte use_normalized_variance,
+        int normalization_strategy);
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
     public static extern int theseus_add_force_variation(
         IntPtr handle, double weight,
         nuint[] edge_indices, nuint num_edges,
-        double sharpness);
+        double sharpness,
+        byte use_normalized_variance,
+        int normalization_strategy);
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
     public static extern int theseus_add_sum_force_length(
@@ -175,6 +179,20 @@ internal static class TheseusInterop
         IntPtr handle, double weight,
         nuint[] anchor_indices, nuint num_anchors,
         double[] target_dirs, double[] target_mags);
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_add_reaction_magnitude(
+        IntPtr handle, double weight,
+        nuint[] anchor_indices, nuint num_anchors,
+        double[] target_dirs, double[] target_mags,
+        int behavior, int sign_semantics);
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_add_reaction_direction_magnitude_with_options(
+        IntPtr handle, double weight,
+        nuint[] anchor_indices, nuint num_anchors,
+        double[] target_dirs, double[] target_mags,
+        int behavior, int sign_semantics);
 
     // ── Solver options ───────────────────────────────────────
 

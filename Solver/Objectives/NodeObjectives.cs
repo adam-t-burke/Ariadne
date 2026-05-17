@@ -211,48 +211,109 @@ public sealed class RigidPointSetObjective : NodeObjective
 /// Align anchor reaction force directions with target directions,
 /// optionally also matching target magnitudes.
 /// </summary>
+public enum ReactionMagnitudeBehavior
+{
+    Target = 0,
+    Max = 1,
+    Min = 2,
+}
+
+public enum ReactionMagnitudeSign
+{
+    Unsigned = 0,
+    SignedProjected = 1,
+}
+
 public sealed class ReactionObjective : NodeObjective
 {
     public List<Vector3d> TargetDirections { get; init; }
     public List<double>? TargetMagnitudes { get; init; }
+    public bool IncludeDirection { get; init; }
     public bool IncludeMagnitude { get; init; }
+    public ReactionMagnitudeBehavior MagnitudeBehavior { get; init; }
+    public ReactionMagnitudeSign MagnitudeSign { get; init; }
 
     public ReactionObjective(
         double weight,
         List<Node> anchorNodes,
         List<Vector3d> targetDirections,
+        bool includeDirection = true,
         bool includeMagnitude = false,
-        List<double>? targetMagnitudes = null)
+        List<double>? targetMagnitudes = null,
+        ReactionMagnitudeBehavior magnitudeBehavior = ReactionMagnitudeBehavior.Max,
+        ReactionMagnitudeSign magnitudeSign = ReactionMagnitudeSign.Unsigned)
     {
         Weight = weight;
         TargetNodes = anchorNodes;
         TargetDirections = targetDirections;
+        IncludeDirection = includeDirection;
         IncludeMagnitude = includeMagnitude;
         TargetMagnitudes = targetMagnitudes;
+        MagnitudeBehavior = magnitudeBehavior;
+        MagnitudeSign = magnitudeSign;
     }
 
     public override void ApplyTo(TheseusSolver solver, SolverContext context)
     {
         if (TargetNodes == null || TargetNodes.Count == 0) return;
+        if (!IncludeDirection && !IncludeMagnitude) return;
+        if (IncludeDirection && TargetDirections.Count == 0)
+        {
+            IsValid = false;
+            return;
+        }
+        if (IncludeMagnitude && TargetMagnitudes is not { Count: > 0 })
+        {
+            IsValid = false;
+            return;
+        }
 
         int[] indices = TargetNodes.Select(n => context.NodeIndexMap[n]).ToArray();
 
         double[] targetDirs = new double[indices.Length * 3];
         for (int i = 0; i < indices.Length; i++)
         {
-            var dir = i < TargetDirections.Count ? TargetDirections[i] : TargetDirections[^1];
+            var dir = TargetDirections.Count > 0
+                ? (i < TargetDirections.Count ? TargetDirections[i] : TargetDirections[^1])
+                : Vector3d.XAxis;
             targetDirs[i * 3 + 0] = dir.X;
             targetDirs[i * 3 + 1] = dir.Y;
             targetDirs[i * 3 + 2] = dir.Z;
         }
 
-        if (IncludeMagnitude && TargetMagnitudes is { Count: > 0 })
+        if (MagnitudeSign == ReactionMagnitudeSign.SignedProjected && !HasUsableDirections(targetDirs))
         {
+            IsValid = false;
+            return;
+        }
+
+        if (IncludeMagnitude)
+        {
+            var magnitudes = TargetMagnitudes!;
             double[] targetMags = new double[indices.Length];
             for (int i = 0; i < indices.Length; i++)
-                targetMags[i] = i < TargetMagnitudes.Count ? TargetMagnitudes[i] : TargetMagnitudes[^1];
+                targetMags[i] = i < magnitudes.Count ? magnitudes[i] : magnitudes[^1];
 
-            solver.AddReactionDirectionMagnitude(Weight, indices, targetDirs, targetMags);
+            if (IncludeDirection)
+            {
+                solver.AddReactionDirectionMagnitude(
+                    Weight,
+                    indices,
+                    targetDirs,
+                    targetMags,
+                    (int)MagnitudeBehavior,
+                    (int)MagnitudeSign);
+            }
+            else
+            {
+                solver.AddReactionMagnitude(
+                    Weight,
+                    indices,
+                    targetDirs,
+                    targetMags,
+                    (int)MagnitudeBehavior,
+                    (int)MagnitudeSign);
+            }
         }
         else
         {
@@ -264,7 +325,10 @@ public sealed class ReactionObjective : NodeObjective
     {
         var h = new HashCode();
         h.Add(base.GetContentHashCode());
+        h.Add(IncludeDirection);
         h.Add(IncludeMagnitude);
+        h.Add(MagnitudeBehavior);
+        h.Add(MagnitudeSign);
         if (TargetDirections != null)
             foreach (var d in TargetDirections)
             { h.Add(d.X); h.Add(d.Y); h.Add(d.Z); }
@@ -272,5 +336,19 @@ public sealed class ReactionObjective : NodeObjective
             foreach (var m in TargetMagnitudes)
                 h.Add(m);
         return h.ToHashCode();
+    }
+
+    private static bool HasUsableDirections(double[] targetDirs)
+    {
+        for (int i = 0; i < targetDirs.Length; i += 3)
+        {
+            double norm = Math.Sqrt(
+                targetDirs[i + 0] * targetDirs[i + 0] +
+                targetDirs[i + 1] * targetDirs[i + 1] +
+                targetDirs[i + 2] * targetDirs[i + 2]);
+            if (norm < 1e-10)
+                return false;
+        }
+        return true;
     }
 }

@@ -189,18 +189,40 @@ public sealed class TheseusSolver : IDisposable
             _handle, weight, ToNuint(edgeIndices), (nuint)edgeIndices.Length, targets));
     }
 
-    public void AddLengthVariation(double weight, int[] edgeIndices, double sharpness)
+    public void AddLengthVariation(
+        double weight,
+        int[] edgeIndices,
+        double sharpness,
+        bool useNormalizedVariance,
+        int normalizationStrategy)
     {
         ThrowIfDisposed();
         Check(TheseusInterop.theseus_add_length_variation(
-            _handle, weight, ToNuint(edgeIndices), (nuint)edgeIndices.Length, sharpness));
+            _handle,
+            weight,
+            ToNuint(edgeIndices),
+            (nuint)edgeIndices.Length,
+            sharpness,
+            useNormalizedVariance ? (byte)1 : (byte)0,
+            normalizationStrategy));
     }
 
-    public void AddForceVariation(double weight, int[] edgeIndices, double sharpness)
+    public void AddForceVariation(
+        double weight,
+        int[] edgeIndices,
+        double sharpness,
+        bool useNormalizedVariance,
+        int normalizationStrategy)
     {
         ThrowIfDisposed();
         Check(TheseusInterop.theseus_add_force_variation(
-            _handle, weight, ToNuint(edgeIndices), (nuint)edgeIndices.Length, sharpness));
+            _handle,
+            weight,
+            ToNuint(edgeIndices),
+            (nuint)edgeIndices.Length,
+            sharpness,
+            useNormalizedVariance ? (byte)1 : (byte)0,
+            normalizationStrategy));
     }
 
     public void AddSumForceLength(double weight, int[] edgeIndices)
@@ -257,6 +279,46 @@ public sealed class TheseusSolver : IDisposable
         ThrowIfDisposed();
         Check(TheseusInterop.theseus_add_reaction_direction_magnitude(
             _handle, weight, ToNuint(anchorIndices), (nuint)anchorIndices.Length, targetDirs, targetMags));
+    }
+
+    public void AddReactionMagnitude(
+        double weight,
+        int[] anchorIndices,
+        double[] targetDirs,
+        double[] targetMags,
+        int behavior,
+        int signSemantics)
+    {
+        ThrowIfDisposed();
+        Check(TheseusInterop.theseus_add_reaction_magnitude(
+            _handle,
+            weight,
+            ToNuint(anchorIndices),
+            (nuint)anchorIndices.Length,
+            targetDirs,
+            targetMags,
+            behavior,
+            signSemantics));
+    }
+
+    public void AddReactionDirectionMagnitude(
+        double weight,
+        int[] anchorIndices,
+        double[] targetDirs,
+        double[] targetMags,
+        int behavior,
+        int signSemantics)
+    {
+        ThrowIfDisposed();
+        Check(TheseusInterop.theseus_add_reaction_direction_magnitude_with_options(
+            _handle,
+            weight,
+            ToNuint(anchorIndices),
+            (nuint)anchorIndices.Length,
+            targetDirs,
+            targetMags,
+            behavior,
+            signSemantics));
     }
 
     // ── Self-weight ───────────────────────────────────────────
