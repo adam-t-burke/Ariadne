@@ -433,6 +433,16 @@ namespace Ariadne.Properties {
         /// <summary>
         ///   Looks up a localized resource of type System.Drawing.Bitmap.
         /// </summary>
+        internal static System.Drawing.Bitmap Target_Force {
+            get {
+                object obj = ResourceManager.GetObject("Target_Force", resourceCulture);
+                return ((System.Drawing.Bitmap)(obj));
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized resource of type System.Drawing.Bitmap.
+        /// </summary>
         internal static System.Drawing.Bitmap Target_XY {
             get {
                 object obj = ResourceManager.GetObject("Target_XY", resourceCulture);
@@ -456,6 +466,16 @@ namespace Ariadne.Properties {
         internal static System.Drawing.Bitmap Project_Nodes_To_Plane {
             get {
                 object obj = ResourceManager.GetObject("Project_Nodes_To_Plane", resourceCulture);
+                return ((System.Drawing.Bitmap)(obj));
+            }
+        }
+
+        /// <summary>
+        ///   Looks up a localized resource of type System.Drawing.Bitmap.
+        /// </summary>
+        internal static System.Drawing.Bitmap Var_Anchor {
+            get {
+                object obj = ResourceManager.GetObject("Var_Anchor", resourceCulture);
                 return ((System.Drawing.Bitmap)(obj));
             }
         }

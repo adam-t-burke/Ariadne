@@ -33,8 +33,14 @@ struct ArchData {
 
 fn arch_data() -> ArchData {
     let edges: Vec<(usize, usize)> = vec![
-        (0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6),
-        (1, 5), (2, 4),
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 4),
+        (4, 5),
+        (5, 6),
+        (1, 5),
+        (2, 4),
     ];
     let num_edges = edges.len();
     let num_nodes = 7;
@@ -45,8 +51,12 @@ fn arch_data() -> ArchData {
     let mut coo_cols = Vec::new();
     let mut coo_vals = Vec::new();
     for (e, &(s, t)) in edges.iter().enumerate() {
-        coo_rows.push(e); coo_cols.push(s); coo_vals.push(-1.0);
-        coo_rows.push(e); coo_cols.push(t); coo_vals.push(1.0);
+        coo_rows.push(e);
+        coo_cols.push(s);
+        coo_vals.push(-1.0);
+        coo_rows.push(e);
+        coo_cols.push(t);
+        coo_vals.push(1.0);
     }
 
     let free_idx = vec![1, 2, 3, 4, 5];
@@ -54,11 +64,7 @@ fn arch_data() -> ArchData {
 
     // Loads: 5 free nodes × 3 (unit downward)
     let loads = vec![
-        0.0, 0.0, -1.0,
-        0.0, 0.0, -1.0,
-        0.0, 0.0, -2.0,
-        0.0, 0.0, -1.0,
-        0.0, 0.0, -1.0,
+        0.0, 0.0, -1.0, 0.0, 0.0, -1.0, 0.0, 0.0, -2.0, 0.0, 0.0, -1.0, 0.0, 0.0, -1.0,
     ];
 
     // Fixed positions: node 0 at origin, node 6 at (6,0,0)
@@ -69,31 +75,56 @@ fn arch_data() -> ArchData {
     let upper = vec![100.0; num_edges];
 
     ArchData {
-        num_edges, num_nodes, num_free, num_fixed,
-        coo_rows, coo_cols, coo_vals,
-        free_idx, fixed_idx,
-        loads, fixed_pos, q_init, lower, upper,
+        num_edges,
+        num_nodes,
+        num_free,
+        num_fixed,
+        coo_rows,
+        coo_cols,
+        coo_vals,
+        free_idx,
+        fixed_idx,
+        loads,
+        fixed_pos,
+        q_init,
+        lower,
+        upper,
     }
 }
 
 /// Create a handle via FFI; panics if null.
 unsafe fn create_handle(d: &ArchData) -> *mut TheseusHandle {
     let h = theseus_create(
-        d.num_edges, d.num_nodes, d.num_free,
-        d.coo_rows.as_ptr(), d.coo_cols.as_ptr(), d.coo_vals.as_ptr(),
+        d.num_edges,
+        d.num_nodes,
+        d.num_free,
+        d.coo_rows.as_ptr(),
+        d.coo_cols.as_ptr(),
+        d.coo_vals.as_ptr(),
         d.coo_rows.len(),
-        d.free_idx.as_ptr(), d.fixed_idx.as_ptr(), d.num_fixed,
-        d.loads.as_ptr(), d.fixed_pos.as_ptr(),
-        d.q_init.as_ptr(), d.lower.as_ptr(), d.upper.as_ptr(),
+        d.free_idx.as_ptr(),
+        d.fixed_idx.as_ptr(),
+        d.num_fixed,
+        d.loads.as_ptr(),
+        d.fixed_pos.as_ptr(),
+        d.q_init.as_ptr(),
+        d.lower.as_ptr(),
+        d.upper.as_ptr(),
     );
-    assert!(!h.is_null(), "theseus_create returned null: {}", get_last_error());
+    assert!(
+        !h.is_null(),
+        "theseus_create returned null: {}",
+        get_last_error()
+    );
     h
 }
 
 fn get_last_error() -> String {
     let mut buf = vec![0u8; 1024];
     let n = unsafe { theseus_last_error(buf.as_mut_ptr(), buf.len()) };
-    if n <= 0 { return String::from("(no error)"); }
+    if n <= 0 {
+        return String::from("(no error)");
+    }
     String::from_utf8_lossy(&buf[..n as usize]).to_string()
 }
 
@@ -109,7 +140,9 @@ fn ffi_create_and_free() {
         theseus_free(h);
     }
     // Also verify freeing null is safe
-    unsafe { theseus_free(ptr::null_mut()); }
+    unsafe {
+        theseus_free(ptr::null_mut());
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -143,13 +176,21 @@ fn ffi_forward_solve() {
         assert!((xyz[6 * 3] - 6.0).abs() < 1e-12, "anchor 6 x");
 
         // All positions finite
-        for v in &xyz { assert!(v.is_finite(), "non-finite xyz: {v}"); }
+        for v in &xyz {
+            assert!(v.is_finite(), "non-finite xyz: {v}");
+        }
         // All lengths positive
-        for &l in &lengths { assert!(l > 0.0 && l.is_finite(), "bad length: {l}"); }
+        for &l in &lengths {
+            assert!(l > 0.0 && l.is_finite(), "bad length: {l}");
+        }
         // q values should match input
-        for &qi in &q_out { assert!((qi - 1.0).abs() < 1e-12, "q should match init: {qi}"); }
+        for &qi in &q_out {
+            assert!((qi - 1.0).abs() < 1e-12, "q should match init: {qi}");
+        }
         // Reactions should be finite
-        for &r in &reactions { assert!(r.is_finite(), "non-finite reaction: {r}"); }
+        for &r in &reactions {
+            assert!(r.is_finite(), "non-finite reaction: {r}");
+        }
 
         theseus_free(h);
     }
@@ -168,16 +209,14 @@ fn ffi_optimize_target_xyz() {
         // Target positions for 5 free nodes
         let target_indices: Vec<usize> = vec![1, 2, 3, 4, 5];
         let target_xyz: Vec<f64> = vec![
-            1.0, 0.0, 1.0,
-            2.0, 0.0, 2.0,
-            3.0, 0.0, 2.5,
-            4.0, 0.0, 2.0,
-            5.0, 0.0, 1.0,
+            1.0, 0.0, 1.0, 2.0, 0.0, 2.0, 3.0, 0.0, 2.5, 4.0, 0.0, 2.0, 5.0, 0.0, 1.0,
         ];
 
         let rc = theseus_add_target_xyz(
-            h, 1.0,
-            target_indices.as_ptr(), target_indices.len(),
+            h,
+            1.0,
+            target_indices.as_ptr(),
+            target_indices.len(),
             target_xyz.as_ptr(),
         );
         assert_eq!(rc, 0, "add_target_xyz failed: {}", get_last_error());
@@ -242,22 +281,30 @@ fn ffi_optimize_combined() {
         // TargetXYZ
         let indices: Vec<usize> = vec![1, 2, 3, 4, 5];
         let target: Vec<f64> = vec![
-            1.0, 0.0, 0.8,
-            2.0, 0.0, 1.5,
-            3.0, 0.0, 2.0,
-            4.0, 0.0, 1.5,
-            5.0, 0.0, 0.8,
+            1.0, 0.0, 0.8, 2.0, 0.0, 1.5, 3.0, 0.0, 2.0, 4.0, 0.0, 1.5, 5.0, 0.0, 0.8,
         ];
-        assert_eq!(0, theseus_add_target_xyz(h, 1.0, indices.as_ptr(), indices.len(), target.as_ptr()));
+        assert_eq!(
+            0,
+            theseus_add_target_xyz(h, 1.0, indices.as_ptr(), indices.len(), target.as_ptr())
+        );
 
         // LengthVariation
         let all_edges: Vec<usize> = (0..d.num_edges).collect();
-        assert_eq!(0, theseus_add_length_variation(h, 0.5, all_edges.as_ptr(), all_edges.len(), 20.0));
+        assert_eq!(
+            0,
+            theseus_add_length_variation(h, 0.5, all_edges.as_ptr(), all_edges.len(), 20.0, 1, 0)
+        );
 
         // SumForceLength
-        assert_eq!(0, theseus_add_sum_force_length(h, 0.01, all_edges.as_ptr(), all_edges.len()));
+        assert_eq!(
+            0,
+            theseus_add_sum_force_length(h, 0.01, all_edges.as_ptr(), all_edges.len())
+        );
 
-        assert_eq!(0, theseus_set_solver_options(h, 200, 1e-6, 1e-6, 1000.0, 10.0));
+        assert_eq!(
+            0,
+            theseus_set_solver_options(h, 200, 1e-6, 1e-6, 1000.0, 10.0)
+        );
 
         let mut xyz = vec![0.0; d.num_nodes * 3];
         let mut lengths = vec![0.0; d.num_edges];
@@ -269,9 +316,13 @@ fn ffi_optimize_combined() {
 
         let rc = theseus_optimize(
             h,
-            xyz.as_mut_ptr(), lengths.as_mut_ptr(), forces.as_mut_ptr(),
-            q_out.as_mut_ptr(), reactions.as_mut_ptr(),
-            &mut iterations, &mut converged,
+            xyz.as_mut_ptr(),
+            lengths.as_mut_ptr(),
+            forces.as_mut_ptr(),
+            q_out.as_mut_ptr(),
+            reactions.as_mut_ptr(),
+            &mut iterations,
+            &mut converged,
         );
         assert_eq!(rc, 0, "optimize failed: {}", get_last_error());
         assert!(iterations > 0);
@@ -298,44 +349,215 @@ fn ffi_register_all_objectives() {
         let edge_idx: Vec<usize> = vec![0, 1, 2];
         let anchor_idx: Vec<usize> = vec![0, 1]; // indices into fixed_node_indices
 
-        let target_3x3: Vec<f64> = vec![
-            1.0, 0.0, 1.0,
-            2.0, 0.0, 2.0,
-            3.0, 0.0, 3.0,
-        ];
+        let target_3x3: Vec<f64> = vec![1.0, 0.0, 1.0, 2.0, 0.0, 2.0, 3.0, 0.0, 3.0];
         let thresholds_3 = vec![0.5; 3];
         let targets_3 = vec![1.0; 3];
 
-        let dirs_2x3: Vec<f64> = vec![
-            0.0, 0.0, 1.0,
-            0.0, 0.0, 1.0,
-        ];
+        let dirs_2x3: Vec<f64> = vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
         let mags_2 = vec![5.0; 2];
 
         // All objective types
-        assert_eq!(0, theseus_add_target_xyz(h, 1.0, node_idx.as_ptr(), node_idx.len(), target_3x3.as_ptr()));
-        assert_eq!(0, theseus_add_target_xy(h, 1.0, node_idx.as_ptr(), node_idx.len(), target_3x3.as_ptr()));
-        assert_eq!(0, theseus_add_target_length(h, 1.0, edge_idx.as_ptr(), edge_idx.len(), targets_3.as_ptr()));
-        assert_eq!(0, theseus_add_target_force(h, 1.0, edge_idx.as_ptr(), edge_idx.len(), targets_3.as_ptr()));
-        assert_eq!(0, theseus_add_length_variation(h, 0.5, edge_idx.as_ptr(), edge_idx.len(), 20.0));
-        assert_eq!(0, theseus_add_force_variation(h, 0.5, edge_idx.as_ptr(), edge_idx.len(), 20.0));
-        assert_eq!(0, theseus_add_sum_force_length(h, 0.01, edge_idx.as_ptr(), edge_idx.len()));
-        assert_eq!(0, theseus_add_min_length(h, 1.0, edge_idx.as_ptr(), edge_idx.len(), thresholds_3.as_ptr(), 10.0));
-        assert_eq!(0, theseus_add_max_length(h, 1.0, edge_idx.as_ptr(), edge_idx.len(), thresholds_3.as_ptr(), 10.0));
-        assert_eq!(0, theseus_add_min_force(h, 1.0, edge_idx.as_ptr(), edge_idx.len(), thresholds_3.as_ptr(), 10.0));
-        assert_eq!(0, theseus_add_max_force(h, 1.0, edge_idx.as_ptr(), edge_idx.len(), thresholds_3.as_ptr(), 10.0));
-        assert_eq!(0, theseus_add_rigid_set_compare(h, 1.0, node_idx.as_ptr(), node_idx.len(), target_3x3.as_ptr()));
-        assert_eq!(0, theseus_add_reaction_direction(h, 1.0, anchor_idx.as_ptr(), anchor_idx.len(), dirs_2x3.as_ptr()));
-        assert_eq!(0, theseus_add_reaction_direction_magnitude(h, 1.0, anchor_idx.as_ptr(), anchor_idx.len(), dirs_2x3.as_ptr(), mags_2.as_ptr()));
+        assert_eq!(
+            0,
+            theseus_add_target_xyz(
+                h,
+                1.0,
+                node_idx.as_ptr(),
+                node_idx.len(),
+                target_3x3.as_ptr()
+            )
+        );
+        assert_eq!(
+            0,
+            theseus_add_target_xy(
+                h,
+                1.0,
+                node_idx.as_ptr(),
+                node_idx.len(),
+                target_3x3.as_ptr()
+            )
+        );
+        assert_eq!(
+            0,
+            theseus_add_target_length(
+                h,
+                1.0,
+                edge_idx.as_ptr(),
+                edge_idx.len(),
+                targets_3.as_ptr()
+            )
+        );
+        assert_eq!(
+            0,
+            theseus_add_target_force(
+                h,
+                1.0,
+                edge_idx.as_ptr(),
+                edge_idx.len(),
+                targets_3.as_ptr()
+            )
+        );
+        assert_eq!(
+            0,
+            theseus_add_length_variation(h, 0.5, edge_idx.as_ptr(), edge_idx.len(), 20.0, 0, 0)
+        );
+        assert_eq!(
+            0,
+            theseus_add_force_variation(h, 0.5, edge_idx.as_ptr(), edge_idx.len(), 20.0, 1, 1)
+        );
+        assert_eq!(
+            0,
+            theseus_add_sum_force_length(h, 0.01, edge_idx.as_ptr(), edge_idx.len())
+        );
+        assert_eq!(
+            0,
+            theseus_add_min_length(
+                h,
+                1.0,
+                edge_idx.as_ptr(),
+                edge_idx.len(),
+                thresholds_3.as_ptr(),
+                10.0
+            )
+        );
+        assert_eq!(
+            0,
+            theseus_add_max_length(
+                h,
+                1.0,
+                edge_idx.as_ptr(),
+                edge_idx.len(),
+                thresholds_3.as_ptr(),
+                10.0
+            )
+        );
+        assert_eq!(
+            0,
+            theseus_add_min_force(
+                h,
+                1.0,
+                edge_idx.as_ptr(),
+                edge_idx.len(),
+                thresholds_3.as_ptr(),
+                10.0
+            )
+        );
+        assert_eq!(
+            0,
+            theseus_add_max_force(
+                h,
+                1.0,
+                edge_idx.as_ptr(),
+                edge_idx.len(),
+                thresholds_3.as_ptr(),
+                10.0
+            )
+        );
+        assert_eq!(
+            0,
+            theseus_add_rigid_set_compare(
+                h,
+                1.0,
+                node_idx.as_ptr(),
+                node_idx.len(),
+                target_3x3.as_ptr()
+            )
+        );
+        assert_eq!(
+            0,
+            theseus_add_reaction_direction(
+                h,
+                1.0,
+                anchor_idx.as_ptr(),
+                anchor_idx.len(),
+                dirs_2x3.as_ptr()
+            )
+        );
+        assert_eq!(
+            0,
+            theseus_add_reaction_direction_magnitude(
+                h,
+                1.0,
+                anchor_idx.as_ptr(),
+                anchor_idx.len(),
+                dirs_2x3.as_ptr(),
+                mags_2.as_ptr()
+            )
+        );
+        assert_eq!(
+            0,
+            theseus_add_reaction_magnitude(
+                h,
+                1.0,
+                anchor_idx.as_ptr(),
+                anchor_idx.len(),
+                dirs_2x3.as_ptr(),
+                mags_2.as_ptr(),
+                1,
+                0
+            )
+        );
+        assert_eq!(
+            0,
+            theseus_add_reaction_direction_magnitude_with_options(
+                h,
+                1.0,
+                anchor_idx.as_ptr(),
+                anchor_idx.len(),
+                dirs_2x3.as_ptr(),
+                mags_2.as_ptr(),
+                0,
+                1
+            )
+        );
 
         // PlanarConstraintAlongDirection: plane + direction only (no target array)
         let origin = [0.0, 0.0, 0.0];
         let x_axis = [1.0, 0.0, 0.0];
         let y_axis = [0.0, 1.0, 0.0];
         let direction = [0.0, 0.0, 1.0];
-        assert_eq!(0, theseus_add_planar_constraint_along_direction(
-            h, 0.5, node_idx.as_ptr(), node_idx.len(),
-            origin.as_ptr(), x_axis.as_ptr(), y_axis.as_ptr(), direction.as_ptr()));
+        assert_eq!(
+            0,
+            theseus_add_planar_constraint_along_direction(
+                h,
+                0.5,
+                node_idx.as_ptr(),
+                node_idx.len(),
+                origin.as_ptr(),
+                x_axis.as_ptr(),
+                y_axis.as_ptr(),
+                direction.as_ptr()
+            )
+        );
+
+        theseus_free(h);
+    }
+}
+
+#[test]
+fn ffi_rejects_invalid_variation_normalization_strategy() {
+    let d = arch_data();
+    unsafe {
+        let h = create_handle(&d);
+        let edge_idx: Vec<usize> = vec![0, 1, 2];
+
+        let rc =
+            theseus_add_length_variation(h, 0.5, edge_idx.as_ptr(), edge_idx.len(), 20.0, 1, 99);
+        assert_ne!(rc, 0, "invalid length strategy should fail");
+        assert!(
+            get_last_error().contains("invalid length variance normalization strategy"),
+            "unexpected error: {}",
+            get_last_error()
+        );
+
+        let rc =
+            theseus_add_force_variation(h, 0.5, edge_idx.as_ptr(), edge_idx.len(), 20.0, 1, 99);
+        assert_ne!(rc, 0, "invalid force strategy should fail");
+        assert!(
+            get_last_error().contains("invalid force variance normalization strategy"),
+            "unexpected error: {}",
+            get_last_error()
+        );
 
         theseus_free(h);
     }

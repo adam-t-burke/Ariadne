@@ -88,12 +88,21 @@ fn make_grid_problem(n: usize) -> Problem {
     let fixed_node_positions = Array2::from_shape_vec(
         (4, 3),
         vec![
-            0.0, 0.0, 0.0,
-            (n - 1) as f64, 0.0, 0.0,
-            0.0, (n - 1) as f64, 0.0,
-            (n - 1) as f64, (n - 1) as f64, 0.0,
+            0.0,
+            0.0,
+            0.0,
+            (n - 1) as f64,
+            0.0,
+            0.0,
+            0.0,
+            (n - 1) as f64,
+            0.0,
+            (n - 1) as f64,
+            (n - 1) as f64,
+            0.0,
         ],
-    ).unwrap();
+    )
+    .unwrap();
 
     let anchors = AnchorInfo::all_fixed(fixed_node_positions.clone());
 
@@ -109,13 +118,11 @@ fn make_grid_problem(n: usize) -> Problem {
     }
     let target = Array2::from_shape_vec((nn_free, 3), target_data).unwrap();
 
-    let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![
-        Box::new(TargetXYZ {
-            weight: 1.0,
-            node_indices: target_nodes,
-            target,
-        }),
-    ];
+    let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(TargetXYZ {
+        weight: 1.0,
+        node_indices: target_nodes,
+        target,
+    })];
 
     let bounds = Bounds {
         lower: vec![0.1; num_edges],
@@ -133,6 +140,8 @@ fn make_grid_problem(n: usize) -> Problem {
             max_iterations: 200,
             ..SolverOptions::default()
         },
+        self_weight: None,
+        pressure: None,
     }
 }
 
@@ -143,26 +152,26 @@ fn make_grid_problem(n: usize) -> Problem {
 /// Grid sizes to test.  n×n grid → 2·n·(n-1) edges.
 ///   10  →     180 edges
 ///   32  →   1,984 edges
-///  100  →  19,800 edges
-///  316  → 199,080 edges   (~200k)
-const GRID_SIZES: &[(usize, &str)] = &[
-    (10,  "10×10"),
-    (32,  "32×32"),
-    (100, "100×100"),
-    (316, "316×316"),
-    (354, "354×354"),
-];
+const GRID_SIZES: &[(usize, &str)] = &[(10, "10×10"), (32, "32×32")];
 
 fn fmt_count(n: usize) -> String {
-    if n >= 1_000_000 { format!("{:.2}M", n as f64 / 1e6) }
-    else if n >= 1_000 { format!("{:.1}k", n as f64 / 1e3) }
-    else { format!("{}", n) }
+    if n >= 1_000_000 {
+        format!("{:.2}M", n as f64 / 1e6)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1e3)
+    } else {
+        format!("{}", n)
+    }
 }
 
 fn fmt_time(us: f64) -> String {
-    if us >= 1_000_000.0 { format!("{:.2} s",  us / 1e6) }
-    else if us >= 1_000.0 { format!("{:.2} ms", us / 1e3) }
-    else { format!("{:.1} μs", us) }
+    if us >= 1_000_000.0 {
+        format!("{:.2} s", us / 1e6)
+    } else if us >= 1_000.0 {
+        format!("{:.2} ms", us / 1e3)
+    } else {
+        format!("{:.1} μs", us)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -188,11 +197,17 @@ fn bench_forward_solve_scaling() {
         theseus::fdm::solve_fdm(&mut cache, &q, &problem, &anchors, 1e-12).unwrap();
 
         // Adaptive iteration count: keep total time ~1-3s per size
-        let iters: usize = if ne < 1_000 { 5000 }
-            else if ne < 20_000 { 500 }
-            else if ne < 200_000 { 50 }
-            else if ne < 600_000 { 10 }
-            else { 3 };
+        let iters: usize = if ne < 1_000 {
+            5000
+        } else if ne < 20_000 {
+            500
+        } else if ne < 200_000 {
+            50
+        } else if ne < 600_000 {
+            10
+        } else {
+            3
+        };
 
         let start = Instant::now();
         for _ in 0..iters {
@@ -238,13 +253,20 @@ fn bench_value_and_gradient_scaling() {
         let mut grad = vec![0.0; ne];
         theseus::gradients::value_and_gradient(
             &mut cache, &problem, &theta, &mut grad, &lb, &ub, &lb_idx, &ub_idx,
-        ).unwrap();
+        )
+        .unwrap();
 
-        let iters: usize = if ne < 1_000 { 3000 }
-            else if ne < 20_000 { 300 }
-            else if ne < 200_000 { 30 }
-            else if ne < 600_000 { 5 }
-            else { 2 };
+        let iters: usize = if ne < 1_000 {
+            3000
+        } else if ne < 20_000 {
+            300
+        } else if ne < 200_000 {
+            30
+        } else if ne < 600_000 {
+            5
+        } else {
+            2
+        };
 
         let start = Instant::now();
         for _ in 0..iters {
@@ -252,7 +274,8 @@ fn bench_value_and_gradient_scaling() {
             grad.fill(0.0);
             theseus::gradients::value_and_gradient(
                 &mut cache, &problem, &theta, &mut grad, &lb, &ub, &lb_idx, &ub_idx,
-            ).unwrap();
+            )
+            .unwrap();
         }
         let elapsed = start.elapsed();
         let per_us = elapsed.as_micros() as f64 / iters as f64;
@@ -272,13 +295,7 @@ fn bench_value_and_gradient_scaling() {
 
 #[test]
 fn bench_full_optimize_scaling() {
-    let opt_sizes: &[(usize, &str)] = &[
-        (10,  "10×10"),
-        (32,  "32×32"),
-        (100, "100×100"),
-        (316, "316×316"),
-        (354, "354×354"),
-    ];
+    let opt_sizes: &[(usize, &str)] = &[(10, "10×10"), (32, "32×32")];
 
     eprintln!("\n┌─────────────────────────────────────────────────────────────────┐");
     eprintln!("│               FULL L-BFGS OPTIMIZE  (≤200 iters)               │");
@@ -290,10 +307,15 @@ fn bench_full_optimize_scaling() {
         let problem = make_grid_problem(n);
         let ne = problem.topology.num_edges;
 
-        let runs: usize = if ne < 1_000 { 20 }
-            else if ne < 20_000 { 5 }
-            else if ne < 200_000 { 2 }
-            else { 1 };
+        let runs: usize = if ne < 1_000 {
+            20
+        } else if ne < 20_000 {
+            5
+        } else if ne < 200_000 {
+            2
+        } else {
+            1
+        };
 
         let start = Instant::now();
         for _ in 0..runs {

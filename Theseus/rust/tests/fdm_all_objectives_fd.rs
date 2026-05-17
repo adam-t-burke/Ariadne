@@ -54,8 +54,14 @@ fn make_arch_problem(bounds: Bounds, objectives: Vec<Box<dyn ObjectiveTrait>>) -
     let num_edges = 8;
 
     let edges = vec![
-        (0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6),
-        (1, 5), (2, 4),
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 4),
+        (4, 5),
+        (5, 6),
+        (1, 5),
+        (2, 4),
     ];
 
     let free_idx: Vec<usize> = vec![1, 2, 3, 4, 5];
@@ -79,18 +85,13 @@ fn make_arch_problem(bounds: Bounds, objectives: Vec<Box<dyn ObjectiveTrait>>) -
     let free_node_loads = Array2::from_shape_vec(
         (nn_free, 3),
         vec![
-            0.0, 0.0, -1.0,
-            0.0, 0.0, -1.0,
-            0.0, 0.0, -2.0,
-            0.0, 0.0, -1.0,
-            0.0, 0.0, -1.0,
+            0.0, 0.0, -1.0, 0.0, 0.0, -1.0, 0.0, 0.0, -2.0, 0.0, 0.0, -1.0, 0.0, 0.0, -1.0,
         ],
-    ).unwrap();
+    )
+    .unwrap();
 
-    let fixed_node_positions = Array2::from_shape_vec(
-        (2, 3),
-        vec![0.0, 0.0, 0.0, 6.0, 0.0, 0.0],
-    ).unwrap();
+    let fixed_node_positions =
+        Array2::from_shape_vec((2, 3), vec![0.0, 0.0, 0.0, 6.0, 0.0, 0.0]).unwrap();
 
     let anchors = AnchorInfo::all_fixed(fixed_node_positions.clone());
 
@@ -108,7 +109,10 @@ fn make_arch_problem(bounds: Bounds, objectives: Vec<Box<dyn ObjectiveTrait>>) -
 }
 
 fn default_bounds() -> Bounds {
-    Bounds { lower: vec![0.1; 8], upper: vec![100.0; 8] }
+    Bounds {
+        lower: vec![0.1; 8],
+        upper: vec![100.0; 8],
+    }
 }
 
 fn default_theta() -> Vec<f64> {
@@ -119,39 +123,58 @@ fn default_theta() -> Vec<f64> {
 //  FD test driver
 // ─────────────────────────────────────────────────────────────
 
-fn eval_loss(problem: &Problem, theta: &[f64], lb: &[f64], ub: &[f64], lb_idx: &[usize], ub_idx: &[usize]) -> f64 {
+fn eval_loss(
+    problem: &Problem,
+    theta: &[f64],
+    lb: &[f64],
+    ub: &[f64],
+    lb_idx: &[usize],
+    ub_idx: &[usize],
+) -> f64 {
     let mut cache = FdmCache::new(problem).unwrap();
     let mut grad = vec![0.0; theta.len()];
     theseus::gradients::value_and_gradient(
         &mut cache, problem, theta, &mut grad, lb, ub, lb_idx, ub_idx,
-    ).unwrap()
+    )
+    .unwrap()
 }
 
-fn fd_check(
-    problem: &Problem,
-    theta: &[f64],
-    h: f64,
-    tol_abs: f64,
-    tol_rel: f64,
-    label: &str,
-) {
+fn fd_check(problem: &Problem, theta: &[f64], h: f64, tol_abs: f64, tol_rel: f64, label: &str) {
     let ne = problem.topology.num_edges;
     let n = theta.len();
 
-    let lb: Vec<f64> = problem.bounds.lower.iter()
+    let lb: Vec<f64> = problem
+        .bounds
+        .lower
+        .iter()
         .chain(std::iter::repeat(&f64::NEG_INFINITY).take(n.saturating_sub(ne)))
-        .take(n).copied().collect();
-    let ub: Vec<f64> = problem.bounds.upper.iter()
+        .take(n)
+        .copied()
+        .collect();
+    let ub: Vec<f64> = problem
+        .bounds
+        .upper
+        .iter()
         .chain(std::iter::repeat(&f64::INFINITY).take(n.saturating_sub(ne)))
-        .take(n).copied().collect();
+        .take(n)
+        .copied()
+        .collect();
     let lb_idx: Vec<usize> = (0..n).filter(|&i| lb[i].is_finite()).collect();
     let ub_idx: Vec<usize> = (0..n).filter(|&i| ub[i].is_finite()).collect();
 
     let mut cache = FdmCache::new(problem).unwrap();
     let mut grad_a = vec![0.0; n];
     let loss = theseus::gradients::value_and_gradient(
-        &mut cache, problem, theta, &mut grad_a, &lb, &ub, &lb_idx, &ub_idx,
-    ).unwrap();
+        &mut cache,
+        problem,
+        theta,
+        &mut grad_a,
+        &lb,
+        &ub,
+        &lb_idx,
+        &ub_idx,
+    )
+    .unwrap();
 
     let mut grad_fd = vec![0.0; n];
     let mut tp = theta.to_vec();
@@ -175,11 +198,20 @@ fn fd_check(
         let ae = (grad_a[i] - grad_fd[i]).abs();
         let den = grad_fd[i].abs().max(grad_a[i].abs()).max(1e-14);
         let re = ae / den;
-        if ae > max_abs { max_abs = ae; worst = i; }
+        if ae > max_abs {
+            max_abs = ae;
+            worst = i;
+        }
         max_rel = max_rel.max(re);
-        let flag = if ae > tol_abs && re > tol_rel { " <<<" } else { "" };
-        eprintln!("  θ[{i:>2}]  a={:+13.6e}  fd={:+13.6e}  abs={:.2e}  rel={:.2e}{flag}",
-            grad_a[i], grad_fd[i], ae, re);
+        let flag = if ae > tol_abs && re > tol_rel {
+            " <<<"
+        } else {
+            ""
+        };
+        eprintln!(
+            "  θ[{i:>2}]  a={:+13.6e}  fd={:+13.6e}  abs={:.2e}  rel={:.2e}{flag}",
+            grad_a[i], grad_fd[i], ae, re
+        );
     }
     eprintln!("  max_abs={max_abs:.3e} at θ[{worst}], max_rel={max_rel:.3e}");
     eprintln!("══════════════════════════════════════════════");
@@ -188,9 +220,14 @@ fn fd_check(
         let ae = (grad_a[i] - grad_fd[i]).abs();
         let den = grad_fd[i].abs().max(grad_a[i].abs()).max(1e-14);
         let re = ae / den;
-        assert!(ae < tol_abs || re < tol_rel,
+        assert!(
+            ae < tol_abs || re < tol_rel,
             "[{label}] θ[{i}]: a={:.8e}, fd={:.8e}, abs={:.3e}, rel={:.3e}",
-            grad_a[i], grad_fd[i], ae, re);
+            grad_a[i],
+            grad_fd[i],
+            ae,
+            re
+        );
     }
 }
 
@@ -200,11 +237,17 @@ fn fd_check(
 
 #[test]
 fn fdm_fd_target_xyz() {
-    let target = Array2::from_shape_vec((5, 3), vec![
-        1.0,0.0,1.0, 2.0,0.0,2.0, 3.0,0.0,2.5, 4.0,0.0,2.0, 5.0,0.0,1.0,
-    ]).unwrap();
+    let target = Array2::from_shape_vec(
+        (5, 3),
+        vec![
+            1.0, 0.0, 1.0, 2.0, 0.0, 2.0, 3.0, 0.0, 2.5, 4.0, 0.0, 2.0, 5.0, 0.0, 1.0,
+        ],
+    )
+    .unwrap();
     let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(TargetXYZ {
-        weight: 1.0, node_indices: vec![1,2,3,4,5], target,
+        weight: 1.0,
+        node_indices: vec![1, 2, 3, 4, 5],
+        target,
     })];
     let p = make_arch_problem(default_bounds(), obj);
     fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "TargetXYZ");
@@ -216,11 +259,17 @@ fn fdm_fd_target_xyz() {
 
 #[test]
 fn fdm_fd_target_xy() {
-    let target = Array2::from_shape_vec((5, 3), vec![
-        1.0,0.0,0.0, 2.0,0.0,0.0, 3.0,0.0,0.0, 4.0,0.0,0.0, 5.0,0.0,0.0,
-    ]).unwrap();
+    let target = Array2::from_shape_vec(
+        (5, 3),
+        vec![
+            1.0, 0.0, 0.0, 2.0, 0.0, 0.0, 3.0, 0.0, 0.0, 4.0, 0.0, 0.0, 5.0, 0.0, 0.0,
+        ],
+    )
+    .unwrap();
     let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(TargetXY {
-        weight: 1.0, node_indices: vec![1,2,3,4,5], target,
+        weight: 1.0,
+        node_indices: vec![1, 2, 3, 4, 5],
+        target,
     })];
     let p = make_arch_problem(default_bounds(), obj);
     fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "TargetXY");
@@ -232,12 +281,16 @@ fn fdm_fd_target_xy() {
 
 #[test]
 fn fdm_fd_target_plane() {
-    let target = Array2::from_shape_vec((5, 3), vec![
-        1.0,0.0,1.0, 2.0,0.0,2.0, 3.0,0.0,2.5, 4.0,0.0,2.0, 5.0,0.0,1.0,
-    ]).unwrap();
+    let target = Array2::from_shape_vec(
+        (5, 3),
+        vec![
+            1.0, 0.0, 1.0, 2.0, 0.0, 2.0, 3.0, 0.0, 2.5, 4.0, 0.0, 2.0, 5.0, 0.0, 1.0,
+        ],
+    )
+    .unwrap();
     let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(TargetPlane {
         weight: 1.0,
-        node_indices: vec![1,2,3,4,5],
+        node_indices: vec![1, 2, 3, 4, 5],
         target,
         origin: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
@@ -255,14 +308,21 @@ fn fdm_fd_target_plane() {
 fn fdm_fd_planar_constraint() {
     let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(PlanarConstraintAlongDirection {
         weight: 1.0,
-        node_indices: vec![1,2,3,4,5],
+        node_indices: vec![1, 2, 3, 4, 5],
         origin: [3.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 1.0, 0.0],
         direction: [0.0, 0.0, 1.0],
     })];
     let p = make_arch_problem(default_bounds(), obj);
-    fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "PlanarConstraintAlongDirection");
+    fd_check(
+        &p,
+        &default_theta(),
+        1e-6,
+        1e-4,
+        1e-3,
+        "PlanarConstraintAlongDirection",
+    );
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -273,7 +333,9 @@ fn fdm_fd_planar_constraint() {
 fn fdm_fd_target_length() {
     let ne = 8;
     let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(TargetLength {
-        weight: 1.0, edge_indices: (0..ne).collect(), target: vec![1.5; ne],
+        weight: 1.0,
+        edge_indices: (0..ne).collect(),
+        target: vec![1.5; ne],
     })];
     let p = make_arch_problem(default_bounds(), obj);
     fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "TargetLength");
@@ -303,10 +365,35 @@ fn fdm_fd_target_force() {
 fn fdm_fd_length_variation() {
     let ne = 8;
     let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(LengthVariation {
-        weight: 1.0, edge_indices: (0..ne).collect(), sharpness: 20.0,
+        weight: 1.0,
+        edge_indices: (0..ne).collect(),
+        sharpness: 20.0,
+        use_normalized_variance: false,
+        normalization_strategy: LengthVarianceNormalizationStrategy::SquaredMean,
     })];
     let p = make_arch_problem(default_bounds(), obj);
     fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "LengthVariation");
+}
+
+#[test]
+fn fdm_fd_length_variation_normalized_variance() {
+    let ne = 8;
+    let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(LengthVariation {
+        weight: 1.0,
+        edge_indices: (0..ne).collect(),
+        sharpness: 20.0,
+        use_normalized_variance: true,
+        normalization_strategy: LengthVarianceNormalizationStrategy::SquaredMean,
+    })];
+    let p = make_arch_problem(default_bounds(), obj);
+    fd_check(
+        &p,
+        &default_theta(),
+        1e-6,
+        1e-4,
+        1e-3,
+        "LengthVariation normalized variance",
+    );
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -317,10 +404,35 @@ fn fdm_fd_length_variation() {
 fn fdm_fd_force_variation() {
     let ne = 8;
     let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(ForceVariation {
-        weight: 1.0, edge_indices: (0..ne).collect(), sharpness: 20.0,
+        weight: 1.0,
+        edge_indices: (0..ne).collect(),
+        sharpness: 20.0,
+        use_normalized_variance: false,
+        normalization_strategy: ForceVarianceNormalizationStrategy::SquaredMean,
     })];
     let p = make_arch_problem(default_bounds(), obj);
     fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "ForceVariation");
+}
+
+#[test]
+fn fdm_fd_force_variation_normalized_variance() {
+    let ne = 8;
+    let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(ForceVariation {
+        weight: 1.0,
+        edge_indices: (0..ne).collect(),
+        sharpness: 20.0,
+        use_normalized_variance: true,
+        normalization_strategy: ForceVarianceNormalizationStrategy::SquaredMean,
+    })];
+    let p = make_arch_problem(default_bounds(), obj);
+    fd_check(
+        &p,
+        &default_theta(),
+        1e-6,
+        1e-4,
+        1e-3,
+        "ForceVariation normalized variance",
+    );
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -331,7 +443,8 @@ fn fdm_fd_force_variation() {
 fn fdm_fd_sum_force_length() {
     let ne = 8;
     let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(SumForceLength {
-        weight: 1.0, edge_indices: (0..ne).collect(),
+        weight: 1.0,
+        edge_indices: (0..ne).collect(),
     })];
     let p = make_arch_problem(default_bounds(), obj);
     fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "SumForceLength");
@@ -411,13 +524,12 @@ fn fdm_fd_max_force() {
 
 #[test]
 fn fdm_fd_rigid_set_compare() {
-    let target = Array2::from_shape_vec((3, 3), vec![
-        1.0, 0.0, 1.0,
-        3.0, 0.0, 2.5,
-        5.0, 0.0, 1.0,
-    ]).unwrap();
+    let target =
+        Array2::from_shape_vec((3, 3), vec![1.0, 0.0, 1.0, 3.0, 0.0, 2.5, 5.0, 0.0, 1.0]).unwrap();
     let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(RigidSetCompare {
-        weight: 1.0, node_indices: vec![1, 3, 5], target,
+        weight: 1.0,
+        node_indices: vec![1, 3, 5],
+        target,
     })];
     let p = make_arch_problem(default_bounds(), obj);
     fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "RigidSetCompare");
@@ -429,12 +541,11 @@ fn fdm_fd_rigid_set_compare() {
 
 #[test]
 fn fdm_fd_reaction_direction() {
-    let dirs = Array2::from_shape_vec((2, 3), vec![
-        0.0, 0.0, 1.0,
-        0.0, 0.0, 1.0,
-    ]).unwrap();
+    let dirs = Array2::from_shape_vec((2, 3), vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0]).unwrap();
     let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(ReactionDirection {
-        weight: 1.0, anchor_indices: vec![0, 6], target_directions: dirs,
+        weight: 1.0,
+        anchor_indices: vec![0, 6],
+        target_directions: dirs,
     })];
     let p = make_arch_problem(default_bounds(), obj);
     fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "ReactionDirection");
@@ -446,18 +557,112 @@ fn fdm_fd_reaction_direction() {
 
 #[test]
 fn fdm_fd_reaction_direction_magnitude() {
-    let dirs = Array2::from_shape_vec((2, 3), vec![
-        0.0, 0.0, 1.0,
-        0.0, 0.0, 1.0,
-    ]).unwrap();
+    let dirs = Array2::from_shape_vec((2, 3), vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0]).unwrap();
     let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(ReactionDirectionMagnitude {
         weight: 1.0,
         anchor_indices: vec![0, 6],
         target_directions: dirs,
         target_magnitudes: vec![3.0, 3.0],
+        behavior: ReactionMagnitudeBehavior::Max,
+        sign: ReactionMagnitudeSign::Unsigned,
     })];
     let p = make_arch_problem(default_bounds(), obj);
-    fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "ReactionDirectionMagnitude");
+    fd_check(
+        &p,
+        &default_theta(),
+        1e-6,
+        1e-4,
+        1e-3,
+        "ReactionDirectionMagnitude",
+    );
+}
+
+#[test]
+fn fdm_fd_reaction_magnitude_target_unsigned() {
+    let dirs = Array2::from_shape_vec((2, 3), vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0]).unwrap();
+    let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(ReactionMagnitude {
+        weight: 1.0,
+        anchor_indices: vec![0, 6],
+        target_directions: dirs,
+        target_magnitudes: vec![2.5, 3.5],
+        behavior: ReactionMagnitudeBehavior::Target,
+        sign: ReactionMagnitudeSign::Unsigned,
+    })];
+    let p = make_arch_problem(default_bounds(), obj);
+    fd_check(
+        &p,
+        &default_theta(),
+        1e-6,
+        1e-4,
+        1e-3,
+        "ReactionMagnitude target unsigned",
+    );
+}
+
+#[test]
+fn fdm_fd_reaction_magnitude_max_signed_projected() {
+    let dirs = Array2::from_shape_vec((2, 3), vec![0.0, 0.0, 1.0, 0.0, 0.0, -1.0]).unwrap();
+    let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(ReactionMagnitude {
+        weight: 1.0,
+        anchor_indices: vec![0, 6],
+        target_directions: dirs,
+        target_magnitudes: vec![-10.0, -10.0],
+        behavior: ReactionMagnitudeBehavior::Max,
+        sign: ReactionMagnitudeSign::SignedProjected,
+    })];
+    let p = make_arch_problem(default_bounds(), obj);
+    fd_check(
+        &p,
+        &default_theta(),
+        1e-6,
+        1e-4,
+        1e-3,
+        "ReactionMagnitude max signed projected",
+    );
+}
+
+#[test]
+fn fdm_fd_reaction_magnitude_min_signed_projected() {
+    let dirs = Array2::from_shape_vec((2, 3), vec![0.0, 0.0, 1.0, 0.0, 0.0, -1.0]).unwrap();
+    let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(ReactionMagnitude {
+        weight: 1.0,
+        anchor_indices: vec![0, 6],
+        target_directions: dirs,
+        target_magnitudes: vec![10.0, 10.0],
+        behavior: ReactionMagnitudeBehavior::Min,
+        sign: ReactionMagnitudeSign::SignedProjected,
+    })];
+    let p = make_arch_problem(default_bounds(), obj);
+    fd_check(
+        &p,
+        &default_theta(),
+        1e-6,
+        1e-4,
+        1e-3,
+        "ReactionMagnitude min signed projected",
+    );
+}
+
+#[test]
+fn fdm_fd_reaction_direction_magnitude_target_signed_projected() {
+    let dirs = Array2::from_shape_vec((2, 3), vec![0.0, 0.0, 1.0, 0.0, 0.0, -1.0]).unwrap();
+    let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(ReactionDirectionMagnitude {
+        weight: 1.0,
+        anchor_indices: vec![0, 6],
+        target_directions: dirs,
+        target_magnitudes: vec![1.0, 1.0],
+        behavior: ReactionMagnitudeBehavior::Target,
+        sign: ReactionMagnitudeSign::SignedProjected,
+    })];
+    let p = make_arch_problem(default_bounds(), obj);
+    fd_check(
+        &p,
+        &default_theta(),
+        1e-6,
+        1e-4,
+        1e-3,
+        "ReactionDirectionMagnitude target signed projected",
+    );
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -467,59 +672,135 @@ fn fdm_fd_reaction_direction_magnitude() {
 #[test]
 fn fdm_fd_all_objectives_combined() {
     let ne = 8;
-    let target_xyz = Array2::from_shape_vec((5, 3), vec![
-        1.0,0.0,1.0, 2.0,0.0,2.0, 3.0,0.0,2.5, 4.0,0.0,2.0, 5.0,0.0,1.0,
-    ]).unwrap();
-    let target_xy = Array2::from_shape_vec((5, 3), vec![
-        1.0,0.0,0.0, 2.0,0.0,0.0, 3.0,0.0,0.0, 4.0,0.0,0.0, 5.0,0.0,0.0,
-    ]).unwrap();
-    let target_plane = Array2::from_shape_vec((3, 3), vec![
-        1.0,0.0,1.0, 3.0,0.0,2.5, 5.0,0.0,1.0,
-    ]).unwrap();
-    let rigid_target = Array2::from_shape_vec((3, 3), vec![
-        1.0,0.0,1.0, 3.0,0.0,2.5, 5.0,0.0,1.0,
-    ]).unwrap();
-    let reaction_dirs = Array2::from_shape_vec((2, 3), vec![
-        0.0,0.0,1.0, 0.0,0.0,1.0,
-    ]).unwrap();
-    let reaction_dirs2 = Array2::from_shape_vec((2, 3), vec![
-        0.0,0.0,1.0, 0.0,0.0,1.0,
-    ]).unwrap();
+    let target_xyz = Array2::from_shape_vec(
+        (5, 3),
+        vec![
+            1.0, 0.0, 1.0, 2.0, 0.0, 2.0, 3.0, 0.0, 2.5, 4.0, 0.0, 2.0, 5.0, 0.0, 1.0,
+        ],
+    )
+    .unwrap();
+    let target_xy = Array2::from_shape_vec(
+        (5, 3),
+        vec![
+            1.0, 0.0, 0.0, 2.0, 0.0, 0.0, 3.0, 0.0, 0.0, 4.0, 0.0, 0.0, 5.0, 0.0, 0.0,
+        ],
+    )
+    .unwrap();
+    let target_plane =
+        Array2::from_shape_vec((3, 3), vec![1.0, 0.0, 1.0, 3.0, 0.0, 2.5, 5.0, 0.0, 1.0]).unwrap();
+    let rigid_target =
+        Array2::from_shape_vec((3, 3), vec![1.0, 0.0, 1.0, 3.0, 0.0, 2.5, 5.0, 0.0, 1.0]).unwrap();
+    let reaction_dirs = Array2::from_shape_vec((2, 3), vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0]).unwrap();
+    let reaction_dirs2 =
+        Array2::from_shape_vec((2, 3), vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0]).unwrap();
 
     let obj: Vec<Box<dyn ObjectiveTrait>> = vec![
-        Box::new(TargetXYZ { weight: 1.0, node_indices: vec![1,2,3,4,5], target: target_xyz }),
-        Box::new(TargetXY { weight: 0.5, node_indices: vec![1,2,3,4,5], target: target_xy }),
+        Box::new(TargetXYZ {
+            weight: 1.0,
+            node_indices: vec![1, 2, 3, 4, 5],
+            target: target_xyz,
+        }),
+        Box::new(TargetXY {
+            weight: 0.5,
+            node_indices: vec![1, 2, 3, 4, 5],
+            target: target_xy,
+        }),
         Box::new(TargetPlane {
-            weight: 0.3, node_indices: vec![1,3,5], target: target_plane,
-            origin: [0.0,0.0,0.0], x_axis: [1.0,0.0,0.0], y_axis: [0.0,0.0,1.0],
+            weight: 0.3,
+            node_indices: vec![1, 3, 5],
+            target: target_plane,
+            origin: [0.0, 0.0, 0.0],
+            x_axis: [1.0, 0.0, 0.0],
+            y_axis: [0.0, 0.0, 1.0],
         }),
         Box::new(PlanarConstraintAlongDirection {
-            weight: 0.2, node_indices: vec![1,2,3,4,5],
-            origin: [3.0,0.0,0.0], x_axis: [1.0,0.0,0.0], y_axis: [0.0,1.0,0.0],
-            direction: [0.0,0.0,1.0],
+            weight: 0.2,
+            node_indices: vec![1, 2, 3, 4, 5],
+            origin: [3.0, 0.0, 0.0],
+            x_axis: [1.0, 0.0, 0.0],
+            y_axis: [0.0, 1.0, 0.0],
+            direction: [0.0, 0.0, 1.0],
         }),
-        Box::new(TargetLength { weight: 0.4, edge_indices: (0..ne).collect(), target: vec![1.5; ne] }),
+        Box::new(TargetLength {
+            weight: 0.4,
+            edge_indices: (0..ne).collect(),
+            target: vec![1.5; ne],
+        }),
         Box::new(TargetForce {
             weight: 0.25,
             edge_indices: (0..ne).collect(),
             target: vec![1.0, -0.5, 2.0, 1.5, -1.0, 2.5, 0.75, -0.25],
         }),
-        Box::new(LengthVariation { weight: 0.3, edge_indices: (0..ne).collect(), sharpness: 20.0 }),
-        Box::new(ForceVariation { weight: 0.2, edge_indices: (0..ne).collect(), sharpness: 15.0 }),
-        Box::new(SumForceLength { weight: 0.1, edge_indices: (0..ne).collect() }),
-        Box::new(MinLength { weight: 0.3, edge_indices: (0..ne).collect(), threshold: vec![0.5; ne], sharpness: 10.0 }),
-        Box::new(MaxLength { weight: 0.3, edge_indices: (0..ne).collect(), threshold: vec![3.0; ne], sharpness: 10.0 }),
-        Box::new(MinForce { weight: 0.2, edge_indices: (0..ne).collect(), threshold: vec![0.5; ne], sharpness: 10.0 }),
-        Box::new(MaxForce { weight: 0.2, edge_indices: (0..ne).collect(), threshold: vec![5.0; ne], sharpness: 10.0 }),
-        Box::new(RigidSetCompare { weight: 0.5, node_indices: vec![1,3,5], target: rigid_target }),
-        Box::new(ReactionDirection { weight: 0.3, anchor_indices: vec![0,6], target_directions: reaction_dirs }),
+        Box::new(LengthVariation {
+            weight: 0.3,
+            edge_indices: (0..ne).collect(),
+            sharpness: 20.0,
+            use_normalized_variance: false,
+            normalization_strategy: LengthVarianceNormalizationStrategy::SquaredMean,
+        }),
+        Box::new(ForceVariation {
+            weight: 0.2,
+            edge_indices: (0..ne).collect(),
+            sharpness: 15.0,
+            use_normalized_variance: false,
+            normalization_strategy: ForceVarianceNormalizationStrategy::SquaredMean,
+        }),
+        Box::new(SumForceLength {
+            weight: 0.1,
+            edge_indices: (0..ne).collect(),
+        }),
+        Box::new(MinLength {
+            weight: 0.3,
+            edge_indices: (0..ne).collect(),
+            threshold: vec![0.5; ne],
+            sharpness: 10.0,
+        }),
+        Box::new(MaxLength {
+            weight: 0.3,
+            edge_indices: (0..ne).collect(),
+            threshold: vec![3.0; ne],
+            sharpness: 10.0,
+        }),
+        Box::new(MinForce {
+            weight: 0.2,
+            edge_indices: (0..ne).collect(),
+            threshold: vec![0.5; ne],
+            sharpness: 10.0,
+        }),
+        Box::new(MaxForce {
+            weight: 0.2,
+            edge_indices: (0..ne).collect(),
+            threshold: vec![5.0; ne],
+            sharpness: 10.0,
+        }),
+        Box::new(RigidSetCompare {
+            weight: 0.5,
+            node_indices: vec![1, 3, 5],
+            target: rigid_target,
+        }),
+        Box::new(ReactionDirection {
+            weight: 0.3,
+            anchor_indices: vec![0, 6],
+            target_directions: reaction_dirs,
+        }),
         Box::new(ReactionDirectionMagnitude {
-            weight: 0.2, anchor_indices: vec![0,6], target_directions: reaction_dirs2,
+            weight: 0.2,
+            anchor_indices: vec![0, 6],
+            target_directions: reaction_dirs2,
             target_magnitudes: vec![3.0, 3.0],
+            behavior: ReactionMagnitudeBehavior::Max,
+            sign: ReactionMagnitudeSign::Unsigned,
         }),
     ];
     let p = make_arch_problem(default_bounds(), obj);
-    fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "ALL 16 objectives combined");
+    fd_check(
+        &p,
+        &default_theta(),
+        1e-6,
+        1e-4,
+        1e-3,
+        "ALL 16 objectives combined",
+    );
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -529,10 +810,19 @@ fn fdm_fd_all_objectives_combined() {
 #[test]
 fn fdm_fd_target_length_subset() {
     let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(TargetLength {
-        weight: 1.0, edge_indices: vec![0, 2, 5, 7], target: vec![1.0, 1.5, 2.0, 1.2],
+        weight: 1.0,
+        edge_indices: vec![0, 2, 5, 7],
+        target: vec![1.0, 1.5, 2.0, 1.2],
     })];
     let p = make_arch_problem(default_bounds(), obj);
-    fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "TargetLength (subset)");
+    fd_check(
+        &p,
+        &default_theta(),
+        1e-6,
+        1e-4,
+        1e-3,
+        "TargetLength (subset)",
+    );
 }
 
 #[test]
@@ -543,13 +833,23 @@ fn fdm_fd_target_force_subset() {
         target: vec![1.0, -0.5, 2.0, -1.25],
     })];
     let p = make_arch_problem(default_bounds(), obj);
-    fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "TargetForce (subset)");
+    fd_check(
+        &p,
+        &default_theta(),
+        1e-6,
+        1e-4,
+        1e-3,
+        "TargetForce (subset)",
+    );
 }
 
 #[test]
 fn fdm_fd_min_length_subset() {
     let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(MinLength {
-        weight: 1.0, edge_indices: vec![1, 3, 6], threshold: vec![0.3, 0.5, 0.4], sharpness: 10.0,
+        weight: 1.0,
+        edge_indices: vec![1, 3, 6],
+        threshold: vec![0.3, 0.5, 0.4],
+        sharpness: 10.0,
     })];
     let p = make_arch_problem(default_bounds(), obj);
     fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "MinLength (subset)");
@@ -558,7 +858,10 @@ fn fdm_fd_min_length_subset() {
 #[test]
 fn fdm_fd_max_force_subset() {
     let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(MaxForce {
-        weight: 1.0, edge_indices: vec![0, 4, 7], threshold: vec![4.0, 3.0, 5.0], sharpness: 10.0,
+        weight: 1.0,
+        edge_indices: vec![0, 4, 7],
+        threshold: vec![4.0, 3.0, 5.0],
+        sharpness: 10.0,
     })];
     let p = make_arch_problem(default_bounds(), obj);
     fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "MaxForce (subset)");
@@ -571,13 +874,31 @@ fn fdm_fd_max_force_subset() {
 #[test]
 fn fdm_fd_weighted_objectives() {
     let ne = 8;
-    let target = Array2::from_shape_vec((5, 3), vec![
-        1.0,0.0,1.0, 2.0,0.0,2.0, 3.0,0.0,2.5, 4.0,0.0,2.0, 5.0,0.0,1.0,
-    ]).unwrap();
+    let target = Array2::from_shape_vec(
+        (5, 3),
+        vec![
+            1.0, 0.0, 1.0, 2.0, 0.0, 2.0, 3.0, 0.0, 2.5, 4.0, 0.0, 2.0, 5.0, 0.0, 1.0,
+        ],
+    )
+    .unwrap();
     let obj: Vec<Box<dyn ObjectiveTrait>> = vec![
-        Box::new(TargetXYZ { weight: 3.7, node_indices: vec![1,2,3,4,5], target }),
-        Box::new(SumForceLength { weight: 0.05, edge_indices: (0..ne).collect() }),
+        Box::new(TargetXYZ {
+            weight: 3.7,
+            node_indices: vec![1, 2, 3, 4, 5],
+            target,
+        }),
+        Box::new(SumForceLength {
+            weight: 0.05,
+            edge_indices: (0..ne).collect(),
+        }),
     ];
     let p = make_arch_problem(default_bounds(), obj);
-    fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "Weighted TargetXYZ + SumForceLength");
+    fd_check(
+        &p,
+        &default_theta(),
+        1e-6,
+        1e-4,
+        1e-3,
+        "Weighted TargetXYZ + SumForceLength",
+    );
 }

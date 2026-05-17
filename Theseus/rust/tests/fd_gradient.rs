@@ -647,6 +647,8 @@ fn fd_cholesky_length_variation() {
         weight: 1.0,
         edge_indices: (0..ne).collect(),
         sharpness: 20.0,
+        use_normalized_variance: false,
+        normalization_strategy: LengthVarianceNormalizationStrategy::SquaredMean,
     })];
 
     let problem = make_arch_problem(bounds, objectives);
@@ -673,6 +675,8 @@ fn fd_cholesky_force_variation() {
         weight: 1.0,
         edge_indices: (0..ne).collect(),
         sharpness: 20.0,
+        use_normalized_variance: false,
+        normalization_strategy: ForceVarianceNormalizationStrategy::SquaredMean,
     })];
 
     let problem = make_arch_problem(bounds, objectives);
@@ -684,6 +688,191 @@ fn fd_cholesky_force_variation() {
     let theta: Vec<f64> = vec![2.0, 3.0, 1.5, 2.5, 1.0, 3.5, 2.0, 1.8];
 
     fd_gradient_check(&problem, &theta, 1e-6, 1e-4, 1e-3);
+}
+
+/// LengthVariation normalized variance — Cholesky path.
+#[test]
+fn fd_cholesky_length_variation_normalized_variance() {
+    let ne = 8;
+    let bounds = Bounds {
+        lower: vec![0.1; ne],
+        upper: vec![50.0; ne],
+    };
+
+    let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(LengthVariation {
+        weight: 1.0,
+        edge_indices: (0..ne).collect(),
+        sharpness: 20.0,
+        use_normalized_variance: true,
+        normalization_strategy: LengthVarianceNormalizationStrategy::SquaredMean,
+    })];
+
+    let problem = make_arch_problem(bounds, objectives);
+    let theta: Vec<f64> = vec![1.0, 2.0, 1.5, 2.5, 3.0, 1.2, 2.0, 1.8];
+
+    fd_gradient_check(&problem, &theta, 1e-6, 1e-4, 1e-3);
+}
+
+/// ForceVariation normalized variance — Cholesky path.
+#[test]
+fn fd_cholesky_force_variation_normalized_variance() {
+    let ne = 8;
+    let bounds = Bounds {
+        lower: vec![0.1; ne],
+        upper: vec![50.0; ne],
+    };
+
+    let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(ForceVariation {
+        weight: 1.0,
+        edge_indices: (0..ne).collect(),
+        sharpness: 20.0,
+        use_normalized_variance: true,
+        normalization_strategy: ForceVarianceNormalizationStrategy::SquaredMean,
+    })];
+
+    let problem = make_arch_problem(bounds, objectives);
+    let theta: Vec<f64> = vec![2.0, 3.0, 1.5, 2.5, 1.0, 3.5, 2.0, 1.8];
+
+    fd_gradient_check(&problem, &theta, 1e-6, 1e-4, 1e-3);
+}
+
+/// LengthVariation raw variance — Cholesky path.
+#[test]
+fn fd_cholesky_length_variation_raw_variance() {
+    let ne = 8;
+    let bounds = Bounds {
+        lower: vec![0.1; ne],
+        upper: vec![50.0; ne],
+    };
+
+    let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(LengthVariation {
+        weight: 1.0,
+        edge_indices: (0..ne).collect(),
+        sharpness: 20.0,
+        use_normalized_variance: true,
+        normalization_strategy: LengthVarianceNormalizationStrategy::None,
+    })];
+
+    let problem = make_arch_problem(bounds, objectives);
+    let theta: Vec<f64> = vec![1.0, 2.0, 1.5, 2.5, 3.0, 1.2, 2.0, 1.8];
+
+    fd_gradient_check(&problem, &theta, 1e-6, 1e-4, 1e-3);
+}
+
+/// ForceVariation absolute normalized variance — Cholesky path.
+#[test]
+fn fd_cholesky_force_variation_absolute_normalized_variance() {
+    let ne = 8;
+    let bounds = Bounds {
+        lower: vec![0.1; ne],
+        upper: vec![50.0; ne],
+    };
+
+    let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(ForceVariation {
+        weight: 1.0,
+        edge_indices: (0..ne).collect(),
+        sharpness: 20.0,
+        use_normalized_variance: true,
+        normalization_strategy: ForceVarianceNormalizationStrategy::AbsoluteSquaredMean,
+    })];
+
+    let problem = make_arch_problem(bounds, objectives);
+    let theta: Vec<f64> = vec![2.0, 3.0, 1.5, 2.5, 1.0, 3.5, 2.0, 1.8];
+
+    fd_gradient_check(&problem, &theta, 1e-6, 1e-4, 1e-3);
+}
+
+#[test]
+fn length_raw_variance_demonstrates_scale_sensitivity() {
+    let xyz = Array2::zeros((0, 3));
+    let reactions = Array2::zeros((0, 3));
+    let unit_lengths = vec![1.0, 2.0, 3.0];
+    let scaled_lengths = vec![10.0, 20.0, 30.0];
+    let forces = Vec::new();
+    let edge_indices = vec![0, 1, 2];
+
+    let normalized = LengthVariation {
+        weight: 1.0,
+        edge_indices: edge_indices.clone(),
+        sharpness: 20.0,
+        use_normalized_variance: true,
+        normalization_strategy: LengthVarianceNormalizationStrategy::SquaredMean,
+    };
+    let raw = LengthVariation {
+        weight: 1.0,
+        edge_indices,
+        sharpness: 20.0,
+        use_normalized_variance: true,
+        normalization_strategy: LengthVarianceNormalizationStrategy::None,
+    };
+
+    let unit_snap = GeometrySnapshot {
+        xyz_full: &xyz,
+        member_lengths: &unit_lengths,
+        member_forces: &forces,
+        reactions: &reactions,
+    };
+    let scaled_snap = GeometrySnapshot {
+        xyz_full: &xyz,
+        member_lengths: &scaled_lengths,
+        member_forces: &forces,
+        reactions: &reactions,
+    };
+
+    let normalized_unit = normalized.loss(&unit_snap);
+    let normalized_scaled = normalized.loss(&scaled_snap);
+    assert!((normalized_unit - normalized_scaled).abs() < 1e-12);
+
+    let raw_unit = raw.loss(&unit_snap);
+    let raw_scaled = raw.loss(&scaled_snap);
+    assert!((raw_scaled / raw_unit - 100.0).abs() < 1e-12);
+}
+
+#[test]
+fn force_absolute_normalization_handles_zero_mean_mixed_sign_forces() {
+    let xyz = Array2::zeros((0, 3));
+    let reactions = Array2::zeros((0, 3));
+    let lengths = Vec::new();
+    let forces = vec![-2.0, -1.0, 1.0, 2.0];
+    let edge_indices = vec![0, 1, 2, 3];
+
+    let squared_mean = ForceVariation {
+        weight: 1.0,
+        edge_indices: edge_indices.clone(),
+        sharpness: 20.0,
+        use_normalized_variance: true,
+        normalization_strategy: ForceVarianceNormalizationStrategy::SquaredMean,
+    };
+    let absolute_mean = ForceVariation {
+        weight: 1.0,
+        edge_indices: edge_indices.clone(),
+        sharpness: 20.0,
+        use_normalized_variance: true,
+        normalization_strategy: ForceVarianceNormalizationStrategy::AbsoluteSquaredMean,
+    };
+    let raw = ForceVariation {
+        weight: 1.0,
+        edge_indices,
+        sharpness: 20.0,
+        use_normalized_variance: true,
+        normalization_strategy: ForceVarianceNormalizationStrategy::None,
+    };
+
+    let snap = GeometrySnapshot {
+        xyz_full: &xyz,
+        member_lengths: &lengths,
+        member_forces: &forces,
+        reactions: &reactions,
+    };
+
+    let squared_mean_loss = squared_mean.loss(&snap);
+    let absolute_mean_loss = absolute_mean.loss(&snap);
+    let raw_loss = raw.loss(&snap);
+
+    assert!(squared_mean_loss.is_finite());
+    assert!((absolute_mean_loss - (2.5 / 2.25)).abs() < 1e-12);
+    assert!((raw_loss - 2.5).abs() < 1e-12);
+    assert!(absolute_mean_loss < squared_mean_loss * 1e-6);
 }
 
 /// LengthVariation — LDL path (mixed bounds).
@@ -699,6 +888,8 @@ fn fd_ldl_length_variation() {
         weight: 1.0,
         edge_indices: (0..ne).collect(),
         sharpness: 20.0,
+        use_normalized_variance: false,
+        normalization_strategy: LengthVarianceNormalizationStrategy::SquaredMean,
     })];
 
     let problem = make_arch_problem(bounds, objectives);
@@ -725,6 +916,8 @@ fn fd_ldl_force_variation() {
         weight: 1.0,
         edge_indices: (0..ne).collect(),
         sharpness: 20.0,
+        use_normalized_variance: false,
+        normalization_strategy: ForceVarianceNormalizationStrategy::SquaredMean,
     })];
 
     let problem = make_arch_problem(bounds, objectives);
@@ -765,11 +958,15 @@ fn fd_cholesky_combined_with_variation() {
             weight: 0.5,
             edge_indices: (0..ne).collect(),
             sharpness: 20.0,
+            use_normalized_variance: false,
+            normalization_strategy: LengthVarianceNormalizationStrategy::SquaredMean,
         }),
         Box::new(ForceVariation {
             weight: 0.3,
             edge_indices: vec![0, 1, 2, 3, 4, 5],
             sharpness: 15.0,
+            use_normalized_variance: false,
+            normalization_strategy: ForceVarianceNormalizationStrategy::SquaredMean,
         }),
     ];
 

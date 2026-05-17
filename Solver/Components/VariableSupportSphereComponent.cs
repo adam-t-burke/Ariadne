@@ -55,7 +55,7 @@ public class VariableSupportSphereComponent : GH_Component
         DA.SetData(0, cfg);
     }
 
-    protected override Bitmap Icon => Properties.Resources.parameters;
+    protected override Bitmap Icon => Properties.Resources.Var_Anchor;
     public override Guid ComponentGuid => new("0E6D7A11-6829-42F6-A367-64D5B09E1E01");
 }
 

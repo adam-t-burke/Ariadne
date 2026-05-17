@@ -5,9 +5,9 @@
 //! and actually reduces the objective value.
 
 use ndarray::Array2;
+use theseus::optimizer;
 use theseus::sparse::SparseColMatOwned;
 use theseus::types::*;
-use theseus::optimizer;
 
 // ─────────────────────────────────────────────────────────────
 //  Helpers (shared arch construction)
@@ -38,8 +38,14 @@ fn make_arch_problem(bounds: Bounds, objectives: Vec<Box<dyn ObjectiveTrait>>) -
     let num_edges = 8;
 
     let edges = vec![
-        (0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6),
-        (1, 5), (2, 4),
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 4),
+        (4, 5),
+        (5, 6),
+        (1, 5),
+        (2, 4),
     ];
 
     let free_idx: Vec<usize> = vec![1, 2, 3, 4, 5];
@@ -62,18 +68,13 @@ fn make_arch_problem(bounds: Bounds, objectives: Vec<Box<dyn ObjectiveTrait>>) -
     let free_node_loads = Array2::from_shape_vec(
         (5, 3),
         vec![
-            0.0, 0.0, -1.0,
-            0.0, 0.0, -1.0,
-            0.0, 0.0, -2.0,
-            0.0, 0.0, -1.0,
-            0.0, 0.0, -1.0,
+            0.0, 0.0, -1.0, 0.0, 0.0, -1.0, 0.0, 0.0, -2.0, 0.0, 0.0, -1.0, 0.0, 0.0, -1.0,
         ],
-    ).unwrap();
+    )
+    .unwrap();
 
-    let fixed_node_positions = Array2::from_shape_vec(
-        (2, 3),
-        vec![0.0, 0.0, 0.0, 6.0, 0.0, 0.0],
-    ).unwrap();
+    let fixed_node_positions =
+        Array2::from_shape_vec((2, 3), vec![0.0, 0.0, 0.0, 6.0, 0.0, 0.0]).unwrap();
 
     let anchors = AnchorInfo::all_fixed(fixed_node_positions.clone());
 
@@ -88,6 +89,8 @@ fn make_arch_problem(bounds: Bounds, objectives: Vec<Box<dyn ObjectiveTrait>>) -
             max_iterations: 200,
             ..SolverOptions::default()
         },
+        self_weight: None,
+        pressure: None,
     }
 }
 
@@ -110,21 +113,16 @@ fn optimize_target_xyz() {
     let target = Array2::from_shape_vec(
         (5, 3),
         vec![
-            1.0, 0.0, 1.0,
-            2.0, 0.0, 2.0,
-            3.0, 0.0, 2.5,
-            4.0, 0.0, 2.0,
-            5.0, 0.0, 1.0,
+            1.0, 0.0, 1.0, 2.0, 0.0, 2.0, 3.0, 0.0, 2.5, 4.0, 0.0, 2.0, 5.0, 0.0, 1.0,
         ],
-    ).unwrap();
+    )
+    .unwrap();
 
-    let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![
-        Box::new(TargetXYZ {
-            weight: 1.0,
-            node_indices: vec![1, 2, 3, 4, 5],
-            target: target.clone(),
-        }),
-    ];
+    let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(TargetXYZ {
+        weight: 1.0,
+        node_indices: vec![1, 2, 3, 4, 5],
+        target: target.clone(),
+    })];
 
     let problem = make_arch_problem(bounds, objectives);
     let mut state = OptimizationState::new(vec![1.0; ne], Array2::zeros((0, 3)));
@@ -153,7 +151,10 @@ fn optimize_target_xyz() {
 
     // All geometry should be finite
     for l in &result.member_lengths {
-        assert!(l.is_finite() && *l > 0.0, "length must be finite positive: {l}");
+        assert!(
+            l.is_finite() && *l > 0.0,
+            "length must be finite positive: {l}"
+        );
     }
     for f in &result.member_forces {
         assert!(f.is_finite(), "force must be finite: {f}");
@@ -162,7 +163,10 @@ fn optimize_target_xyz() {
         assert!(q.is_finite() && q > 0.0, "q must be finite positive: {q}");
     }
 
-    eprintln!("optimize_target_xyz: {} iterations, converged={}", result.iterations, result.converged);
+    eprintln!(
+        "optimize_target_xyz: {} iterations, converged={}",
+        result.iterations, result.converged
+    );
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -181,13 +185,10 @@ fn optimize_combined_objectives() {
     let target = Array2::from_shape_vec(
         (5, 3),
         vec![
-            1.0, 0.0, 0.8,
-            2.0, 0.0, 1.5,
-            3.0, 0.0, 2.0,
-            4.0, 0.0, 1.5,
-            5.0, 0.0, 0.8,
+            1.0, 0.0, 0.8, 2.0, 0.0, 1.5, 3.0, 0.0, 2.0, 4.0, 0.0, 1.5, 5.0, 0.0, 0.8,
         ],
-    ).unwrap();
+    )
+    .unwrap();
 
     let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![
         Box::new(TargetXYZ {
@@ -199,6 +200,8 @@ fn optimize_combined_objectives() {
             weight: 0.5,
             edge_indices: (0..ne).collect(),
             sharpness: 20.0,
+            use_normalized_variance: false,
+            normalization_strategy: LengthVarianceNormalizationStrategy::SquaredMean,
         }),
         Box::new(SumForceLength {
             weight: 0.01,
@@ -217,7 +220,10 @@ fn optimize_combined_objectives() {
         assert!(l.is_finite() && *l > 0.0);
     }
 
-    eprintln!("optimize_combined: {} iterations, converged={}", result.iterations, result.converged);
+    eprintln!(
+        "optimize_combined: {} iterations, converged={}",
+        result.iterations, result.converged
+    );
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -244,7 +250,8 @@ fn forward_solve_basic() {
         for d in 0..3 {
             assert!(
                 cache.nf[[i, d]].is_finite(),
-                "node {i} dim {d} = {} is not finite", cache.nf[[i, d]],
+                "node {i} dim {d} = {} is not finite",
+                cache.nf[[i, d]],
             );
         }
     }

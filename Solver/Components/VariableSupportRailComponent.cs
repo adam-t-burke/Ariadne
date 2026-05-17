@@ -55,7 +55,7 @@ public class VariableSupportRailComponent : GH_Component
         DA.SetData(0, cfg);
     }
 
-    protected override Bitmap Icon => Properties.Resources.parameters;
+    protected override Bitmap Icon => Properties.Resources.Var_Anchor;
     public override Guid ComponentGuid => new("E754A445-83F3-430D-A5DD-0AC8234A7503");
 }
 

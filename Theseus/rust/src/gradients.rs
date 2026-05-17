@@ -10,7 +10,9 @@
 
 use crate::objectives::{bounds_penalty_grad, softplus_grad};
 use crate::types::{
-    FdmCache, GeometrySnapshot, PressureParams, Problem, SelfWeightParams, TheseusError,
+    FdmCache, ForceVarianceNormalizationStrategy, GeometrySnapshot,
+    LengthVarianceNormalizationStrategy, PressureParams, Problem, ReactionMagnitudeBehavior,
+    ReactionMagnitudeSign, SelfWeightParams, TheseusError,
 };
 use crate::variable_supports;
 use ndarray::Array2;
@@ -702,6 +704,7 @@ pub(crate) fn grad_target_force(
 
 /// Minimum sharpness for variation gradients (must match objectives.rs guard).
 const MIN_VARIATION_SHARPNESS: f64 = 1e-10;
+const NORMALIZED_VARIANCE_EPSILON: f64 = 1e-12;
 
 /// Softmax weights: w_i = exp(β(v_i − m)) / Σ exp(β(v_j − m))
 /// Returns one weight per edge in `edge_indices`.
@@ -723,6 +726,79 @@ fn softmax_weights(values: &[f64], edge_indices: &[usize], beta: f64) -> Vec<f64
     exps.into_iter().map(|e| e / sum).collect()
 }
 
+fn normalized_variance_value_grad(values: &[f64], edge_indices: &[usize]) -> Vec<f64> {
+    let n = edge_indices.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    let n_f = n as f64;
+    let mean = edge_indices.iter().map(|&i| values[i]).sum::<f64>() / n_f;
+    let variance = edge_indices
+        .iter()
+        .map(|&i| {
+            let diff = values[i] - mean;
+            diff * diff
+        })
+        .sum::<f64>()
+        / n_f;
+    let denom = mean * mean + NORMALIZED_VARIANCE_EPSILON;
+    let denom_sq = denom * denom;
+
+    edge_indices
+        .iter()
+        .map(|&i| {
+            let centered = values[i] - mean;
+            (2.0 / n_f) * (centered * denom - variance * mean) / denom_sq
+        })
+        .collect()
+}
+
+fn raw_variance_value_grad(values: &[f64], edge_indices: &[usize]) -> Vec<f64> {
+    let n = edge_indices.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    let n_f = n as f64;
+    let mean = edge_indices.iter().map(|&i| values[i]).sum::<f64>() / n_f;
+    edge_indices
+        .iter()
+        .map(|&i| (2.0 / n_f) * (values[i] - mean))
+        .collect()
+}
+
+fn absolute_normalized_variance_value_grad(values: &[f64], edge_indices: &[usize]) -> Vec<f64> {
+    let n = edge_indices.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    let n_f = n as f64;
+    let mean = edge_indices.iter().map(|&i| values[i]).sum::<f64>() / n_f;
+    let abs_mean = edge_indices.iter().map(|&i| values[i].abs()).sum::<f64>() / n_f;
+    let variance = edge_indices
+        .iter()
+        .map(|&i| {
+            let diff = values[i] - mean;
+            diff * diff
+        })
+        .sum::<f64>()
+        / n_f;
+    let denom = abs_mean * abs_mean + NORMALIZED_VARIANCE_EPSILON;
+    let denom_sq = denom * denom;
+
+    edge_indices
+        .iter()
+        .map(|&i| {
+            let centered = values[i] - mean;
+            let d_variance = (2.0 / n_f) * centered;
+            let d_denom = (2.0 / n_f) * abs_mean * values[i].signum();
+            (d_variance * denom - variance * d_denom) / denom_sq
+        })
+        .collect()
+}
+
 /// LengthVariation:  L = w (smooth_max(ℓ) − smooth_min(ℓ))
 ///   dL/dℓ_i = w (softmax_i(β ℓ) − softmax_i(−β ℓ))
 /// Then chain through ℓ → x̂.
@@ -731,10 +807,27 @@ pub(crate) fn grad_length_variation(
     weight: f64,
     edge_indices: &[usize],
     beta: f64,
+    use_normalized_variance: bool,
+    normalization_strategy: LengthVarianceNormalizationStrategy,
 ) {
     if edge_indices.is_empty() {
         return;
     }
+    if use_normalized_variance {
+        let value_grads = match normalization_strategy {
+            LengthVarianceNormalizationStrategy::SquaredMean => {
+                normalized_variance_value_grad(&cache.member_lengths, edge_indices)
+            }
+            LengthVarianceNormalizationStrategy::None => {
+                raw_variance_value_grad(&cache.member_lengths, edge_indices)
+            }
+        };
+        for (j, &k) in edge_indices.iter().enumerate() {
+            add_length_grad_to_x(cache, k, weight * value_grads[j]);
+        }
+        return;
+    }
+
     let beta = beta.abs().max(MIN_VARIATION_SHARPNESS);
 
     // softmax for smooth_max  (positive β)
@@ -756,10 +849,30 @@ pub(crate) fn grad_force_variation(
     weight: f64,
     edge_indices: &[usize],
     beta: f64,
+    use_normalized_variance: bool,
+    normalization_strategy: ForceVarianceNormalizationStrategy,
 ) {
     if edge_indices.is_empty() {
         return;
     }
+    if use_normalized_variance {
+        let value_grads = match normalization_strategy {
+            ForceVarianceNormalizationStrategy::SquaredMean => {
+                normalized_variance_value_grad(&cache.member_forces, edge_indices)
+            }
+            ForceVarianceNormalizationStrategy::AbsoluteSquaredMean => {
+                absolute_normalized_variance_value_grad(&cache.member_forces, edge_indices)
+            }
+            ForceVarianceNormalizationStrategy::None => {
+                raw_variance_value_grad(&cache.member_forces, edge_indices)
+            }
+        };
+        for (j, &k) in edge_indices.iter().enumerate() {
+            add_force_grad(cache, k, weight * value_grads[j]);
+        }
+        return;
+    }
+
     let beta = beta.abs().max(MIN_VARIATION_SHARPNESS);
 
     let w_max = softmax_weights(&cache.member_forces, edge_indices, beta);
@@ -947,14 +1060,70 @@ pub(crate) fn grad_reaction_direction(
     }
 }
 
-/// ReactionDirectionMagnitude:  adds magnitude penalty
-pub(crate) fn grad_reaction_direction_magnitude(
+fn reaction_magnitude_scalar_and_grad(
+    r: [f64; 3],
+    target_dir: [f64; 3],
+    sign: ReactionMagnitudeSign,
+) -> Option<(f64, [f64; 3])> {
+    match sign {
+        ReactionMagnitudeSign::Unsigned => {
+            let r_norm = (r[0].powi(2) + r[1].powi(2) + r[2].powi(2)).sqrt();
+            if r_norm < f64::EPSILON {
+                return None;
+            }
+            Some((r_norm, [r[0] / r_norm, r[1] / r_norm, r[2] / r_norm]))
+        }
+        ReactionMagnitudeSign::SignedProjected => {
+            let d_norm =
+                (target_dir[0].powi(2) + target_dir[1].powi(2) + target_dir[2].powi(2)).sqrt();
+            if d_norm < f64::EPSILON {
+                return None;
+            }
+            let d_hat = [
+                target_dir[0] / d_norm,
+                target_dir[1] / d_norm,
+                target_dir[2] / d_norm,
+            ];
+            let scalar = r[0] * d_hat[0] + r[1] * d_hat[1] + r[2] * d_hat[2];
+            Some((scalar, d_hat))
+        }
+    }
+}
+
+fn reaction_magnitude_scalar_grad(
+    scalar: f64,
+    target: f64,
+    behavior: ReactionMagnitudeBehavior,
+) -> f64 {
+    match behavior {
+        ReactionMagnitudeBehavior::Target => 2.0 * (scalar - target),
+        ReactionMagnitudeBehavior::Max => {
+            if scalar > target {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        ReactionMagnitudeBehavior::Min => {
+            if scalar < target {
+                -1.0
+            } else {
+                0.0
+            }
+        }
+    }
+}
+
+/// ReactionMagnitude: configured magnitude penalty only.
+pub(crate) fn grad_reaction_magnitude(
     cache: &mut FdmCache,
     problem: &Problem,
     weight: f64,
     anchor_indices: &[usize],
     target_directions: &Array2<f64>,
     target_magnitudes: &[f64],
+    behavior: ReactionMagnitudeBehavior,
+    sign: ReactionMagnitudeSign,
 ) {
     for (row, &node) in anchor_indices.iter().enumerate() {
         let r = [
@@ -968,29 +1137,45 @@ pub(crate) fn grad_reaction_direction_magnitude(
             target_directions[[row, 2]],
         ];
 
-        let r_norm = (r[0].powi(2) + r[1].powi(2) + r[2].powi(2)).sqrt();
-        if r_norm < f64::EPSILON {
+        let Some((scalar, ds_dr)) = reaction_magnitude_scalar_and_grad(r, d_hat, sign) else {
+            continue;
+        };
+        let dl_ds = reaction_magnitude_scalar_grad(scalar, target_magnitudes[row], behavior);
+        if dl_ds == 0.0 {
             continue;
         }
 
-        let dot: f64 = (0..3).map(|d| r[d] * d_hat[d]).sum();
-        let cos = dot / r_norm;
-
-        // Direction gradient
         let mut dl_dr = [0.0f64; 3];
         for d in 0..3 {
-            dl_dr[d] = -weight * (d_hat[d] - cos * r[d] / r_norm) / r_norm;
-        }
-
-        // Magnitude gradient:  d max(‖R‖ − m, 0) / dR  =  R̂  if ‖R‖ > m
-        if r_norm > target_magnitudes[row] {
-            for d in 0..3 {
-                dl_dr[d] += weight * r[d] / r_norm;
-            }
+            dl_dr[d] = weight * dl_ds * ds_dr[d];
         }
 
         accumulate_reaction_grad(cache, problem, node, &dl_dr);
     }
+}
+
+/// ReactionDirectionMagnitude: direction term plus configured magnitude penalty.
+pub(crate) fn grad_reaction_direction_magnitude(
+    cache: &mut FdmCache,
+    problem: &Problem,
+    weight: f64,
+    anchor_indices: &[usize],
+    target_directions: &Array2<f64>,
+    target_magnitudes: &[f64],
+    behavior: ReactionMagnitudeBehavior,
+    sign: ReactionMagnitudeSign,
+) {
+    grad_reaction_direction(cache, problem, weight, anchor_indices, target_directions);
+    grad_reaction_magnitude(
+        cache,
+        problem,
+        weight,
+        anchor_indices,
+        target_directions,
+        target_magnitudes,
+        behavior,
+        sign,
+    );
 }
 
 // ─────────────────────────────────────────────────────────────
