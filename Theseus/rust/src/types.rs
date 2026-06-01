@@ -309,6 +309,26 @@ impl TryFrom<i32> for ReactionMagnitudeSign {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QParameterizationMode {
+    DirectSoftBounds,
+    ImplicitBounded,
+}
+
+impl TryFrom<i32> for QParameterizationMode {
+    type Error = TheseusError;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::DirectSoftBounds),
+            1 => Ok(Self::ImplicitBounded),
+            _ => Err(TheseusError::Shape(format!(
+                "invalid q parameterization mode: {value}"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ReactionMagnitude {
     pub weight: f64,
@@ -360,6 +380,7 @@ pub struct SolverOptions {
     pub report_frequency: usize,
     pub barrier_weight: f64,
     pub barrier_sharpness: f64,
+    pub q_parameterization_mode: QParameterizationMode,
 }
 
 impl Default for SolverOptions {
@@ -371,6 +392,7 @@ impl Default for SolverOptions {
             report_frequency: 1,
             barrier_weight: 10.0,
             barrier_sharpness: DEFAULT_BARRIER_SHARPNESS,
+            q_parameterization_mode: QParameterizationMode::DirectSoftBounds,
         }
     }
 }

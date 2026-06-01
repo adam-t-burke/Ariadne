@@ -202,6 +202,11 @@ internal static class TheseusInterop
         nuint max_iterations, double abs_tol, double rel_tol,
         double barrier_weight, double barrier_sharpness);
 
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_set_q_parameterization_mode(
+        IntPtr handle,
+        int mode);
+
     // ── Self-weight configuration ────────────────────────────
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]

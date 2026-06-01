@@ -452,6 +452,12 @@ public sealed class TheseusSolver : IDisposable
             _handle, (nuint)maxIterations, absTol, relTol, barrierWeight, barrierSharpness));
     }
 
+    public void SetQParameterizationMode(int mode)
+    {
+        ThrowIfDisposed();
+        Check(TheseusInterop.theseus_set_q_parameterization_mode(_handle, mode));
+    }
+
     // ── Progress callback ─────────────────────────────────────
 
     /// <summary>

@@ -26,6 +26,12 @@ public sealed record SolverOptions
     public int ReportFrequency { get; init; } = 10;
 }
 
+public enum QParameterizationMode
+{
+    DirectSoftBounds = 0,
+    ImplicitBounded = 1,
+}
+
 /// <summary>
 /// Bundled optimization configuration passed from the OptConfig component
 /// to the solve component. When absent, the solver runs forward-only.
@@ -50,6 +56,8 @@ public sealed record OptimizationConfig
     public double BarrierSharpness { get; init; } = 10.0;
     /// <summary>Progress callback frequency (accepted L-BFGS iterations between callbacks).</summary>
     public int ReportFrequency { get; init; } = 10;
+    /// <summary>q optimization mode: direct soft bounds (default) or implicit hard-bounded mapping.</summary>
+    public QParameterizationMode QParameterizationMode { get; init; } = QParameterizationMode.DirectSoftBounds;
     /// <summary>When true, optimization runs (e.g. from a button or toggle).</summary>
     public bool Run { get; init; } = false;
     /// <summary>When true, stream intermediate results to outputs during optimization.</summary>
@@ -319,6 +327,8 @@ public sealed record SolverInputs
     public List<double>? UpperBounds { get; init; }
     /// <summary>Objectives to minimize when optimizing.</summary>
     public List<Objective> Objectives { get; init; } = [];
+    /// <summary>q optimization parameterization mode.</summary>
+    public QParameterizationMode QParameterizationMode { get; init; } = QParameterizationMode.DirectSoftBounds;
     /// <summary>Self-weight configuration (null = no self-weight).</summary>
     public SelfWeightConfig? SelfWeight { get; init; }
     /// <summary>Pressure load configuration (null = no pressure loads).</summary>
