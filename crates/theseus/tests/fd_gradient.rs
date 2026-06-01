@@ -161,6 +161,86 @@ fn make_variable_rail_arch_problem(objectives: Vec<Box<dyn ObjectiveTrait>>) -> 
     problem
 }
 
+fn make_variable_nurbs_curve_arch_problem(objectives: Vec<Box<dyn ObjectiveTrait>>) -> Problem {
+    let mut problem = make_arch_problem(
+        Bounds {
+            lower: vec![0.1; 8],
+            upper: vec![100.0; 8],
+        },
+        objectives,
+    );
+    let reference_positions = problem.anchors.reference_positions.clone();
+    let initial_variable_positions = Array2::from_shape_vec((1, 3), vec![6.0, 0.0, 0.0]).unwrap();
+    let curve = nurbsbook::NurbsCurve::from_cartesian(
+        2,
+        vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        vec![[5.0, -1.0, 0.0], [6.0, 0.0, 0.0], [7.0, 1.0, 0.0]],
+        vec![1.0; 3],
+    )
+    .unwrap();
+    problem.anchors = AnchorInfo {
+        variable_indices: vec![6],
+        fixed_indices: vec![0, 6],
+        reference_positions,
+        initial_variable_positions,
+        variable_supports: vec![VariableSupport {
+            node_index: 6,
+            reference_position: [6.0, 0.0, 0.0],
+            kind: VariableSupportKind::NurbsCurve {
+                curve,
+                domain: [0.0, 1.0],
+                initial_t: 0.5,
+            },
+        }],
+    };
+    problem
+}
+
+fn make_variable_nurbs_surface_arch_problem(objectives: Vec<Box<dyn ObjectiveTrait>>) -> Problem {
+    let mut problem = make_arch_problem(
+        Bounds {
+            lower: vec![0.1; 8],
+            upper: vec![100.0; 8],
+        },
+        objectives,
+    );
+    let reference_positions = problem.anchors.reference_positions.clone();
+    let initial_variable_positions = Array2::from_shape_vec((1, 3), vec![6.0, 0.0, 0.0]).unwrap();
+    let surface = nurbsbook::NurbsSurface::from_cartesian(
+        1,
+        1,
+        vec![0.0, 0.0, 1.0, 1.0],
+        vec![0.0, 0.0, 1.0, 1.0],
+        2,
+        2,
+        vec![
+            [5.0, -1.0, 0.0],
+            [5.0, 1.0, 0.0],
+            [7.0, -1.0, 0.0],
+            [7.0, 1.0, 0.0],
+        ],
+        vec![1.0; 4],
+    )
+    .unwrap();
+    problem.anchors = AnchorInfo {
+        variable_indices: vec![6],
+        fixed_indices: vec![0, 6],
+        reference_positions,
+        initial_variable_positions,
+        variable_supports: vec![VariableSupport {
+            node_index: 6,
+            reference_position: [6.0, 0.0, 0.0],
+            kind: VariableSupportKind::NurbsSurface {
+                surface,
+                domain_u: [0.0, 1.0],
+                domain_v: [0.0, 1.0],
+                initial_uv: [0.5, 0.5],
+            },
+        }],
+    };
+    problem
+}
+
 // ─────────────────────────────────────────────────────────────
 //  Core FD test driver
 // ─────────────────────────────────────────────────────────────
@@ -1149,6 +1229,34 @@ fn fd_variable_rail_joint_q_anchor_combined_objectives() {
     ];
     let problem = make_variable_rail_arch_problem(objectives);
     let theta: Vec<f64> = vec![1.5, 2.0, 2.5, 3.0, 1.4, 1.7, 2.2, 1.8, 0.2];
+
+    fd_gradient_check(&problem, &theta, 1e-6, 5e-4, 5e-3);
+}
+
+#[test]
+fn fd_variable_nurbs_curve_anchor_target_objective() {
+    let target = Array2::from_shape_vec((1, 3), vec![6.25, 0.15, 0.0]).unwrap();
+    let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(TargetXYZ {
+        weight: 1.0,
+        node_indices: vec![6],
+        target,
+    })];
+    let problem = make_variable_nurbs_curve_arch_problem(objectives);
+    let theta: Vec<f64> = vec![1.5, 2.0, 2.5, 3.0, 1.4, 1.7, 2.2, 1.8, 0.2];
+
+    fd_gradient_check(&problem, &theta, 1e-6, 5e-4, 5e-3);
+}
+
+#[test]
+fn fd_variable_nurbs_surface_anchor_target_objective() {
+    let target = Array2::from_shape_vec((1, 3), vec![6.25, 0.15, 0.0]).unwrap();
+    let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(TargetXYZ {
+        weight: 1.0,
+        node_indices: vec![6],
+        target,
+    })];
+    let problem = make_variable_nurbs_surface_arch_problem(objectives);
+    let theta: Vec<f64> = vec![1.5, 2.0, 2.5, 3.0, 1.4, 1.7, 2.2, 1.8, 0.2, -0.1];
 
     fd_gradient_check(&problem, &theta, 1e-6, 5e-4, 5e-3);
 }

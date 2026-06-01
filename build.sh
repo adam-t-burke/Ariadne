@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-RUST_DIR="$SCRIPT_DIR/Theseus/rust"
+WORKSPACE_DIR="$SCRIPT_DIR"
+RUST_DIR="$SCRIPT_DIR/crates/theseus"
 OUTPUT_DIR="$SCRIPT_DIR/Theseus"
 
 CONFIGURATION="${1:-release}"
@@ -17,11 +18,11 @@ echo "Building theseus ($CONFIGURATION) universal binary..."
 
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
-cargo build $PROFILE_FLAG --target aarch64-apple-darwin --manifest-path "$RUST_DIR/Cargo.toml"
-cargo build $PROFILE_FLAG --target x86_64-apple-darwin  --manifest-path "$RUST_DIR/Cargo.toml"
+cargo build -p theseus $PROFILE_FLAG --target aarch64-apple-darwin --manifest-path "$WORKSPACE_DIR/Cargo.toml"
+cargo build -p theseus $PROFILE_FLAG --target x86_64-apple-darwin  --manifest-path "$WORKSPACE_DIR/Cargo.toml"
 
-ARM64="$RUST_DIR/target/aarch64-apple-darwin/$TARGET_SUBDIR/libtheseus.dylib"
-X86_64="$RUST_DIR/target/x86_64-apple-darwin/$TARGET_SUBDIR/libtheseus.dylib"
+ARM64="$WORKSPACE_DIR/target/aarch64-apple-darwin/$TARGET_SUBDIR/libtheseus.dylib"
+X86_64="$WORKSPACE_DIR/target/x86_64-apple-darwin/$TARGET_SUBDIR/libtheseus.dylib"
 
 lipo -create -output "$OUTPUT_DIR/libtheseus.dylib" "$ARM64" "$X86_64"
 

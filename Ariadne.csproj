@@ -48,4 +48,12 @@
     </EmbeddedResource>
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Remove="Ariadne.Tests/**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Ariadne.Tests" />
+  </ItemGroup>
+
 </Project>

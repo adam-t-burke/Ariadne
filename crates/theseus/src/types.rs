@@ -63,8 +63,18 @@ impl From<faer_sparse::FaerError> for TheseusError {
 
 impl From<argmin::core::Error> for TheseusError {
     fn from(e: argmin::core::Error) -> Self {
-        Self::Solver(e.to_string())
+        let msg = e.to_string();
+        if msg == Self::Cancelled.to_string() {
+            Self::Cancelled
+        } else {
+            Self::Solver(msg)
+        }
     }
+}
+
+/// Resize a faer workspace buffer to satisfy the required stack size.
+fn ensure_pod_stack(stack: &mut dyn_stack::GlobalPodBuffer, req: dyn_stack::StackReq) {
+    *stack = dyn_stack::GlobalPodBuffer::new(req);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -92,10 +102,15 @@ pub trait ObjectiveTrait: Debug + Send + Sync {
 
     /// Weight of this objective (used for display/debugging).
     fn weight(&self) -> f64;
+
+    /// Validate static configuration (e.g. degenerate constraint geometry).
+    fn validate(&self) -> Result<(), TheseusError> {
+        Ok(())
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
-//  Built-in objective structs  (13 types from the Julia code)
+//  Built-in objective structs
 // ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -313,6 +328,7 @@ impl TryFrom<i32> for ReactionMagnitudeSign {
 pub enum QParameterizationMode {
     DirectSoftBounds,
     ImplicitBounded,
+    DirectBoxBounds,
 }
 
 impl TryFrom<i32> for QParameterizationMode {
@@ -322,6 +338,7 @@ impl TryFrom<i32> for QParameterizationMode {
         match value {
             0 => Ok(Self::DirectSoftBounds),
             1 => Ok(Self::ImplicitBounded),
+            2 => Ok(Self::DirectBoxBounds),
             _ => Err(TheseusError::Shape(format!(
                 "invalid q parameterization mode: {value}"
             ))),
@@ -381,6 +398,7 @@ pub struct SolverOptions {
     pub barrier_weight: f64,
     pub barrier_sharpness: f64,
     pub q_parameterization_mode: QParameterizationMode,
+    pub anchor_saturation_lambda: f64,
 }
 
 impl Default for SolverOptions {
@@ -393,6 +411,7 @@ impl Default for SolverOptions {
             barrier_weight: 10.0,
             barrier_sharpness: DEFAULT_BARRIER_SHARPNESS,
             q_parameterization_mode: QParameterizationMode::DirectSoftBounds,
+            anchor_saturation_lambda: 1.0,
         }
     }
 }
@@ -450,6 +469,19 @@ pub enum VariableSupportKind {
     },
     /// Hard line-segment support: x = start + t(end-start), t in (0,1).
     Rail { start: [f64; 3], end: [f64; 3] },
+    /// NURBS curve support: x = C(t), t in domain.
+    NurbsCurve {
+        curve: nurbsbook::NurbsCurve,
+        domain: [f64; 2],
+        initial_t: f64,
+    },
+    /// NURBS surface support: x = S(u, v), u/v in domains.
+    NurbsSurface {
+        surface: nurbsbook::NurbsSurface,
+        domain_u: [f64; 2],
+        domain_v: [f64; 2],
+        initial_uv: [f64; 2],
+    },
 }
 
 impl VariableSupportKind {
@@ -458,6 +490,8 @@ impl VariableSupportKind {
             Self::Sphere { .. } => 3,
             Self::Roller { enabled, .. } => enabled.iter().filter(|&&b| b).count(),
             Self::Rail { .. } => 1,
+            Self::NurbsCurve { .. } => 1,
+            Self::NurbsSurface { .. } => 2,
         }
     }
 }
@@ -697,10 +731,17 @@ impl std::fmt::Debug for Factorization {
 }
 
 impl Factorization {
+    fn symbolic(&self) -> &faer_sparse::cholesky::SymbolicCholesky<u32> {
+        match self {
+            Self::Cholesky { symbolic, .. } | Self::Ldl { symbolic, .. } => symbolic,
+        }
+    }
+
     /// Create an initial factorization from A and the chosen strategy.
     pub fn new(
         a: &SparseColMatOwned,
         strategy: FactorizationStrategy,
+        stack: &mut dyn_stack::GlobalPodBuffer,
     ) -> Result<Self, TheseusError> {
         use dyn_stack::PodStack;
         use faer_core::{Parallelism, Side};
@@ -717,49 +758,55 @@ impl Factorization {
         )
         .map_err(TheseusError::from)?;
 
-        let _n = a.nrows;
         let len_values = symbolic.len_values();
         let mut l_values = vec![0.0; len_values];
 
         match strategy {
             FactorizationStrategy::Cholesky => {
-                let mut stack = dyn_stack::GlobalPodBuffer::new(
-                    symbolic
-                        .factorize_numeric_llt_req::<f64>(Parallelism::Rayon(0))
-                        .unwrap(),
-                );
-                let _llt = symbolic.factorize_numeric_llt(
+                let req = symbolic
+                    .factorize_numeric_llt_req::<f64>(Parallelism::Rayon(0))
+                    .unwrap();
+                ensure_pod_stack(stack, req);
+                symbolic.factorize_numeric_llt(
                     l_values.as_mut_slice(),
                     a_ref,
                     Side::Upper,
                     LltRegularization::default(),
                     Parallelism::Rayon(0),
-                    PodStack::new(&mut stack),
+                    PodStack::new(stack),
                 )?;
-                // For Cholesky we don't need to validate D - LLT fails if not SPD
                 Ok(Self::Cholesky { symbolic, l_values })
             }
             FactorizationStrategy::LDL => {
-                let mut stack = dyn_stack::GlobalPodBuffer::new(
-                    symbolic
-                        .factorize_numeric_ldlt_req::<f64>(false, Parallelism::Rayon(0))
-                        .unwrap(),
-                );
+                let req = symbolic
+                    .factorize_numeric_ldlt_req::<f64>(false, Parallelism::Rayon(0))
+                    .unwrap();
+                ensure_pod_stack(stack, req);
                 symbolic.factorize_numeric_ldlt(
                     l_values.as_mut_slice(),
                     a_ref,
                     Side::Upper,
                     LdltRegularization::default(),
                     Parallelism::Rayon(0),
-                    PodStack::new(&mut stack),
+                    PodStack::new(stack),
                 );
+                if l_values.iter().any(|v| !v.is_finite()) {
+                    return Err(TheseusError::Linalg(
+                        "LDL factorization produced non-finite values (singular or ill-conditioned matrix)"
+                            .into(),
+                    ));
+                }
                 Ok(Self::Ldl { symbolic, l_values })
             }
         }
     }
 
     /// Re-factor with updated numeric values (same sparsity pattern).
-    pub fn update(&mut self, a: &SparseColMatOwned) -> Result<(), TheseusError> {
+    pub fn update(
+        &mut self,
+        a: &SparseColMatOwned,
+        stack: &mut dyn_stack::GlobalPodBuffer,
+    ) -> Result<(), TheseusError> {
         use dyn_stack::PodStack;
         use faer_core::{Parallelism, Side};
         use faer_sparse::cholesky::{LdltRegularization, LltRegularization};
@@ -768,84 +815,115 @@ impl Factorization {
 
         match self {
             Self::Cholesky { symbolic, l_values } => {
-                let mut stack = dyn_stack::GlobalPodBuffer::new(
-                    symbolic
-                        .factorize_numeric_llt_req::<f64>(Parallelism::Rayon(0))
-                        .unwrap(),
-                );
+                let req = symbolic
+                    .factorize_numeric_llt_req::<f64>(Parallelism::Rayon(0))
+                    .unwrap();
+                ensure_pod_stack(stack, req);
                 symbolic.factorize_numeric_llt(
                     l_values.as_mut_slice(),
                     a_ref,
                     Side::Upper,
                     LltRegularization::default(),
                     Parallelism::Rayon(0),
-                    PodStack::new(&mut stack),
+                    PodStack::new(stack),
                 )?;
                 Ok(())
             }
             Self::Ldl { symbolic, l_values } => {
-                let mut stack = dyn_stack::GlobalPodBuffer::new(
-                    symbolic
-                        .factorize_numeric_ldlt_req::<f64>(false, Parallelism::Rayon(0))
-                        .unwrap(),
-                );
+                let req = symbolic
+                    .factorize_numeric_ldlt_req::<f64>(false, Parallelism::Rayon(0))
+                    .unwrap();
+                ensure_pod_stack(stack, req);
                 symbolic.factorize_numeric_ldlt(
                     l_values.as_mut_slice(),
                     a_ref,
                     Side::Upper,
                     LdltRegularization::default(),
                     Parallelism::Rayon(0),
-                    PodStack::new(&mut stack),
+                    PodStack::new(stack),
                 );
+                if l_values.iter().any(|v| !v.is_finite()) {
+                    return Err(TheseusError::Linalg(
+                        "LDL refactorization produced non-finite values (singular or ill-conditioned matrix)"
+                            .into(),
+                    ));
+                }
                 Ok(())
             }
         }
     }
 
-    /// Solve A x = rhs for a single RHS column.
-    pub fn solve(&self, rhs: &[f64]) -> Vec<f64> {
-        self.solve_batch(rhs, 1).into_iter().next().unwrap()
-    }
-
-    /// Solve A X = B for multiple RHS columns. Returns one vec per column.
-    pub fn solve_batch(&self, rhs: &[f64], ncols: usize) -> Vec<Vec<f64>> {
+    /// Solve A X = B in place. `rhs` and `x` are (n × ncols) row-major ndarray arrays.
+    pub fn solve_into(
+        &self,
+        rhs: &Array2<f64>,
+        x: &mut Array2<f64>,
+        workspace: &mut [f64],
+        stack: &mut dyn_stack::GlobalPodBuffer,
+    ) -> Result<(), TheseusError> {
         use dyn_stack::PodStack;
         use faer_core::{Conj, Mat, Parallelism};
         use faer_sparse::cholesky::{LdltRef, LltRef};
 
-        let n = rhs.len() / ncols;
-        assert_eq!(rhs.len(), n * ncols);
+        let n = rhs.nrows();
+        let ncols = rhs.ncols();
+        assert_eq!(x.nrows(), n);
+        assert_eq!(x.ncols(), ncols);
+        assert!(workspace.len() >= n * ncols);
 
-        let mut x = Mat::from_fn(n, ncols, |i, j| rhs[i + j * n]);
-        let mut stack = dyn_stack::GlobalPodBuffer::new(match self {
-            Self::Cholesky { symbolic, .. } => symbolic.solve_in_place_req::<f64>(ncols).unwrap(),
-            Self::Ldl { symbolic, .. } => symbolic.solve_in_place_req::<f64>(ncols).unwrap(),
-        });
+        // Pack row-major ndarray RHS into column-major faer layout.
+        for j in 0..ncols {
+            for i in 0..n {
+                workspace[i + j * n] = rhs[[i, j]];
+            }
+        }
+
+        let mut mat = Mat::from_fn(n, ncols, |i, j| workspace[i + j * n]);
+        let req = self.symbolic().solve_in_place_req::<f64>(ncols).unwrap();
+        ensure_pod_stack(stack, req);
 
         match self {
             Self::Cholesky { symbolic, l_values } => {
                 let llt = LltRef::new(symbolic, l_values.as_slice());
                 llt.solve_in_place_with_conj(
                     Conj::No,
-                    x.as_mut(),
+                    mat.as_mut(),
                     Parallelism::Rayon(0),
-                    PodStack::new(&mut stack),
+                    PodStack::new(stack),
                 );
             }
             Self::Ldl { symbolic, l_values } => {
                 let ldlt = LdltRef::new(symbolic, l_values.as_slice());
                 ldlt.solve_in_place_with_conj(
                     Conj::No,
-                    x.as_mut(),
+                    mat.as_mut(),
                     Parallelism::Rayon(0),
-                    PodStack::new(&mut stack),
+                    PodStack::new(stack),
                 );
             }
         }
 
-        (0..ncols)
-            .map(|j| (0..n).map(|i| x.read(i, j)).collect())
-            .collect()
+        for j in 0..ncols {
+            for i in 0..n {
+                x[[i, j]] = mat.read(i, j);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Solve A x = rhs for a single RHS column.
+    pub fn solve(
+        &self,
+        rhs: &[f64],
+        workspace: &mut [f64],
+        stack: &mut dyn_stack::GlobalPodBuffer,
+    ) -> Result<Vec<f64>, TheseusError> {
+        let n = rhs.len();
+        let rhs_arr = Array2::from_shape_fn((n, 1), |(i, _)| rhs[i]);
+        let mut x = Array2::zeros((n, 1));
+        self.solve_into(&rhs_arr, &mut x, workspace, stack)?;
+        Ok((0..n).map(|i| x[[i, 0]]).collect())
     }
 
     /// The strategy this factorization was built with.
@@ -863,7 +941,6 @@ impl Factorization {
 
 /// All mutable workspace for the forward solve, adjoint, and gradient
 /// accumulation.  Built once from a [`Problem`], reused across iterations.
-#[derive(Debug)]
 pub struct FdmCache {
     // ── Sparse system ──────────────────────────────────────
     /// System matrix A = Cn^T diag(q) Cn  (CSC, nn_free × nn_free).
@@ -881,9 +958,13 @@ pub struct FdmCache {
     pub edge_ends: Vec<usize>,
     /// Global-node → free-index mapping  (`None` if fixed)
     pub node_to_free_idx: Vec<Option<usize>>,
+    /// Per-node lists of incident edge indices (for reaction gradients).
+    pub node_incident_edges: Vec<Vec<usize>>,
 
     /// Cn  (ne × nn_free)  and  Cf  (ne × nn_fixed)  stored as CSC
     pub cn: SparseColMatOwned,
+    /// Precomputed Cn^T  (nn_free × ne) — topology is fixed.
+    pub cn_t: SparseColMatOwned,
     pub cf: SparseColMatOwned,
 
     // ── Primal buffers ─────────────────────────────────────
@@ -927,6 +1008,17 @@ pub struct FdmCache {
     pub sw_mu: Vec<f64>,
     /// Per-edge cross-section area (populated in sizing mode, zero otherwise).
     pub cross_section_areas: Vec<f64>,
+    /// Previous load vector for self-weight/pressure convergence checks.
+    pub pn_prev: Array2<f64>,
+    /// Scratch for softmax weight computation in variation objectives.
+    pub softmax_scratch: Vec<f64>,
+    pub softmax_scratch_b: Vec<f64>,
+    /// Column-major buffer for faer triangular solves (nn_free × 3).
+    pub solve_workspace: Vec<f64>,
+    /// Reused faer stack for factorization numeric updates.
+    pub factor_stack: dyn_stack::GlobalPodBuffer,
+    /// Reused faer stack for triangular solves.
+    pub solve_stack: dyn_stack::GlobalPodBuffer,
 }
 
 impl FdmCache {
@@ -1000,12 +1092,20 @@ impl FdmCache {
             node_to_free_idx[node] = Some(i);
         }
 
+        // ── 4b. node → incident edges (for reaction gradients) ──
+        let mut node_incident_edges = vec![Vec::new(); nn];
+        for k in 0..ne {
+            node_incident_edges[edge_starts[k]].push(k);
+            node_incident_edges[edge_ends[k]].push(k);
+        }
+
         // ── 5. Factorization strategy ─────────────────────
         let strategy = FactorizationStrategy::from_bounds(&problem.bounds);
 
         // ── 6. Pre-allocate all buffers ───────────────────
         let cf = topo.fixed_incidence.clone();
         let cn_owned = topo.free_incidence.clone();
+        let cn_t = cn_owned.transpose();
 
         let sw_mu = match &problem.self_weight {
             Some(SelfWeightParams::Prescribed {
@@ -1023,7 +1123,9 @@ impl FdmCache {
             edge_starts,
             edge_ends,
             node_to_free_idx,
+            node_incident_edges,
             cn: cn_owned,
+            cn_t,
             cf,
             x: Array2::zeros((nn_free, 3)),
             lambda: Array2::zeros((nn_free, 3)),
@@ -1044,6 +1146,12 @@ impl FdmCache {
             pn_base: problem.free_node_loads.clone(),
             sw_mu,
             cross_section_areas: vec![0.0; ne],
+            pn_prev: Array2::zeros((nn_free, 3)),
+            softmax_scratch: Vec::new(),
+            softmax_scratch_b: Vec::new(),
+            solve_workspace: vec![0.0; nn_free * 3],
+            factor_stack: dyn_stack::GlobalPodBuffer::new(dyn_stack::StackReq::empty()),
+            solve_stack: dyn_stack::GlobalPodBuffer::new(dyn_stack::StackReq::empty()),
         })
     }
 }

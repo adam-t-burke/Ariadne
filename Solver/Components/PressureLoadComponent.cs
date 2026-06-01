@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using Ariadne.FDM;
+using Ariadne.Graphs;
 using Grasshopper.Kernel;
 using Grasshopper.Kernel.Data;
 using Grasshopper.Kernel.Types;
@@ -21,6 +23,8 @@ public class PressureLoadComponent : GH_Component
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)
     {
+        pManager.AddGenericParameter("Network", "Network",
+            "FDM Network for vertex index validation (optional)", GH_ParamAccess.item);
         pManager.AddIntegerParameter("Face Vertices", "FV",
             "Ordered vertex indices per face (tree: one branch per face)", GH_ParamAccess.tree);
         pManager.AddNumberParameter("Pressure", "p",
@@ -28,6 +32,7 @@ public class PressureLoadComponent : GH_Component
         pManager.AddIntegerParameter("Max Iterations", "MaxIter", "Maximum pressure iterations", GH_ParamAccess.item, 50);
         pManager.AddNumberParameter("Tolerance", "Tol", "Convergence tolerance", GH_ParamAccess.item, 1e-6);
         pManager.AddNumberParameter("Relaxation", "α", "Relaxation factor", GH_ParamAccess.item, 1.0);
+        pManager[0].Optional = true;
     }
 
     protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -37,18 +42,22 @@ public class PressureLoadComponent : GH_Component
 
     protected override void SolveInstance(IGH_DataAccess DA)
     {
+        object? networkObj = null;
+        DA.GetData(0, ref networkObj);
+        Graph? graph = ResolveGraph(networkObj);
+
         GH_Structure<GH_Integer> faceTree = new();
-        if (!DA.GetDataTree(0, out faceTree)) return;
+        if (!DA.GetDataTree(1, out faceTree)) return;
 
         List<double> pressures = [];
         int maxIter = 50;
         double tol = 1e-6;
         double relax = 1.0;
 
-        DA.GetDataList(1, pressures);
-        DA.GetData(2, ref maxIter);
-        DA.GetData(3, ref tol);
-        DA.GetData(4, ref relax);
+        DA.GetDataList(2, pressures);
+        DA.GetData(3, ref maxIter);
+        DA.GetData(4, ref tol);
+        DA.GetData(5, ref relax);
 
         if (faceTree.PathCount == 0)
         {
@@ -71,6 +80,17 @@ public class PressureLoadComponent : GH_Component
                 if (item is GH_Integer ghInt)
                     face.Add(ghInt.Value);
             }
+
+            if (graph != null)
+            {
+                var error = FaceGeometry.ValidateFaceIndices(face, b, graph.Nn);
+                if (error != null)
+                {
+                    AddRuntimeMessage(GH_RuntimeMessageLevel.Error, error);
+                    return;
+                }
+            }
+
             if (face.Count < 3)
             {
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
@@ -95,6 +115,22 @@ public class PressureLoadComponent : GH_Component
         };
 
         DA.SetData(0, config);
+    }
+
+    private static Graph? ResolveGraph(object? graphObj)
+    {
+        if (graphObj is Graph g)
+            return g;
+        if (graphObj is FDM_Network net)
+            return net.Graph;
+        if (graphObj is GH_ObjectWrapper wrapper)
+        {
+            if (wrapper.Value is Graph wg)
+                return wg;
+            if (wrapper.Value is FDM_Network wn)
+                return wn.Graph;
+        }
+        return null;
     }
 
     protected override Bitmap Icon => null!;

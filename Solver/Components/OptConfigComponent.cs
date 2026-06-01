@@ -42,6 +42,7 @@ public class OptConfigComponent : GH_Component
         pManager.AddIntegerParameter("Report Frequency", "ReportFreq", "Invoke progress callback every N accepted L-BFGS iterations (0 = every iteration)", GH_ParamAccess.item, 10);
         pManager.AddBooleanParameter("Run", "Run", "Toggle true for open-loop optimization; use a button for single-trigger", GH_ParamAccess.item, false);
         pManager.AddBooleanParameter("Stream Preview", "Stream", "Stream intermediate results to outputs during optimization (false = only output final result)", GH_ParamAccess.item, true);
+        pManager.AddNumberParameter("Anchor Lambda", "AnchorLam", "Dimensionless optimizer scale for variable support anchor maps", GH_ParamAccess.item, 1.0);
         pManager[1].Optional = true;
     }
 
@@ -64,6 +65,7 @@ public class OptConfigComponent : GH_Component
         int reportFreq = 10;
         bool run = false;
         bool streamPreview = true;
+        double anchorLambda = 1.0;
 
         // Flatten objectives tree so we always get one list — avoids multiple concurrent solves when branches are not flattened
         var objTree = new GH_Structure<IGH_Goo>();
@@ -103,6 +105,7 @@ public class OptConfigComponent : GH_Component
         DA.GetData(9, ref reportFreq);
         DA.GetData(10, ref run);
         DA.GetData(11, ref streamPreview);
+        DA.GetData(12, ref anchorLambda);
 
         if (objectives.Count == 0)
         {
@@ -133,6 +136,7 @@ public class OptConfigComponent : GH_Component
             BarrierWeight = barrierWeight,
             BarrierSharpness = barrierSharpness,
             ReportFrequency = reportFreq,
+            AnchorSaturationLambda = anchorLambda,
             QParameterizationMode = _qParameterizationMode,
             Run = run,
             StreamPreview = streamPreview,
@@ -158,6 +162,12 @@ public class OptConfigComponent : GH_Component
             (_, _) => SetQParameterizationMode(QParameterizationMode.ImplicitBounded),
             true,
             _qParameterizationMode == QParameterizationMode.ImplicitBounded);
+        Menu_AppendItem(
+            menu,
+            "q Mode: Direct Box Bounds",
+            (_, _) => SetQParameterizationMode(QParameterizationMode.DirectBoxBounds),
+            true,
+            _qParameterizationMode == QParameterizationMode.DirectBoxBounds);
     }
 
     private void SetQParameterizationMode(QParameterizationMode mode)
@@ -177,6 +187,7 @@ public class OptConfigComponent : GH_Component
         {
             QParameterizationMode.DirectSoftBounds => "q: SoftBounds",
             QParameterizationMode.ImplicitBounded => "q: ImplicitBounds",
+            QParameterizationMode.DirectBoxBounds => "q: BoxBounds",
             _ => "q: SoftBounds",
         };
     }

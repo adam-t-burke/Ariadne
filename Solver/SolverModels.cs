@@ -5,12 +5,13 @@ using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using Ariadne.FDM;
 using Ariadne.Graphs;
+using Ariadne.Utilities;
 using Rhino.Geometry;
 
 /// <summary>
-/// Solver configuration options.
+/// Shared L-BFGS tuning parameters used by solver service and optimization config.
 /// </summary>
-public sealed record SolverOptions
+public record class SolverTuningOptions
 {
     /// <summary>Maximum optimization iterations.</summary>
     public int MaxIterations { get; init; } = 500;
@@ -24,19 +25,33 @@ public sealed record SolverOptions
     public double BarrierSharpness { get; init; } = 10.0;
     /// <summary>Invoke progress callback every N accepted L-BFGS iterations (0 = every iteration).</summary>
     public int ReportFrequency { get; init; } = 10;
+    /// <summary>Dimensionless scale for optimizer coordinates used by variable support anchor maps.</summary>
+    public double AnchorSaturationLambda { get; init; } = 1.0;
+}
+
+/// <summary>
+/// Solver configuration options passed to <see cref="TheseusSolverService"/>.
+/// </summary>
+public sealed record SolverOptions : SolverTuningOptions
+{
+    /// <summary>
+    /// When false, progress callbacks receive cancellation checks only (no xyz/q marshaling).
+    /// </summary>
+    public bool CopyProgressState { get; init; } = true;
 }
 
 public enum QParameterizationMode
 {
     DirectSoftBounds = 0,
     ImplicitBounded = 1,
+    DirectBoxBounds = 2,
 }
 
 /// <summary>
 /// Bundled optimization configuration passed from the OptConfig component
 /// to the solve component. When absent, the solver runs forward-only.
 /// </summary>
-public sealed record OptimizationConfig
+public sealed record OptimizationConfig : SolverTuningOptions
 {
     /// <summary>Objective functions to minimize (e.g. target length, force variation).</summary>
     public required IReadOnlyList<Objective> Objectives { get; init; }
@@ -44,19 +59,7 @@ public sealed record OptimizationConfig
     public IReadOnlyList<double> LowerBounds { get; init; } = [0.1];
     /// <summary>Upper bounds on force densities per edge.</summary>
     public IReadOnlyList<double> UpperBounds { get; init; } = [100.0];
-    /// <summary>Maximum optimization iterations.</summary>
-    public int MaxIterations { get; init; } = 500;
-    /// <summary>Absolute convergence tolerance.</summary>
-    public double AbsTol { get; init; } = 1e-6;
-    /// <summary>Relative convergence tolerance.</summary>
-    public double RelTol { get; init; } = 1e-6;
-    /// <summary>Barrier function weight.</summary>
-    public double BarrierWeight { get; init; } = 10.0;
-    /// <summary>Barrier function sharpness.</summary>
-    public double BarrierSharpness { get; init; } = 10.0;
-    /// <summary>Progress callback frequency (accepted L-BFGS iterations between callbacks).</summary>
-    public int ReportFrequency { get; init; } = 10;
-    /// <summary>q optimization mode: direct soft bounds (default) or implicit hard-bounded mapping.</summary>
+    /// <summary>q optimization mode: direct soft bounds (default), implicit hard-bounded mapping, or direct box bounds.</summary>
     public QParameterizationMode QParameterizationMode { get; init; } = QParameterizationMode.DirectSoftBounds;
     /// <summary>When true, optimization runs (e.g. from a button or toggle).</summary>
     public bool Run { get; init; } = false;
@@ -64,6 +67,19 @@ public sealed record OptimizationConfig
     public bool StreamPreview { get; init; } = true;
     /// <summary>Variable support definitions (optional).</summary>
     public IReadOnlyList<VariableSupportConfig> VariableSupports { get; init; } = [];
+
+    /// <summary>Maps optimization UI config to solver service options.</summary>
+    public SolverOptions ToSolverOptions() => new()
+    {
+        MaxIterations = MaxIterations,
+        AbsTol = AbsTol,
+        RelTol = RelTol,
+        BarrierWeight = BarrierWeight,
+        BarrierSharpness = BarrierSharpness,
+        ReportFrequency = ReportFrequency,
+        AnchorSaturationLambda = AnchorSaturationLambda,
+        CopyProgressState = StreamPreview,
+    };
 }
 
 /// <summary>
@@ -149,6 +165,47 @@ public sealed record RailVariableSupport : VariableSupportConfig
         h.Add(Rail.ToX);
         h.Add(Rail.ToY);
         h.Add(Rail.ToZ);
+        return h.ToHashCode();
+    }
+}
+
+/// <summary>
+/// Variable support constrained to an input NURBS curve.
+/// </summary>
+public sealed record CurveVariableSupport : VariableSupportConfig
+{
+    public required Curve Curve { get; init; }
+    public Interval? Domain { get; init; }
+
+    public override int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(base.GetContentHashCode());
+        h.Add(Domain?.T0 ?? double.NaN);
+        h.Add(Domain?.T1 ?? double.NaN);
+        NurbsSerialization.AddToHash(h, NurbsSerialization.FromCurve(Curve));
+        return h.ToHashCode();
+    }
+}
+
+/// <summary>
+/// Variable support constrained to an input NURBS surface.
+/// </summary>
+public sealed record SurfaceVariableSupport : VariableSupportConfig
+{
+    public required Surface Surface { get; init; }
+    public Interval? DomainU { get; init; }
+    public Interval? DomainV { get; init; }
+
+    public override int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(base.GetContentHashCode());
+        h.Add(DomainU?.T0 ?? double.NaN);
+        h.Add(DomainU?.T1 ?? double.NaN);
+        h.Add(DomainV?.T0 ?? double.NaN);
+        h.Add(DomainV?.T1 ?? double.NaN);
+        NurbsSerialization.AddToHash(h, NurbsSerialization.FromSurface(Surface));
         return h.ToHashCode();
     }
 }
@@ -352,6 +409,10 @@ public sealed record SolveResult
     public required double[] MemberLengths { get; init; }
     /// <summary>Reaction forces at fixed nodes.</summary>
     public required double[] Reactions { get; init; }
+    /// <summary>Loss values recorded during optimization (empty for forward-only solves).</summary>
+    public double[] LossTrace { get; init; } = [];
+    /// <summary>Final recorded optimization loss, or NaN when unavailable.</summary>
+    public double FinalLoss => LossTrace.Length > 0 ? LossTrace[^1] : double.NaN;
     /// <summary>Number of solver iterations (0 for forward-only).</summary>
     public required int Iterations { get; init; }
     /// <summary>True if the optimizer converged (or N/A for forward-only).</summary>
@@ -394,4 +455,7 @@ internal sealed record SolverData(
     double[] RollerLower,
     double[] RollerUpper,
     double[] RailStart,
-    double[] RailEnd);
+    double[] RailEnd,
+    int[] NurbsOffsets,
+    int[] NurbsLengths,
+    double[] NurbsData);

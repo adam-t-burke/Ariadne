@@ -1,8 +1,9 @@
 //! Forward FDM solver: assemble A(q), build RHS, factorise, triangular solve.
-//!
-//! Mirrors `src/FDM.jl` from the Julia code.
 
-use crate::types::{FdmCache, Factorization, FactorizationStrategy, Problem, SelfWeightParams, PressureParams, TheseusError};
+use crate::types::{
+    Factorization, FactorizationStrategy, FdmCache, PressureParams, Problem, SelfWeightParams,
+    TheseusError,
+};
 use ndarray::Array2;
 use rayon::prelude::*;
 
@@ -12,7 +13,11 @@ use rayon::prelude::*;
 
 /// Write current fixed-node positions into `cache.nf`, overlaying reference
 /// positions and (optionally) variable anchor positions.
-pub fn update_fixed_positions(cache: &mut FdmCache, problem: &Problem, anchor_positions: &Array2<f64>) {
+pub fn update_fixed_positions(
+    cache: &mut FdmCache,
+    problem: &Problem,
+    anchor_positions: &Array2<f64>,
+) {
     let fixed = &problem.topology.fixed_node_indices;
     let nn_fixed = fixed.len();
 
@@ -93,8 +98,7 @@ pub fn assemble_rhs(cache: &mut FdmCache, problem: &Problem) {
 
     // 4. rhs = Pn − Cn^T * q_cf_nf
     cache.rhs.assign(&cache.pn);
-    let cn_t = cache.cn.transpose();
-    spmm_sub_into(&cn_t, &cache.q_cf_nf, &mut cache.rhs);
+    spmm_sub_into(&cache.cn_t, &cache.q_cf_nf, &mut cache.rhs);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -121,7 +125,7 @@ pub fn factor_and_solve(cache: &mut FdmCache, perturbation: f64) -> Result<(), T
 
     match &mut cache.factorization {
         Some(fac) => {
-            if let Err(_e) = fac.update(&cache.a_matrix) {
+            if let Err(_e) = fac.update(&cache.a_matrix, &mut cache.factor_stack) {
                 if fac.strategy() == FactorizationStrategy::Cholesky {
                     need_ldl_fallback = true;
                 } else {
@@ -130,7 +134,7 @@ pub fn factor_and_solve(cache: &mut FdmCache, perturbation: f64) -> Result<(), T
             }
         }
         None => {
-            match Factorization::new(&cache.a_matrix, cache.strategy) {
+            match Factorization::new(&cache.a_matrix, cache.strategy, &mut cache.factor_stack) {
                 Ok(fac) => {
                     cache.factorization = Some(fac);
                 }
@@ -145,29 +149,32 @@ pub fn factor_and_solve(cache: &mut FdmCache, perturbation: f64) -> Result<(), T
     if need_ldl_fallback {
         cache.strategy = FactorizationStrategy::LDL;
         cache.factorization = None;
-        cache.factorization = Some(Factorization::new(&cache.a_matrix, FactorizationStrategy::LDL)?);
+        cache.factorization = Some(Factorization::new(
+            &cache.a_matrix,
+            FactorizationStrategy::LDL,
+            &mut cache.factor_stack,
+        )?);
     }
 
-    // Batch solve for all 3 coordinate columns
+    let fac = cache
+        .factorization
+        .as_ref()
+        .ok_or(TheseusError::MissingFactorization)?;
+    fac.solve_into(
+        &cache.rhs,
+        &mut cache.x,
+        &mut cache.solve_workspace,
+        &mut cache.solve_stack,
+    )?;
     let n = cache.a_matrix.nrows;
-    let mut rhs_flat = Vec::with_capacity(n * 3);
     for d in 0..3 {
         for i in 0..n {
-            rhs_flat.push(cache.rhs[[i, d]]);
-        }
-    }
-    let fac = cache.factorization.as_ref()
-        .ok_or(TheseusError::MissingFactorization)?;
-    let solutions = fac.solve_batch(&rhs_flat, 3);
-    for (d, x) in solutions.into_iter().enumerate() {
-        for i in 0..n {
-            cache.x[[i, d]] = x[i];
-        }
-        if x.iter().any(|v| !v.is_finite()) {
-            return Err(TheseusError::Solver(
-                "FDM linear solve produced non-finite solution (singular or ill-conditioned equilibrium matrix). \
-                 Check network connectivity, supports, and initial force densities.".into(),
-            ));
+            if !cache.x[[i, d]].is_finite() {
+                return Err(TheseusError::Solver(
+                    "FDM linear solve produced non-finite solution (singular or ill-conditioned equilibrium matrix). \
+                     Check network connectivity, supports, and initial force densities.".into(),
+                ));
+            }
         }
     }
 
@@ -243,7 +250,10 @@ pub fn compute_geometry(cache: &mut FdmCache, problem: &Problem) {
     let edge_ends = &cache.edge_ends;
     let q = &cache.q;
 
-    cache.member_lengths.par_iter_mut().zip(cache.member_forces.par_iter_mut())
+    cache
+        .member_lengths
+        .par_iter_mut()
+        .zip(cache.member_forces.par_iter_mut())
         .enumerate()
         .for_each(|(i, (len_out, force_out))| {
             let s = edge_starts[i];
@@ -261,7 +271,8 @@ pub fn compute_geometry(cache: &mut FdmCache, problem: &Problem) {
 
     // Reactions: fold/reduce per-thread buffers to avoid write conflicts
     let nn = cache.reactions.nrows();
-    let reaction_sum = (0..ne).into_par_iter()
+    let reaction_sum = (0..ne)
+        .into_par_iter()
         .fold(
             || vec![0.0f64; nn * 3],
             |mut buf, i| {
@@ -273,11 +284,11 @@ pub fn compute_geometry(cache: &mut FdmCache, problem: &Problem) {
                 let ry = (nf[[e, 1]] - nf[[s, 1]]) * qi;
                 let rz = (nf[[e, 2]] - nf[[s, 2]]) * qi;
 
-                buf[s * 3]     += rx;
+                buf[s * 3] += rx;
                 buf[s * 3 + 1] += ry;
                 buf[s * 3 + 2] += rz;
 
-                buf[e * 3]     -= rx;
+                buf[e * 3] -= rx;
                 buf[e * 3 + 1] -= ry;
                 buf[e * 3 + 2] -= rz;
 
@@ -317,10 +328,7 @@ fn update_sizing_mu(cache: &mut FdmCache, rho: f64, sigma: f64) {
 
 /// Add lumped self-weight loads into `cache.pn` (which should already
 /// contain base loads).  Does not reset `pn` -- caller handles that.
-fn accumulate_self_weight_loads(
-    cache: &mut FdmCache,
-    gravity: &[f64; 3],
-) {
+fn accumulate_self_weight_loads(cache: &mut FdmCache, gravity: &[f64; 3]) {
     let ne = cache.member_lengths.len();
     for k in 0..ne {
         let mu_k = cache.sw_mu[k];
@@ -371,10 +379,7 @@ pub fn newell_normal(face: &[usize], nf: &Array2<f64>) -> [f64; 3] {
 /// Add pressure loads into `cache.pn` (which should already contain
 /// base loads and any self-weight).  Does not reset `pn`.
 /// Dispatches on the pressure mode (Normal / Hydrostatic / Directional).
-fn accumulate_pressure_loads(
-    cache: &mut FdmCache,
-    pressure: &PressureParams,
-) {
+fn accumulate_pressure_loads(cache: &mut FdmCache, pressure: &PressureParams) {
     let faces = &pressure.face_topology().faces;
     match pressure {
         PressureParams::Normal { pressures, .. } => {
@@ -392,11 +397,17 @@ fn accumulate_pressure_loads(
             }
         }
         PressureParams::Hydrostatic {
-            rho_fluid, g_magnitude, z_datum, up_direction, ..
+            rho_fluid,
+            g_magnitude,
+            z_datum,
+            up_direction,
+            ..
         } => {
             for face in faces {
                 let nv = face.len() as f64;
-                if nv < 3.0 { continue; }
+                if nv < 3.0 {
+                    continue;
+                }
 
                 // Face centroid projected onto the "up" direction
                 let mut centroid_up = 0.0;
@@ -408,7 +419,9 @@ fn accumulate_pressure_loads(
                 centroid_up /= nv;
 
                 let depth = z_datum - centroid_up;
-                if depth <= 0.0 { continue; }
+                if depth <= 0.0 {
+                    continue;
+                }
 
                 let p_f = rho_fluid * g_magnitude * depth;
                 let n = newell_normal(face, &cache.nf);
@@ -422,7 +435,9 @@ fn accumulate_pressure_loads(
             }
         }
         PressureParams::Directional {
-            pressures, direction, ..
+            pressures,
+            direction,
+            ..
         } => {
             for (f_idx, face) in faces.iter().enumerate() {
                 let p_f = pressures[f_idx];
@@ -431,7 +446,9 @@ fn accumulate_pressure_loads(
 
                 // Projected area = n_f · d_hat
                 let a_proj: f64 = (0..3).map(|d| n[d] * direction[d]).sum();
-                if a_proj <= 0.0 { continue; }
+                if a_proj <= 0.0 {
+                    continue;
+                }
 
                 let load_mag = p_f * a_proj / nv;
                 for &vi in face {
@@ -490,6 +507,7 @@ pub fn solve_fdm_with_loads(
     cache.pn.assign(&cache.pn_base);
 
     let nn_free = problem.topology.free_node_indices.len();
+    let mut converged = false;
 
     for _iter in 0..max_iters {
         // Inner linear FDM solve with current loads
@@ -501,7 +519,7 @@ pub fn solve_fdm_with_loads(
         }
 
         // Save current pn, then rebuild from base + geometry-dependent loads
-        let pn_old = cache.pn.clone();
+        cache.pn_prev.assign(&cache.pn);
         cache.pn.assign(&cache.pn_base);
 
         if let Some(sw) = &problem.self_weight {
@@ -516,12 +534,13 @@ pub fn solve_fdm_with_loads(
         let mut pn_norm_sq = 0.0;
         for i in 0..nn_free {
             for d in 0..3 {
-                let diff = cache.pn[[i, d]] - pn_old[[i, d]];
+                let diff = cache.pn[[i, d]] - cache.pn_prev[[i, d]];
                 delta_sq += diff * diff;
                 pn_norm_sq += cache.pn[[i, d]] * cache.pn[[i, d]];
             }
         }
         if pn_norm_sq > 0.0 && delta_sq / pn_norm_sq < tolerance * tolerance {
+            converged = true;
             break;
         }
 
@@ -529,15 +548,19 @@ pub fn solve_fdm_with_loads(
         if relaxation < 1.0 {
             for i in 0..nn_free {
                 for d in 0..3 {
-                    cache.pn[[i, d]] = relaxation * cache.pn[[i, d]]
-                        + (1.0 - relaxation) * pn_old[[i, d]];
+                    cache.pn[[i, d]] =
+                        relaxation * cache.pn[[i, d]] + (1.0 - relaxation) * cache.pn_prev[[i, d]];
                 }
             }
         }
     }
 
-    // Final solve with converged loads
-    solve_fdm(cache, q, problem, anchor_positions, perturbation)
+    // Skip redundant final solve when the last iteration already converged.
+    if !converged {
+        solve_fdm(cache, q, problem, anchor_positions, perturbation)?;
+    }
+
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────

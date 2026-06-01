@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Ariadne.FDM;
 using Ariadne.Graphs;
+using Ariadne.Utilities;
 using Rhino.Geometry;
 using Theseus.Interop;
 
@@ -14,6 +15,17 @@ using Theseus.Interop;
 /// </summary>
 public static class TheseusSolverService
 {
+    private static readonly object ActiveSolverLock = new();
+    private static TheseusSolver? ActiveSolver;
+
+    /// <summary>
+    /// Requests cancellation of the solver currently running on a background thread.
+    /// </summary>
+    public static void RequestActiveCancel()
+    {
+        lock (ActiveSolverLock)
+            ActiveSolver?.RequestCancel();
+    }
     /// <summary>
     /// Solve an FDM network with optimization.
     /// </summary>
@@ -45,10 +57,20 @@ public static class TheseusSolverService
             data.Loads, data.FixedPositions,
             data.QInit, data.LowerBounds, data.UpperBounds,
             data.VariableNodeIndices, data.VariableSupportKinds, data.SphereRadii,
-            data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd);
+            data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd,
+            data.NurbsOffsets, data.NurbsLengths, data.NurbsData);
 
+        lock (ActiveSolverLock)
+            ActiveSolver = solver;
+
+        try
+        {
         foreach (var objective in inputs.Objectives)
         {
+            if (!objective.IsValid)
+                throw new ArgumentException(
+                    $"Objective {objective.GetType().Name} is invalid and cannot be used for optimization.",
+                    nameof(inputs));
             objective.ApplyTo(solver, context);
         }
 
@@ -59,15 +81,25 @@ public static class TheseusSolverService
             absTol: options.AbsTol,
             relTol: options.RelTol,
             barrierWeight: options.BarrierWeight,
-            barrierSharpness: options.BarrierSharpness);
+            barrierSharpness: options.BarrierSharpness,
+            anchorSaturationLambda: options.AnchorSaturationLambda);
         solver.SetQParameterizationMode((int)inputs.QParameterizationMode);
 
         if (progressCallback != null)
-            solver.SetProgressCallback(progressCallback, options.ReportFrequency);
+            solver.SetProgressCallback(progressCallback, options.ReportFrequency, options.CopyProgressState);
 
         var result = solver.Optimize();
 
         return BuildResult(network, result, context);
+        }
+        finally
+        {
+            lock (ActiveSolverLock)
+            {
+                if (ActiveSolver == solver)
+                    ActiveSolver = null;
+            }
+        }
     }
 
     /// <summary>
@@ -89,7 +121,8 @@ public static class TheseusSolverService
             data.Loads, data.FixedPositions,
             data.QInit, data.LowerBounds, data.UpperBounds,
             data.VariableNodeIndices, data.VariableSupportKinds, data.SphereRadii,
-            data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd);
+            data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd,
+            data.NurbsOffsets, data.NurbsLengths, data.NurbsData);
         solver.SetQParameterizationMode((int)inputs.QParameterizationMode);
 
         ApplyLoadConfig(solver, inputs, context);
@@ -128,7 +161,8 @@ public static class TheseusSolverService
             data.Loads, data.FixedPositions,
             data.QInit, data.LowerBounds, data.UpperBounds,
             data.VariableNodeIndices, data.VariableSupportKinds, data.SphereRadii,
-            data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd);
+            data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd,
+            data.NurbsOffsets, data.NurbsLengths, data.NurbsData);
         solver.SetQParameterizationMode((int)inputs.QParameterizationMode);
 
         ApplyLoadConfig(solver, inputs, context);
@@ -161,7 +195,8 @@ public static class TheseusSolverService
             data.Loads, data.FixedPositions,
             data.QInit, data.LowerBounds, data.UpperBounds,
             data.VariableNodeIndices, data.VariableSupportKinds, data.SphereRadii,
-            data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd);
+            data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd,
+            data.NurbsOffsets, data.NurbsLengths, data.NurbsData);
         solver.SetQParameterizationMode((int)inputs.QParameterizationMode);
 
         ApplyLoadConfig(solver, inputs, context);
@@ -339,7 +374,10 @@ public static class TheseusSolverService
             supportData.RollerLower,
             supportData.RollerUpper,
             supportData.RailStart,
-            supportData.RailEnd);
+            supportData.RailEnd,
+            supportData.NurbsOffsets,
+            supportData.NurbsLengths,
+            supportData.NurbsData);
     }
 
     private readonly record struct VariableSupportData(
@@ -350,7 +388,10 @@ public static class TheseusSolverService
         double[] RollerLower,
         double[] RollerUpper,
         double[] RailStart,
-        double[] RailEnd);
+        double[] RailEnd,
+        int[] NurbsOffsets,
+        int[] NurbsLengths,
+        double[] NurbsData);
 
     private static VariableSupportData BuildVariableSupportData(
         List<VariableSupportConfig>? supports,
@@ -360,6 +401,9 @@ public static class TheseusSolverService
         if (supports == null || supports.Count == 0)
         {
             return new VariableSupportData(
+                [],
+                [],
+                [],
                 [],
                 [],
                 [],
@@ -378,8 +422,12 @@ public static class TheseusSolverService
         var rollerUpper = new List<double>();
         var railStart = new List<double>();
         var railEnd = new List<double>();
+        var nurbsOffsets = new List<int>();
+        var nurbsLengths = new List<int>();
+        var nurbsData = new List<double>();
 
         var seen = new HashSet<int>();
+        var fixedNodeSet = new HashSet<int>(network.FixedNodes);
         foreach (var support in supports)
         {
             if (support.Nodes == null || support.Nodes.Count == 0)
@@ -389,7 +437,7 @@ public static class TheseusSolverService
             {
                 if (!context.NodeIndexMap.TryGetValue(node, out int nodeIdx))
                     throw new ArgumentException("Variable support node is not part of the current network.");
-                if (!network.FixedNodes.Contains(nodeIdx))
+                if (!fixedNodeSet.Contains(nodeIdx))
                     throw new ArgumentException("Variable supports can only target fixed nodes.");
                 if (!seen.Add(nodeIdx))
                     throw new ArgumentException($"Node index {nodeIdx} has multiple variable support definitions.");
@@ -408,6 +456,7 @@ public static class TheseusSolverService
                         rollerUpper.AddRange([0.0, 0.0, 0.0]);
                         railStart.AddRange([0.0, 0.0, 0.0]);
                         railEnd.AddRange([0.0, 0.0, 0.0]);
+                        AddEmptyNurbs(nurbsOffsets, nurbsLengths);
                         break;
 
                     case RollerVariableSupport roller:
@@ -431,6 +480,7 @@ public static class TheseusSolverService
                         rollerUpper.Add(roller.DomainZ.T1);
                         railStart.AddRange([0.0, 0.0, 0.0]);
                         railEnd.AddRange([0.0, 0.0, 0.0]);
+                        AddEmptyNurbs(nurbsOffsets, nurbsLengths);
                         break;
 
                     case RailVariableSupport rail:
@@ -447,7 +497,49 @@ public static class TheseusSolverService
                         railEnd.Add(rail.Rail.ToX);
                         railEnd.Add(rail.Rail.ToY);
                         railEnd.Add(rail.Rail.ToZ);
+                        AddEmptyNurbs(nurbsOffsets, nurbsLengths);
                         break;
+
+                    case CurveVariableSupport curveSupport:
+                    {
+                        var curveData = NurbsSerialization.FromCurve(curveSupport.Curve);
+                        var domain = curveSupport.Domain ?? new Interval(curveData.Domain[0], curveData.Domain[1]);
+                        if (!domain.IsIncreasing)
+                            throw new ArgumentException("NURBS curve support domain must be increasing.");
+                        if (!curveSupport.Curve.ClosestPoint(node.Value, out double t))
+                            throw new ArgumentException("Could not find closest curve parameter for variable support node.");
+
+                        kinds.Add(3);
+                        sphereRadii.Add(0.0);
+                        rollerEnabled.AddRange([0, 0, 0]);
+                        rollerLower.AddRange([0.0, 0.0, 0.0]);
+                        rollerUpper.AddRange([0.0, 0.0, 0.0]);
+                        railStart.AddRange([0.0, 0.0, 0.0]);
+                        railEnd.AddRange([0.0, 0.0, 0.0]);
+                        AddNurbsCurveData(nurbsOffsets, nurbsLengths, nurbsData, curveData, domain, t);
+                        break;
+                    }
+
+                    case SurfaceVariableSupport surfaceSupport:
+                    {
+                        var surfaceData = NurbsSerialization.FromSurface(surfaceSupport.Surface);
+                        var domainU = surfaceSupport.DomainU ?? new Interval(surfaceData.DomainU[0], surfaceData.DomainU[1]);
+                        var domainV = surfaceSupport.DomainV ?? new Interval(surfaceData.DomainV[0], surfaceData.DomainV[1]);
+                        if (!domainU.IsIncreasing || !domainV.IsIncreasing)
+                            throw new ArgumentException("NURBS surface support domains must be increasing.");
+                        if (!surfaceSupport.Surface.ClosestPoint(node.Value, out double u, out double v))
+                            throw new ArgumentException("Could not find closest surface parameters for variable support node.");
+
+                        kinds.Add(4);
+                        sphereRadii.Add(0.0);
+                        rollerEnabled.AddRange([0, 0, 0]);
+                        rollerLower.AddRange([0.0, 0.0, 0.0]);
+                        rollerUpper.AddRange([0.0, 0.0, 0.0]);
+                        railStart.AddRange([0.0, 0.0, 0.0]);
+                        railEnd.AddRange([0.0, 0.0, 0.0]);
+                        AddNurbsSurfaceData(nurbsOffsets, nurbsLengths, nurbsData, surfaceData, domainU, domainV, u, v);
+                        break;
+                    }
 
                     default:
                         throw new ArgumentException($"Unsupported variable support type {support.GetType().Name}.");
@@ -463,7 +555,67 @@ public static class TheseusSolverService
             [.. rollerLower],
             [.. rollerUpper],
             [.. railStart],
-            [.. railEnd]);
+            [.. railEnd],
+            [.. nurbsOffsets],
+            [.. nurbsLengths],
+            [.. nurbsData]);
+    }
+
+    private static void AddEmptyNurbs(List<int> offsets, List<int> lengths)
+    {
+        offsets.Add(0);
+        lengths.Add(0);
+    }
+
+    private static void AddNurbsCurveData(
+        List<int> offsets,
+        List<int> lengths,
+        List<double> data,
+        NurbsSerialization.CurveData curve,
+        Interval domain,
+        double initialT)
+    {
+        int offset = data.Count;
+        offsets.Add(offset);
+        data.Add(curve.Degree);
+        data.Add(curve.Knots.Length);
+        data.Add(curve.ControlPoints.Length / 4);
+        data.Add(domain.T0);
+        data.Add(domain.T1);
+        data.Add(Math.Clamp(initialT, domain.T0, domain.T1));
+        data.AddRange(curve.Knots);
+        data.AddRange(curve.ControlPoints);
+        lengths.Add(data.Count - offset);
+    }
+
+    private static void AddNurbsSurfaceData(
+        List<int> offsets,
+        List<int> lengths,
+        List<double> data,
+        NurbsSerialization.SurfaceData surface,
+        Interval domainU,
+        Interval domainV,
+        double initialU,
+        double initialV)
+    {
+        int offset = data.Count;
+        offsets.Add(offset);
+        data.Add(surface.DegreeU);
+        data.Add(surface.DegreeV);
+        data.Add(surface.CountU);
+        data.Add(surface.CountV);
+        data.Add(surface.KnotsU.Length);
+        data.Add(surface.KnotsV.Length);
+        data.Add(domainU.T0);
+        data.Add(domainU.T1);
+        data.Add(domainV.T0);
+        data.Add(domainV.T1);
+        data.Add(Math.Clamp(initialU, domainU.T0, domainU.T1));
+        data.Add(Math.Clamp(initialV, domainV.T0, domainV.T1));
+        data.AddRange(surface.KnotsU);
+        data.AddRange(surface.KnotsV);
+        data.AddRange(surface.ControlPoints);
+        lengths.Add(data.Count - offset);
     }
 
     private static void ApplyLoadConfig(TheseusSolver solver, SolverInputs inputs, SolverContext context)
@@ -525,10 +677,15 @@ public static class TheseusSolverService
     private static int[][] BuildFaceArray(List<List<int>> faces, SolverContext context)
     {
         int numFaces = faces.Count;
+        int numNodes = context.Network.Graph.Nn;
         var result = new int[numFaces][];
         for (int f = 0; f < numFaces; f++)
         {
             var faceVerts = faces[f];
+            var error = FaceGeometry.ValidateFaceIndices(faceVerts, f, numNodes);
+            if (error != null)
+                throw new ArgumentException(error);
+
             result[f] = new int[faceVerts.Count];
             for (int v = 0; v < faceVerts.Count; v++)
             {
@@ -547,91 +704,65 @@ public static class TheseusSolverService
         return result;
     }
 
-    private static SolveResult BuildResult(FDM_Network oldNetwork, SolverResult result, SolverContext context)
+    private static SolveResult BuildResult(FDM_Network network, SolverResult result, SolverContext context)
     {
-        var newNetwork = BuildSolvedNetwork(oldNetwork, result, context);
+        var solvedNetwork = new FDM_Network(network);
+        var solvedContext = BuildContext(solvedNetwork);
+        ApplySolverResult(solvedNetwork, result, solvedContext);
 
         return new SolveResult
         {
-            Network = newNetwork,
+            Network = solvedNetwork,
             ForceDensities = result.ForceDensities,
             MemberForces = result.MemberForces,
             MemberLengths = result.MemberLengths,
             Reactions = result.Reactions,
+            LossTrace = result.LossTrace,
             Iterations = result.Iterations,
             Converged = result.Converged,
             TerminationReason = result.TerminationReason
         };
     }
 
-    private static FDM_Network BuildSolvedNetwork(FDM_Network oldNetwork, SolverResult result, SolverContext context)
+    /// <summary>
+    /// Updates an existing network in-place with solver geometry and force densities.
+    /// Avoids allocating a new graph when topology is unchanged.
+    /// </summary>
+    internal static void ApplySolverResult(FDM_Network network, SolverResult result, SolverContext context)
     {
-        var oldGraph = oldNetwork.Graph;
-        int numNodes = oldGraph.Nn;
-        int numEdges = oldGraph.Ne;
-
-        var newNodes = new List<Node>(numNodes);
-        for (int i = 0; i < numNodes; i++)
-        {
-            newNodes.Add(new Node
-            {
-                Index = i,
-                Anchor = oldGraph.Nodes[i].Anchor,
-                Value = new Point3d(
-                    result.Xyz[i * 3 + 0],
-                    result.Xyz[i * 3 + 1],
-                    result.Xyz[i * 3 + 2])
-            });
-        }
+        var graph = network.Graph;
+        int numNodes = graph.Nn;
+        int numEdges = graph.Ne;
 
         for (int i = 0; i < numNodes; i++)
         {
-            newNodes[i].Neighbors = oldGraph.Nodes[i].Neighbors
-                .Select(n => newNodes[context.NodeIndexMap[n]])
-                .ToList();
+            graph.Nodes[i].Value = new Point3d(
+                result.Xyz[i * 3 + 0],
+                result.Xyz[i * 3 + 1],
+                result.Xyz[i * 3 + 2]);
         }
 
-        var newEdges = new List<Edge>(numEdges);
         for (int i = 0; i < numEdges; i++)
         {
-            int startIdx = context.NodeIndexMap[oldGraph.Edges[i].Start];
-            int endIdx = context.NodeIndexMap[oldGraph.Edges[i].End];
-
-            var edge = new Edge
-            {
-                Start = newNodes[startIdx],
-                End = newNodes[endIdx],
-                Q = result.ForceDensities[i],
-                ReferenceID = oldGraph.Edges[i].ReferenceID
-            };
-            edge.Value = new LineCurve(edge.Start.Value, edge.End.Value);
-            newEdges.Add(edge);
+            int startIdx = context.NodeIndexMap[graph.Edges[i].Start];
+            int endIdx = context.NodeIndexMap[graph.Edges[i].End];
+            graph.Edges[i].Q = result.ForceDensities[i];
+            graph.Edges[i].Value = new LineCurve(
+                graph.Nodes[startIdx].Value,
+                graph.Nodes[endIdx].Value);
         }
 
-        var newGraph = new Graph
-        {
-            Tolerance = oldGraph.Tolerance,
-            Nodes = newNodes,
-            Edges = newEdges,
-            EdgeInputMap = oldGraph.EdgeInputMap
-        };
+        network.Free = network.FreeNodes.ConvertAll(i => graph.Nodes[i]);
+        network.Fixed = network.FixedNodes.ConvertAll(i => graph.Nodes[i]);
+        network.Anchors = network.FixedNodes.ConvertAll(i => graph.Nodes[i].Value);
+        network.Valid = true;
+    }
 
-        newGraph.EdgeIndicesToTree();
-        newGraph.AdjacencyListToTree();
-        newGraph.BuildOutputEdgeTree();
-
-        return new FDM_Network
-        {
-            Graph = newGraph,
-            Valid = true,
-            FreeNodes = oldNetwork.FreeNodes,
-            FixedNodes = oldNetwork.FixedNodes,
-            ATol = oldNetwork.ATol,
-            ETol = oldNetwork.ETol,
-            Free = oldNetwork.FreeNodes.Select(i => newNodes[i]).ToList(),
-            Fixed = oldNetwork.FixedNodes.Select(i => newNodes[i]).ToList(),
-            Anchors = oldNetwork.FixedNodes.Select(i => newNodes[i].Value).ToList()
-        };
+    private static FDM_Network BuildSolvedNetwork(FDM_Network oldNetwork, SolverResult result, SolverContext context)
+    {
+        var solvedNetwork = new FDM_Network(oldNetwork);
+        ApplySolverResult(solvedNetwork, result, BuildContext(solvedNetwork));
+        return solvedNetwork;
     }
 
     private static double[] Expand(IReadOnlyList<double> values, int length)

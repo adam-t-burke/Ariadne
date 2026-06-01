@@ -96,28 +96,11 @@ public class DefineFacesComponent : GH_Component
             }
 
             faces.Add(face);
-
-            // Polyline
-            var pts = new List<Point3d>(face.Count + 1);
+            var pts = new List<Point3d>(face.Count);
             foreach (int idx in face)
                 pts.Add(graph.Nodes[idx].Value);
-            pts.Add(pts[0]);
-            polylines.Add(new PolylineCurve(new Polyline(pts)));
-
-            // Newell normal
-            var normal = Vector3d.Zero;
-            for (int i = 0; i < face.Count; i++)
-            {
-                var vi = graph.Nodes[face[i]].Value;
-                var vj = graph.Nodes[face[(i + 1) % face.Count]].Value;
-                normal.X += (vi.Y - vj.Y) * (vi.Z + vj.Z);
-                normal.Y += (vi.Z - vj.Z) * (vi.X + vj.X);
-                normal.Z += (vi.X - vj.X) * (vi.Y + vj.Y);
-            }
-            normal *= 0.5;
-            if (normal.Length > 1e-12)
-                normal.Unitize();
-            normals.Add(normal);
+            polylines.Add(FaceGeometry.BuildFacePolyline(pts));
+            normals.Add(FaceGeometry.ComputeNewellNormal(pts));
         }
 
         // Rebuild output tree

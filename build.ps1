@@ -3,7 +3,7 @@
     Builds the Rust theseus native library and copies it into the Theseus/ folder.
 
 .DESCRIPTION
-    Runs 'cargo build --release' in Theseus/rust/ and copies the resulting
+    Runs 'cargo build --release -p theseus' in the Rust workspace and copies the resulting
     theseus.dll to Theseus/theseus.dll so the .NET build can pick it up.
 
     Requires the Rust toolchain (rustup / cargo) to be installed and on PATH.
@@ -19,11 +19,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$rustDir = Join-Path (Join-Path $PSScriptRoot "Theseus") "rust"
+$workspaceDir = $PSScriptRoot
+$rustDir = Join-Path (Join-Path $PSScriptRoot "crates") "theseus"
 $outputDir = Join-Path $PSScriptRoot "Theseus"
 
 if (-not (Test-Path $rustDir)) {
-    Write-Error "Rust source not found at $rustDir. Copy your Rust project into Theseus/rust/ first."
+    Write-Error "Rust source not found at $rustDir."
     exit 1
 }
 
@@ -32,12 +33,12 @@ Write-Host "Building theseus ($Configuration)..." -ForegroundColor Cyan
 $profile = if ($Configuration -eq "Release") { "--release" } else { "" }
 $targetSubdir = if ($Configuration -eq "Release") { "release" } else { "debug" }
 
-Push-Location $rustDir
+Push-Location $workspaceDir
 try {
     if ($profile) {
-        cargo build $profile
+        cargo build -p theseus $profile
     } else {
-        cargo build
+        cargo build -p theseus
     }
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Cargo build failed with exit code $LASTEXITCODE"
@@ -47,7 +48,7 @@ try {
     Pop-Location
 }
 
-$dllSource = Join-Path (Join-Path (Join-Path $rustDir "target") $targetSubdir) "theseus.dll"
+$dllSource = Join-Path (Join-Path (Join-Path $workspaceDir "target") $targetSubdir) "theseus.dll"
 $dllDest = Join-Path $outputDir "theseus.dll"
 
 if (-not (Test-Path $dllSource)) {

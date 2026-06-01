@@ -14,6 +14,7 @@ namespace Theseus.Interop;
 internal static class TheseusInterop
 {
     const string DLL = "theseus";
+    static IntPtr TheseusModule = IntPtr.Zero;
 
     static TheseusInterop()
     {
@@ -39,7 +40,10 @@ internal static class TheseusInterop
         string path = Path.Combine(dir, fileName);
 
         if (NativeLibrary.TryLoad(path, assembly, searchPath, out IntPtr handle))
+        {
+            TheseusModule = handle;
             return handle;
+        }
         return IntPtr.Zero;
     }
 
@@ -73,10 +77,17 @@ internal static class TheseusInterop
         double[] roller_lower,
         double[] roller_upper,
         double[] rail_start,
-        double[] rail_end);
+        double[] rail_end,
+        nuint[] nurbs_offsets,
+        nuint[] nurbs_lengths,
+        double[] nurbs_data,
+        nuint nurbs_data_len);
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
     public static extern void theseus_free(IntPtr handle);
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_cancel(IntPtr handle);
 
     // ── Objective registration ───────────────────────────────
 
@@ -200,7 +211,8 @@ internal static class TheseusInterop
     public static extern int theseus_set_solver_options(
         IntPtr handle,
         nuint max_iterations, double abs_tol, double rel_tol,
-        double barrier_weight, double barrier_sharpness);
+        double barrier_weight, double barrier_sharpness,
+        double anchor_saturation_lambda);
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
     public static extern int theseus_set_q_parameterization_mode(
@@ -282,6 +294,15 @@ internal static class TheseusInterop
         byte[] buffer,
         nuint buffer_len);
 
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern nuint theseus_get_loss_trace_len(IntPtr handle);
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern nuint theseus_get_loss_trace(
+        IntPtr handle,
+        double[] out_loss_trace,
+        nuint out_len);
+
     // ── Forward solve ────────────────────────────────────────
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
@@ -306,5 +327,24 @@ internal static class TheseusInterop
         IntPtr handle,
         double[] target_free_xyz, nuint max_iter, double tol,
         double[] out_q, double[] out_xyz, double[] out_lengths,
-        double[] out_forces, double[] out_reactions);
+        double[] out_forces, double[] out_reactions,
+        ref nuint out_iterations, ref byte out_converged);
+
+    /// <summary>
+    /// Requests solver cancellation when exported by the native library.
+    /// </summary>
+    public static void TryCancel(IntPtr handle)
+    {
+        if (handle == IntPtr.Zero || TheseusModule == IntPtr.Zero)
+            return;
+
+        if (!NativeLibrary.TryGetExport(TheseusModule, "theseus_cancel", out IntPtr symbol))
+            return;
+
+        var cancel = Marshal.GetDelegateForFunctionPointer<TheseusCancelDelegate>(symbol);
+        cancel(handle);
+    }
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int TheseusCancelDelegate(IntPtr handle);
 }

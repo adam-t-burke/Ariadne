@@ -6,8 +6,22 @@
 //! and print per-iteration loss traces so convergence behaviour is visible.
 
 use ndarray::Array2;
+use std::sync::atomic::AtomicBool;
 use theseus::sparse::SparseColMatOwned;
 use theseus::types::*;
+
+fn run_optimize(problem: &Problem, state: &mut OptimizationState) -> theseus::types::SolverResult {
+    let cancel = AtomicBool::new(false);
+    theseus::optimizer::optimize(problem, state, None, 1, &cancel).unwrap()
+}
+
+fn try_optimize(
+    problem: &Problem,
+    state: &mut OptimizationState,
+) -> Result<theseus::types::SolverResult, theseus::types::TheseusError> {
+    let cancel = AtomicBool::new(false);
+    theseus::optimizer::optimize(problem, state, None, 1, &cancel)
+}
 
 // ─────────────────────────────────────────────────────────────
 //  Helpers
@@ -195,7 +209,7 @@ fn diagnostic_grid_cholesky() {
     let problem = make_grid_problem(n, bounds, objectives, solver_opts);
     let mut state = OptimizationState::new(vec![1.0; num_edges], Array2::zeros((0, 3)));
 
-    let result = theseus::optimizer::optimize(&problem, &mut state, None, 1).unwrap();
+    let result = run_optimize(&problem, &mut state);
     print_loss_trace("10×10 grid, Cholesky, barrier_weight=10", &result);
 
     assert!(
@@ -258,7 +272,7 @@ fn diagnostic_grid_ldl() {
     let problem = make_grid_problem(n, bounds, objectives, solver_opts);
     let mut state = OptimizationState::new(vec![1.0; num_edges], Array2::zeros((0, 3)));
 
-    let result = theseus::optimizer::optimize(&problem, &mut state, None, 1).unwrap();
+    let result = run_optimize(&problem, &mut state);
     print_loss_trace("10×10 grid, LDL (mixed bounds), barrier_weight=10", &result);
 
     assert!(
@@ -317,7 +331,7 @@ fn diagnostic_barrier_weight_sweep() {
         let problem = make_grid_problem(n, bounds, objectives, solver_opts);
         let mut state = OptimizationState::new(vec![1.0; num_edges], Array2::zeros((0, 3)));
 
-        let result = theseus::optimizer::optimize(&problem, &mut state, None, 1).unwrap();
+        let result = run_optimize(&problem, &mut state);
 
         let initial = result.loss_trace.first().copied().unwrap_or(f64::NAN);
         let final_ = result.loss_trace.last().copied().unwrap_or(f64::NAN);
@@ -370,7 +384,7 @@ fn diagnostic_cholesky_fallback() {
     let problem = make_grid_problem(n, bounds, objectives, solver_opts);
     let mut state = OptimizationState::new(vec![1.0; num_edges], Array2::zeros((0, 3)));
 
-    let result = theseus::optimizer::optimize(&problem, &mut state, None, 1);
+    let result = try_optimize(&problem, &mut state);
     match result {
         Ok(result) => {
             print_loss_trace("Cholesky fallback test (lb=1e-6, barrier_w=1)", &result);
@@ -427,7 +441,7 @@ fn diagnostic_combined_objectives() {
     let problem = make_grid_problem(n, bounds, objectives, solver_opts);
     let mut state = OptimizationState::new(vec![1.0; num_edges], Array2::zeros((0, 3)));
 
-    let result = theseus::optimizer::optimize(&problem, &mut state, None, 1).unwrap();
+    let result = run_optimize(&problem, &mut state);
     print_loss_trace("10×10 combined (TargetXYZ + LengthVar + SumFL)", &result);
 
     assert!(
@@ -544,7 +558,7 @@ fn diagnostic_arch_network() {
 
     let mut state = OptimizationState::new(vec![1.0; num_edges], Array2::zeros((0, 3)));
 
-    let result = theseus::optimizer::optimize(&problem, &mut state, None, 1).unwrap();
+    let result = run_optimize(&problem, &mut state);
     print_loss_trace("7-node arch, TargetXYZ", &result);
 
     assert!(

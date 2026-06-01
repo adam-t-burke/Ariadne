@@ -15,6 +15,7 @@ public sealed class SolverResult
     public double[] MemberForces { get; init; } = [];
     public double[] ForceDensities { get; init; } = [];
     public double[] Reactions { get; init; } = [];
+    public double[] LossTrace { get; init; } = [];
     public int Iterations { get; init; }
     public bool Converged { get; init; }
     public string TerminationReason { get; init; } = "";
@@ -81,7 +82,10 @@ public sealed class TheseusSolver : IDisposable
         double[]? rollerLower = null,
         double[]? rollerUpper = null,
         double[]? railStart = null,
-        double[]? railEnd = null)
+        double[]? railEnd = null,
+        int[]? nurbsOffsets = null,
+        int[]? nurbsLengths = null,
+        double[]? nurbsData = null)
     {
         int numFixed = fixedNodeIndices.Length;
         IntPtr handle;
@@ -95,6 +99,9 @@ public sealed class TheseusSolver : IDisposable
             rollerUpper ??= new double[n * 3];
             railStart ??= new double[n * 3];
             railEnd ??= new double[n * 3];
+            nurbsOffsets ??= new int[n];
+            nurbsLengths ??= new int[n];
+            nurbsData ??= [];
             handle = TheseusInterop.theseus_create_with_variable_supports(
                 (nuint)numEdges, (nuint)numNodes, (nuint)numFree,
                 ToNuint(cooRows), ToNuint(cooCols), cooVals, (nuint)cooRows.Length,
@@ -109,7 +116,11 @@ public sealed class TheseusSolver : IDisposable
                 rollerLower,
                 rollerUpper,
                 railStart,
-                railEnd);
+                railEnd,
+                ToNuint(nurbsOffsets),
+                ToNuint(nurbsLengths),
+                nurbsData,
+                (nuint)nurbsData.Length);
         }
         else
         {
@@ -445,11 +456,13 @@ public sealed class TheseusSolver : IDisposable
         double absTol = 1e-6,
         double relTol = 1e-6,
         double barrierWeight = 10.0,
-        double barrierSharpness = 10.0)
+        double barrierSharpness = 10.0,
+        double anchorSaturationLambda = 1.0)
     {
         ThrowIfDisposed();
         Check(TheseusInterop.theseus_set_solver_options(
-            _handle, (nuint)maxIterations, absTol, relTol, barrierWeight, barrierSharpness));
+            _handle, (nuint)maxIterations, absTol, relTol, barrierWeight, barrierSharpness,
+            anchorSaturationLambda));
     }
 
     public void SetQParameterizationMode(int mode)
@@ -465,8 +478,13 @@ public sealed class TheseusSolver : IDisposable
     /// accepted L-BFGS iterations with (majorIteration, loss, xyz[numNodes*3], q[numEdges]).
     /// Return <c>true</c> to continue, <c>false</c> to cancel.
     /// Pass null to clear.  The delegate is pinned for the lifetime of this solver.
+    /// When <paramref name="copySolverState"/> is false, xyz/q arrays are empty and
+    /// no native-to-managed copy is performed (cancellation-only callbacks).
     /// </summary>
-    public void SetProgressCallback(Func<int, double, double[], double[], bool>? callback, int frequency)
+    public void SetProgressCallback(
+        Func<int, double, double[], double[], bool>? callback,
+        int frequency,
+        bool copySolverState = true)
     {
         ThrowIfDisposed();
         if (callback == null)
@@ -478,18 +496,39 @@ public sealed class TheseusSolver : IDisposable
 
         int nn = _numNodes;
         int ne = _numEdges;
-        _pinnedCallback = (nuint majorIteration, double loss, IntPtr xyzPtr, nuint numNodes, IntPtr qPtr, nuint numEdges) =>
+        if (copySolverState)
         {
-            var xyz = new double[nn * 3];
-            Marshal.Copy(xyzPtr, xyz, 0, nn * 3);
-            var q = new double[ne];
-            Marshal.Copy(qPtr, q, 0, ne);
-            bool shouldContinue = callback((int)majorIteration, loss, xyz, q);
-            return shouldContinue ? (byte)1 : (byte)0;
-        };
+            _pinnedCallback = (nuint majorIteration, double loss, IntPtr xyzPtr, nuint numNodes, IntPtr qPtr, nuint numEdges) =>
+            {
+                var xyz = new double[nn * 3];
+                Marshal.Copy(xyzPtr, xyz, 0, nn * 3);
+                var q = new double[ne];
+                Marshal.Copy(qPtr, q, 0, ne);
+                bool shouldContinue = callback((int)majorIteration, loss, xyz, q);
+                return shouldContinue ? (byte)1 : (byte)0;
+            };
+        }
+        else
+        {
+            _pinnedCallback = (nuint majorIteration, double loss, IntPtr _, nuint __, IntPtr ___, nuint ____) =>
+            {
+                bool shouldContinue = callback((int)majorIteration, loss, [], []);
+                return shouldContinue ? (byte)1 : (byte)0;
+            };
+        }
 
         Check(TheseusInterop.theseus_set_progress_callback(
             _handle, _pinnedCallback, (nuint)Math.Max(1, frequency)));
+    }
+
+    /// <summary>
+    /// Requests cancellation of an in-flight optimization when the native library
+    /// exports <c>theseus_cancel</c>. Safe to call if cancellation is unsupported.
+    /// </summary>
+    public void RequestCancel()
+    {
+        ThrowIfDisposed();
+        TheseusInterop.TryCancel(_handle);
     }
 
     // ── Solve ────────────────────────────────────────────────
@@ -516,10 +555,26 @@ public sealed class TheseusSolver : IDisposable
             MemberForces = forces,
             ForceDensities = q,
             Reactions = reactions,
+            LossTrace = GetLossTrace(),
             Iterations = (int)iterations,
             Converged = converged != 0,
             TerminationReason = GetTerminationReason(),
         };
+    }
+
+    private double[] GetLossTrace()
+    {
+        nuint len = TheseusInterop.theseus_get_loss_trace_len(_handle);
+        if (len == 0)
+            return [];
+
+        var trace = new double[(int)len];
+        nuint copied = TheseusInterop.theseus_get_loss_trace(_handle, trace, len);
+        if (copied == len)
+            return trace;
+
+        Array.Resize(ref trace, (int)copied);
+        return trace;
     }
 
     private string GetTerminationReason()
@@ -594,10 +649,12 @@ public sealed class TheseusSolver : IDisposable
         var lengths = new double[_numEdges];
         var forces = new double[_numEdges];
         var reactions = new double[_numNodes * 3];
-
+        nuint iterations = 0;
+        byte converged = 0;
         Check(TheseusInterop.theseus_solve_nnls(
             _handle, targetFreeXyz, (nuint)maxIter, tol,
-            q, xyz, lengths, forces, reactions));
+            q, xyz, lengths, forces, reactions,
+            ref iterations, ref converged));
 
         return new SolverResult
         {
@@ -606,8 +663,8 @@ public sealed class TheseusSolver : IDisposable
             MemberForces = forces,
             ForceDensities = q,
             Reactions = reactions,
-            Iterations = maxIter,
-            Converged = true,
+            Iterations = (int)iterations,
+            Converged = converged != 0,
         };
     }
 
@@ -617,8 +674,10 @@ public sealed class TheseusSolver : IDisposable
     {
         if (!_disposed && _handle != IntPtr.Zero)
         {
+            TheseusInterop.theseus_set_progress_callback(_handle, null, (nuint)1);
             TheseusInterop.theseus_free(_handle);
             _handle = IntPtr.Zero;
+            _pinnedCallback = null;
             _disposed = true;
         }
         GC.SuppressFinalize(this);

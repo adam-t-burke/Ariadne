@@ -26,6 +26,32 @@ Ariadne is a Grasshopper plugin for **inverse design of form-found structures** 
 
 Define an FDM network (nodes, branches, fixed nodes), set initial force densities and loads, and connect **Theseus Solve**. For equilibrium only, leave the Opt Config input disconnected. For inverse form-finding, connect **Optimization Config** with objectives and bounds.
 
+## Solver usage notes
+
+- **Thread safety:** Each `TheseusSolver` instance is independent. Do not share a handle across threads; create one per solve.
+- **Memory:** `TheseusSolver` implements `IDisposable`. Always use `using` or call `Dispose()` to free the native handle.
+- **Layout:** All flattened arrays (xyz, loads, targets) use row-major layout: `array[index * 3 + dim]`.
+- **Native library:** `theseus.dll` / `libtheseus.dylib` is built from the Rust workspace under `crates/` via `build.ps1` or `build.sh`.
+
+## Objective reference
+
+| C# method | Description |
+|-----------|-------------|
+| `AddTargetXyz` | Minimize 3D distance to target positions |
+| `AddTargetXy` | Minimize 2D (XY) distance to target positions |
+| `AddTargetPlane` | Minimize (u,v) distance to target positions on a plane |
+| `AddPlanarConstraintAlongDirection` | Pull nodes onto a plane along a direction |
+| `AddTargetLength` | Minimize difference from target edge lengths |
+| `AddLengthVariation` | Minimize range of edge lengths |
+| `AddForceVariation` | Minimize range of member forces |
+| `AddSumForceLength` | Minimize sum of force × length products |
+| `AddMinLength` / `AddMaxLength` | Barrier penalties for edge length thresholds |
+| `AddMinForce` / `AddMaxForce` | Barrier penalties for force thresholds |
+| `AddRigidSetCompare` | Compare pairwise distances between node sets |
+| `AddReactionDirection` | Align anchor reaction directions |
+| `AddReactionDirectionMagnitude` | Align reaction directions and magnitudes |
+| `AddReactionMagnitude` | Match reaction magnitudes with configurable behavior |
+
 ## License
 
 MIT — see [LICENSE.txt](LICENSE.txt).  

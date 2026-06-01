@@ -90,22 +90,27 @@ namespace Ariadne.Utilities
 
         public static List<Vector3d> GetReactions(List<double> forces, FDM_Network network)
         {
-            List<Vector3d> reactions = new();
-            foreach(Node anchor in network.Fixed)
+            var edgeIndex = new Dictionary<(Node, Node), int>(network.Graph.Ne * 2);
+            for (int i = 0; i < network.Graph.Ne; i++)
             {
-                Vector3d reaction = new(0,0,0);
-                foreach(Node neighbor in anchor.Neighbors)
+                var edge = network.Graph.Edges[i];
+                edgeIndex[(edge.Start, edge.End)] = i;
+                edgeIndex[(edge.End, edge.Start)] = i;
+            }
+
+            List<Vector3d> reactions = new();
+            foreach (Node anchor in network.Fixed)
+            {
+                Vector3d reaction = new(0, 0, 0);
+                foreach (Node neighbor in anchor.Neighbors)
                 {
-                    foreach(Edge edge in network.Graph.Edges)
-                    {
-                        if (edge.Start == anchor && edge.End == neighbor || edge.Start == neighbor && edge.End == anchor)
-                        {
-                            double force = forces[network.Graph.Edges.IndexOf(edge)];
-                            Vector3d direction = anchor.Value - neighbor.Value;
-                            direction.Unitize();
-                            reaction += direction * force;
-                        }
-                    }
+                    if (!edgeIndex.TryGetValue((anchor, neighbor), out int edgeIdx))
+                        continue;
+
+                    double force = forces[edgeIdx];
+                    Vector3d direction = anchor.Value - neighbor.Value;
+                    direction.Unitize();
+                    reaction += direction * force;
                 }
                 reactions.Add(reaction);
             }
