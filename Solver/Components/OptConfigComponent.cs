@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Windows.Forms;
+using GH_IO.Serialization;
 using Grasshopper.Kernel;
 using Grasshopper.Kernel.Data;
 using Grasshopper.Kernel.Types;
@@ -15,11 +17,16 @@ namespace Ariadne.Solver.Components;
 /// </summary>
 public class OptConfigComponent : GH_Component
 {
+    private const string QParameterizationModeKey = "QParameterizationMode";
+    private QParameterizationMode _qParameterizationMode = QParameterizationMode.DirectSoftBounds;
+
     public OptConfigComponent()
         : base("Optimization Config", "OptConfig",
             "Bundle optimization settings for the Theseus solver.",
             "Ariadne", "Design")
-    { }
+    {
+        UpdateMessage();
+    }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)
     {
@@ -126,12 +133,70 @@ public class OptConfigComponent : GH_Component
             BarrierWeight = barrierWeight,
             BarrierSharpness = barrierSharpness,
             ReportFrequency = reportFreq,
+            QParameterizationMode = _qParameterizationMode,
             Run = run,
             StreamPreview = streamPreview,
             VariableSupports = variableSupports.AsReadOnly(),
         };
 
         DA.SetData(0, config);
+    }
+
+    protected override void AppendAdditionalComponentMenuItems(ToolStripDropDown menu)
+    {
+        base.AppendAdditionalComponentMenuItems(menu);
+        Menu_AppendSeparator(menu);
+        Menu_AppendItem(
+            menu,
+            "q Mode: Direct Soft Bounds",
+            (_, _) => SetQParameterizationMode(QParameterizationMode.DirectSoftBounds),
+            true,
+            _qParameterizationMode == QParameterizationMode.DirectSoftBounds);
+        Menu_AppendItem(
+            menu,
+            "q Mode: Implicit Bounded",
+            (_, _) => SetQParameterizationMode(QParameterizationMode.ImplicitBounded),
+            true,
+            _qParameterizationMode == QParameterizationMode.ImplicitBounded);
+    }
+
+    private void SetQParameterizationMode(QParameterizationMode mode)
+    {
+        if (_qParameterizationMode == mode)
+            return;
+
+        RecordUndoEvent("Set q Parameterization Mode");
+        _qParameterizationMode = mode;
+        UpdateMessage();
+        ExpireSolution(true);
+    }
+
+    private void UpdateMessage()
+    {
+        Message = _qParameterizationMode switch
+        {
+            QParameterizationMode.DirectSoftBounds => "q: SoftBounds",
+            QParameterizationMode.ImplicitBounded => "q: ImplicitBounds",
+            _ => "q: SoftBounds",
+        };
+    }
+
+    public override bool Write(GH_IWriter writer)
+    {
+        writer.SetInt32(QParameterizationModeKey, (int)_qParameterizationMode);
+        return base.Write(writer);
+    }
+
+    public override bool Read(GH_IReader reader)
+    {
+        if (reader.ItemExists(QParameterizationModeKey))
+        {
+            int value = reader.GetInt32(QParameterizationModeKey);
+            if (Enum.IsDefined(typeof(QParameterizationMode), value))
+                _qParameterizationMode = (QParameterizationMode)value;
+        }
+        UpdateMessage();
+        return base.Read(reader);
     }
 
     protected override Bitmap Icon => Properties.Resources.parameters;

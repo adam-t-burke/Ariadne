@@ -1144,14 +1144,32 @@ pub unsafe extern "C" fn theseus_set_solver_options(
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
         let h = &mut *handle;
-        h.problem.solver = SolverOptions {
-            max_iterations,
-            absolute_tolerance: abs_tol,
-            relative_tolerance: rel_tol,
-            report_frequency: 1,
-            barrier_weight,
-            barrier_sharpness,
-        };
+        h.problem.solver.max_iterations = max_iterations;
+        h.problem.solver.absolute_tolerance = abs_tol;
+        h.problem.solver.relative_tolerance = rel_tol;
+        h.problem.solver.report_frequency = 1;
+        h.problem.solver.barrier_weight = barrier_weight;
+        h.problem.solver.barrier_sharpness = barrier_sharpness;
+        Ok(())
+    }))
+}
+
+/// Configure q parameterization mode.
+///
+/// mode:
+///   0 = DirectSoftBounds (default; optimize q directly + soft bounds)
+///   1 = ImplicitBounded  (optimize latent z; map to hard-bounded q)
+///
+/// # Safety
+/// Valid handle.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_set_q_parameterization_mode(
+    handle: *mut TheseusHandle,
+    mode: i32,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let h = &mut *handle;
+        h.problem.solver.q_parameterization_mode = QParameterizationMode::try_from(mode)?;
         Ok(())
     }))
 }

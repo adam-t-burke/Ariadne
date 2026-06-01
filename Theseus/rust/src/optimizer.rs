@@ -8,6 +8,7 @@
 
 use crate::ffi::ProgressCallback;
 use crate::gradients::value_and_gradient;
+use crate::q_parameterization;
 use crate::types::{FdmCache, OptimizationState, Problem, SolverResult, TheseusError};
 use crate::variable_supports;
 use argmin::core::observers::{Observe, ObserverMode};
@@ -131,10 +132,19 @@ impl MajorIterationProgressObserver {
             }
         }
 
+        let q_mode = problem.solver.q_parameterization_mode;
+        let mut q = vec![0.0; ne];
+        q_parameterization::map_q_slice(
+            q_mode,
+            &theta[..ne],
+            &problem.bounds.lower,
+            &problem.bounds.upper,
+            &mut q,
+        );
         let anchors = variable_supports::map_latents_to_positions(problem, &theta[ne..])
             .map_err(|e| Error::msg(e.to_string()))?;
         let mut cache = FdmCache::new(problem).map_err(|e| Error::msg(e.to_string()))?;
-        crate::fdm::solve_fdm_with_loads(&mut cache, &theta[..ne], problem, &anchors, 1e-12)
+        crate::fdm::solve_fdm_with_loads(&mut cache, &q, problem, &anchors, 1e-12)
             .map_err(|e| Error::msg(e.to_string()))?;
         Ok(flatten_xyz(&cache, nn))
     }
@@ -162,7 +172,15 @@ impl Observe<LbfgsState> for MajorIterationProgressObserver {
         }
 
         let xyz_flat = self.xyz_for(theta)?;
-        let q = &theta[..ne];
+        let q_mode = problem.solver.q_parameterization_mode;
+        let mut q = vec![0.0; ne];
+        q_parameterization::map_q_slice(
+            q_mode,
+            &theta[..ne],
+            &problem.bounds.lower,
+            &problem.bounds.upper,
+            &mut q,
+        );
         let should_continue = unsafe {
             (self.callback)(
                 major_iteration,
@@ -247,7 +265,14 @@ pub fn pack_parameters(problem: &Problem, state: &OptimizationState) -> Vec<f64>
     let ne = problem.topology.num_edges;
     let n_lat = variable_supports::latent_dim(problem);
     let mut theta = Vec::with_capacity(ne + n_lat);
-    theta.extend_from_slice(&state.force_densities);
+    for i in 0..ne {
+        theta.push(q_parameterization::inverse_single(
+            problem.solver.q_parameterization_mode,
+            state.force_densities[i],
+            problem.bounds.lower[i],
+            problem.bounds.upper[i],
+        ));
+    }
     if n_lat > 0 {
         if state.variable_anchor_latents.len() == n_lat {
             theta.extend_from_slice(&state.variable_anchor_latents);
@@ -266,7 +291,14 @@ pub fn pack_parameters(problem: &Problem, state: &OptimizationState) -> Vec<f64>
 /// Unpack θ into q and latent support parameters.
 pub fn unpack_parameters(problem: &Problem, theta: &[f64]) -> (Vec<f64>, Vec<f64>) {
     let ne = problem.topology.num_edges;
-    let q = theta[..ne].to_vec();
+    let mut q = vec![0.0; ne];
+    q_parameterization::map_q_slice(
+        problem.solver.q_parameterization_mode,
+        &theta[..ne],
+        &problem.bounds.lower,
+        &problem.bounds.upper,
+        &mut q,
+    );
     let lat = theta[ne..].to_vec();
     (q, lat)
 }
@@ -277,8 +309,14 @@ pub fn unpack_parameters(problem: &Problem, theta: &[f64]) -> (Vec<f64>, Vec<f64
 
 fn parameter_bounds(problem: &Problem) -> (Vec<f64>, Vec<f64>) {
     let n_lat = variable_supports::latent_dim(problem);
-    let mut lb = problem.bounds.lower.clone();
-    let mut ub = problem.bounds.upper.clone();
+    let ne = problem.topology.num_edges;
+    let mut lb = vec![f64::NEG_INFINITY; ne];
+    let mut ub = vec![f64::INFINITY; ne];
+    if problem.solver.q_parameterization_mode == crate::types::QParameterizationMode::DirectSoftBounds
+    {
+        lb.copy_from_slice(&problem.bounds.lower);
+        ub.copy_from_slice(&problem.bounds.upper);
+    }
     if n_lat > 0 {
         // Support feasibility is enforced via latent maps. Keep latent vars unbounded.
         lb.extend(vec![f64::NEG_INFINITY; n_lat]);

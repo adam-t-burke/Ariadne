@@ -404,6 +404,7 @@ public class TheseusSolveComponent : GH_Component
         hash.Add(config.BarrierWeight);
         hash.Add(config.BarrierSharpness);
         hash.Add(config.ReportFrequency);
+        hash.Add(config.QParameterizationMode);
         hash.Add(config.StreamPreview);
         foreach (var obj in config.Objectives)
             hash.Add(obj.GetContentHashCode());
@@ -450,6 +451,7 @@ public class TheseusSolveComponent : GH_Component
                 LowerBounds = cfg.LowerBounds.ToList(),
                 UpperBounds = cfg.UpperBounds.ToList(),
                 Objectives = cfg.Objectives.ToList(),
+                QParameterizationMode = cfg.QParameterizationMode,
                 SelfWeight = snap.SelfWeight,
                 Pressure = snap.Pressure,
                 VariableSupports = cfg.VariableSupports.ToList(),

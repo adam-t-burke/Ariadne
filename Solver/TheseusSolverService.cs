@@ -60,6 +60,7 @@ public static class TheseusSolverService
             relTol: options.RelTol,
             barrierWeight: options.BarrierWeight,
             barrierSharpness: options.BarrierSharpness);
+        solver.SetQParameterizationMode((int)inputs.QParameterizationMode);
 
         if (progressCallback != null)
             solver.SetProgressCallback(progressCallback, options.ReportFrequency);
@@ -89,6 +90,7 @@ public static class TheseusSolverService
             data.QInit, data.LowerBounds, data.UpperBounds,
             data.VariableNodeIndices, data.VariableSupportKinds, data.SphereRadii,
             data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd);
+        solver.SetQParameterizationMode((int)inputs.QParameterizationMode);
 
         ApplyLoadConfig(solver, inputs, context);
 
@@ -127,6 +129,7 @@ public static class TheseusSolverService
             data.QInit, data.LowerBounds, data.UpperBounds,
             data.VariableNodeIndices, data.VariableSupportKinds, data.SphereRadii,
             data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd);
+        solver.SetQParameterizationMode((int)inputs.QParameterizationMode);
 
         ApplyLoadConfig(solver, inputs, context);
 
@@ -159,6 +162,7 @@ public static class TheseusSolverService
             data.QInit, data.LowerBounds, data.UpperBounds,
             data.VariableNodeIndices, data.VariableSupportKinds, data.SphereRadii,
             data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd);
+        solver.SetQParameterizationMode((int)inputs.QParameterizationMode);
 
         ApplyLoadConfig(solver, inputs, context);
 
