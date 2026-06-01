@@ -36,7 +36,7 @@ namespace Ariadne.Graphs
         protected override void RegisterInputParams(GH_Component.GH_InputParamManager pManager)
         {
             pManager.AddCurveParameter("Curves", "C", "Curves to convert to graph", GH_ParamAccess.tree);
-            pManager.AddNumberParameter("IntersectionTolerance", "tol", "Geometric tolerance for connecting geometry", GH_ParamAccess.item, 0.0001);
+            pManager.AddNumberParameter("IntersectionTolerance", "tol", "Geometric tolerance for connecting geometry", GH_ParamAccess.item, 0.001);
         }
 
         /// <summary>

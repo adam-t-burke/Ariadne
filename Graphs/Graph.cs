@@ -86,13 +86,40 @@ namespace Ariadne.Graphs
             ConstructGraphFromTree(inputTree, tol);
         }
 
-        /// <summary>Copy constructor; shallow copy of node and edge lists.</summary>
+        /// <summary>Copy constructor; duplicates nodes and edges while preserving topology metadata.</summary>
         /// <param name="other">Graph to copy from.</param>
         public Graph(Graph other)
         {
             Tolerance = other.Tolerance;
-            Nodes = new List<Node>(other.Nodes);
-            Edges = new List<Edge>(other.Edges);
+            Nodes = new List<Node>(other.Nodes.Count);
+            var nodeMap = new Dictionary<Node, Node>(other.Nodes.Count);
+            foreach (var node in other.Nodes)
+            {
+                var copy = new Node(node) { Neighbors = new List<Node>() };
+                Nodes.Add(copy);
+                nodeMap[node] = copy;
+            }
+
+            for (int i = 0; i < other.Nodes.Count; i++)
+            {
+                foreach (var neighbor in other.Nodes[i].Neighbors)
+                {
+                    if (nodeMap.TryGetValue(neighbor, out var neighborCopy))
+                        Nodes[i].Neighbors.Add(neighborCopy);
+                }
+            }
+
+            Edges = new List<Edge>(other.Edges.Count);
+            foreach (var edge in other.Edges)
+            {
+                var copy = new Edge(edge)
+                {
+                    Start = nodeMap[edge.Start],
+                    End = nodeMap[edge.End]
+                };
+                Edges.Add(copy);
+            }
+
             IndicesTree = other.IndicesTree ?? new GH_Structure<GH_Number>();
             AdjacencyTree = other.AdjacencyTree ?? new GH_Structure<GH_Number>();
             EdgeInputMap = other.EdgeInputMap != null ? new List<(int, int)>(other.EdgeInputMap) : new List<(int, int)>();
@@ -804,6 +831,10 @@ namespace Ariadne.Graphs
         [JsonIgnore]
         public new Guid ReferenceID { get; set; }
 
+        /// <summary>Optional stable user-defined identity for procedural Grasshopper geometry.</summary>
+        [JsonIgnore]
+        public string UserKey { get; set; }
+
         /// <summary>Default constructor; empty start/end nodes, Q = 0.</summary>
         public Edge()
         {
@@ -811,6 +842,7 @@ namespace Ariadne.Graphs
             End = new Node();
             Q = 0;
             ReferenceID = Guid.Empty;
+            UserKey = "";
         }
 
         /// <summary>Constructs an edge from two nodes, force density, and curve geometry.</summary>
@@ -825,6 +857,7 @@ namespace Ariadne.Graphs
             Q = q;
             Value = curve.Value;
             ReferenceID = Guid.Empty;
+            UserKey = "";
         }
 
         /// <summary>Copy constructor.</summary>
@@ -836,6 +869,7 @@ namespace Ariadne.Graphs
             Q = other.Q;
             Value = other.Value;
             ReferenceID = other.ReferenceID;
+            UserKey = other.UserKey;
         }
     }
 }

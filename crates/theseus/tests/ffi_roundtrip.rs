@@ -221,7 +221,7 @@ fn ffi_optimize_target_xyz() {
         );
         assert_eq!(rc, 0, "add_target_xyz failed: {}", get_last_error());
 
-        let rc = theseus_set_solver_options(h, 200, 1e-6, 1e-6, 1000.0, 10.0);
+        let rc = theseus_set_solver_options(h, 200, 1e-6, 1e-6, 1000.0, 10.0, 1.0);
         assert_eq!(rc, 0, "set_solver_options failed: {}", get_last_error());
 
         let mut xyz = vec![0.0; d.num_nodes * 3];
@@ -303,7 +303,7 @@ fn ffi_optimize_combined() {
 
         assert_eq!(
             0,
-            theseus_set_solver_options(h, 200, 1e-6, 1e-6, 1000.0, 10.0)
+            theseus_set_solver_options(h, 200, 1e-6, 1e-6, 1000.0, 10.0, 1.0)
         );
 
         let mut xyz = vec![0.0; d.num_nodes * 3];

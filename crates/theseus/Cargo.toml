@@ -16,8 +16,5 @@ ndarray = { version = "0.16", features = ["rayon"] }
 rayon = "1.11"
 argmin = "0.10"
 argmin-math = { version = "0.4", features = ["vec"] }
-
-[profile.release]
-lto = true
-codegen-units = 1
-opt-level = 3
+nurbsbook = { path = "../nurbsbook" }
+lbfgsb-rs-pure = "0.1.1"

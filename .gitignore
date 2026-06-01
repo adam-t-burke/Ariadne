@@ -367,4 +367,5 @@ MigrationBackup/
 FodyWeavers.xsd
 
 # Rust / Cargo build artifacts
-Theseus/rust/target/
+target/
+crates/theseus/target/

@@ -1,12 +1,17 @@
 //! Release-mode benchmarks for the Theseus solver.
 //!
-//! Run with:   cargo test --release --test bench_release -- --nocapture
+//! Run with:   cargo test --release --test bench_release -- --ignored --nocapture
 //!
-//! These are not criterion benchmarks (to avoid an extra dependency);
-//! instead they time key operations using `std::time::Instant` and print
-//! the results.
+//! These benchmarks are marked `#[ignore]` so they are skipped in CI.
+//! Record before/after timings here when validating hot-path changes.
+//!
+//! Baseline notes (pre Phase 2 hot-path refactor, release build):
+//!   - Forward solve and value+gradient scale roughly linearly with edge count.
+//!   - Full L-BFGS runs are dominated by value+gradient eval cost.
+//!   - Re-run after refactors and update this header with measured deltas.
 
 use ndarray::Array2;
+use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 use theseus::sparse::SparseColMatOwned;
 use theseus::types::*;
@@ -179,6 +184,7 @@ fn fmt_time(us: f64) -> String {
 // ─────────────────────────────────────────────────────────────
 
 #[test]
+#[ignore = "manual release benchmark — run with --ignored"]
 fn bench_forward_solve_scaling() {
     eprintln!("\n┌─────────────────────────────────────────────────────────────────┐");
     eprintln!("│                 FORWARD SOLVE  (factor + triangular solve)      │");
@@ -231,6 +237,7 @@ fn bench_forward_solve_scaling() {
 }
 
 #[test]
+#[ignore = "manual release benchmark — run with --ignored"]
 fn bench_value_and_gradient_scaling() {
     eprintln!("\n┌─────────────────────────────────────────────────────────────────┐");
     eprintln!("│             VALUE + GRADIENT  (forward + adjoint + explicit)    │");
@@ -294,6 +301,7 @@ fn bench_value_and_gradient_scaling() {
 }
 
 #[test]
+#[ignore = "manual release benchmark — run with --ignored"]
 fn bench_full_optimize_scaling() {
     let opt_sizes: &[(usize, &str)] = &[(10, "10×10"), (32, "32×32")];
 
@@ -318,9 +326,11 @@ fn bench_full_optimize_scaling() {
         };
 
         let start = Instant::now();
+        let cancel = AtomicBool::new(false);
         for _ in 0..runs {
             let mut state = OptimizationState::new(vec![1.0; ne], Array2::zeros((0, 3)));
-            let result = theseus::optimizer::optimize(&problem, &mut state, None, 1).unwrap();
+            let result =
+                theseus::optimizer::optimize(&problem, &mut state, None, 1, &cancel).unwrap();
             let _ = std::hint::black_box(result);
         }
         let elapsed = start.elapsed();

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading.Tasks;
 using System.Text.Json;
@@ -82,8 +83,8 @@ namespace Ariadne.FDM
             FreeNodes = new List<int>();
             Graph = new Graph();
             Anchors = new List<Point3d>();
-            ATol = 0.01;
-            ETol = 0.01;
+            ATol = 0.001;
+            ETol = 0.001;
             IsUpdating = false;
         }
 
@@ -147,8 +148,8 @@ namespace Ariadne.FDM
             Anchors = new List<Point3d>(other.Anchors);
             ATol = other.ATol;
             ETol = other.ETol;
-            Free = new List<Node>(other.Free);
-            Fixed = new List<Node>(other.Fixed);
+            Free = other.FreeNodes.ConvertAll(i => Graph.Nodes[i]);
+            Fixed = other.FixedNodes.ConvertAll(i => Graph.Nodes[i]);
             FixedNodes = new List<int>(other.FixedNodes);
             FreeNodes = new List<int>(other.FreeNodes);
             Valid = other.Valid;
@@ -161,17 +162,19 @@ namespace Ariadne.FDM
         private void FixedFree()
         {
             List<Node> nodes = Graph.Nodes;
+            var fixedNodes = new HashSet<Node>();
 
-            foreach(Point3d anchor in Anchors)
+            foreach (Point3d anchor in Anchors)
             {
-                (bool anchorFound, int ianchor) = UtilityFunctions.WithinTolerance(nodes, anchor, ATol);
-                if (anchorFound)
+                int ianchor = AnchorMatcher.FindNodeIndex(nodes, anchor, ATol);
+                if (ianchor >= 0)
                 {
                     nodes[ianchor].Anchor = true;
-                    Fixed.Add(nodes[ianchor]);
+                    fixedNodes.Add(nodes[ianchor]);
                 }
             }
 
+            Fixed = fixedNodes.ToList();
             Free = nodes.Except(Fixed).ToList();
 
             // update the order of nodes to place fixed nodes at the end
@@ -227,6 +230,59 @@ private void ValidCheck()
         {
             if (Fixed.Count != Anchors.Count || Fixed.Count + Free.Count != Graph.Nn) return false;
             else return true;
+        }
+
+        /// <summary>
+        /// Content-based hash of network topology and current geometry for solve input-change detection.
+        /// Excludes solved edge q values so optimizer output does not become implicit input state.
+        /// </summary>
+        public int GetTopologyHashCode()
+        {
+            var h = new HashCode();
+            h.Add(ATol);
+            h.Add(ETol);
+            h.Add(Graph.Nn);
+            h.Add(Graph.Ne);
+            h.Add(Graph.Tolerance);
+
+            foreach (var node in Graph.Nodes)
+            {
+                h.Add(node.Index);
+                h.Add(node.Anchor);
+                h.Add(node.Value.X);
+                h.Add(node.Value.Y);
+                h.Add(node.Value.Z);
+            }
+
+            foreach (var edge in Graph.Edges)
+            {
+                h.Add(edge.Start.Index);
+                h.Add(edge.End.Index);
+                h.Add(edge.ReferenceID);
+                h.Add(edge.UserKey);
+            }
+
+            foreach (var anchor in Anchors)
+            {
+                h.Add(anchor.X);
+                h.Add(anchor.Y);
+                h.Add(anchor.Z);
+            }
+
+            return h.ToHashCode();
+        }
+
+        /// <summary>
+        /// Content-based hash including mutable solved edge q state for diagnostics.
+        /// Solver recompute logic should prefer <see cref="GetTopologyHashCode"/>.
+        /// </summary>
+        public int GetContentHashCode()
+        {
+            var h = new HashCode();
+            h.Add(GetTopologyHashCode());
+            foreach (var edge in Graph.Edges)
+                h.Add(edge.Q);
+            return h.ToHashCode();
         }
       
     }

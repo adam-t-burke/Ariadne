@@ -1,0 +1,12 @@
+[package]
+name = "nurbsbook"
+version = "0.1.0"
+edition = "2021"
+description = "Standalone Rust implementation of core NURBS Book algorithms"
+license = "MIT"
+
+[lib]
+name = "nurbsbook"
+path = "src/lib.rs"
+
+[dependencies]

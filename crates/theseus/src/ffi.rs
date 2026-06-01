@@ -24,7 +24,7 @@
 //!   - Caller allocates flat arrays and passes pointers + lengths.
 //!   - Opaque handles (`*mut TheseusHandle`) are created by Rust and freed
 //!     by Rust via `theseus_free`.
-//!   - No JSON, no WebSocket — pure value types over the boundary.
+//!   - No JSON — pure value types over the boundary.
 
 use crate::optimizer;
 use crate::sparse::SparseColMatOwned;
@@ -33,6 +33,7 @@ use ndarray::Array2;
 use std::cell::RefCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // ─────────────────────────────────────────────────────────────
 //  Thread-local error message  (the SQLite pattern)
@@ -64,6 +65,17 @@ where
             set_last_error("internal panic (this is a bug — please report it)");
             -2
         }
+    }
+}
+
+/// Require a non-null mutable handle pointer.
+unsafe fn require_handle(
+    handle: *mut TheseusHandle,
+) -> Result<&'static mut TheseusHandle, TheseusError> {
+    if handle.is_null() {
+        Err(TheseusError::Shape("null TheseusHandle".into()))
+    } else {
+        Ok(&mut *handle)
     }
 }
 
@@ -122,6 +134,7 @@ pub struct TheseusHandle {
     pub progress_callback: Option<ProgressCallback>,
     pub report_frequency: usize,
     pub last_termination_reason: String,
+    pub cancel_flag: AtomicBool,
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -192,7 +205,7 @@ pub unsafe extern "C" fn theseus_create(
 
 /// Create a new problem with variable support definitions.
 ///
-/// `support_kinds`: 0 = Sphere, 1 = Roller, 2 = Rail.
+/// `support_kinds`: 0 = Sphere, 1 = Roller, 2 = Rail, 3 = NURBS curve, 4 = NURBS surface.
 ///
 /// For each support i:
 /// - `variable_node_indices[i]` is the global node index.
@@ -230,6 +243,10 @@ pub unsafe extern "C" fn theseus_create_with_variable_supports(
     roller_upper: *const f64,
     rail_start: *const f64,
     rail_end: *const f64,
+    nurbs_offsets: *const usize,
+    nurbs_lengths: *const usize,
+    nurbs_data: *const f64,
+    nurbs_data_len: usize,
 ) -> *mut TheseusHandle {
     let result = catch_unwind(AssertUnwindSafe(|| {
         create_inner_with_variable_supports(
@@ -257,6 +274,10 @@ pub unsafe extern "C" fn theseus_create_with_variable_supports(
             roller_upper,
             rail_start,
             rail_end,
+            nurbs_offsets,
+            nurbs_lengths,
+            nurbs_data,
+            nurbs_data_len,
         )
     }));
 
@@ -319,7 +340,131 @@ unsafe fn create_inner(
         std::ptr::null(),
         std::ptr::null(),
         std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null(),
+        0,
     )
+}
+
+fn nurbs_support_data<'a>(
+    index: usize,
+    offsets: &[usize],
+    lengths: &[usize],
+    data: &'a [f64],
+) -> Result<&'a [f64], TheseusError> {
+    if offsets.len() <= index || lengths.len() <= index {
+        return Err(TheseusError::Shape(format!(
+            "NURBS support {index} is missing geometry offset/length"
+        )));
+    }
+    let offset = offsets[index];
+    let length = lengths[index];
+    let end = offset
+        .checked_add(length)
+        .ok_or_else(|| TheseusError::Shape("NURBS geometry range overflow".into()))?;
+    if end > data.len() {
+        return Err(TheseusError::Shape(format!(
+            "NURBS support {index} geometry range is out of bounds"
+        )));
+    }
+    Ok(&data[offset..end])
+}
+
+fn read_usize(value: f64, label: &str) -> Result<usize, TheseusError> {
+    if !value.is_finite() || value < 0.0 || value.fract().abs() > 1e-9 {
+        return Err(TheseusError::Shape(format!(
+            "{label} must be encoded as a nonnegative integer"
+        )));
+    }
+    Ok(value as usize)
+}
+
+fn parse_nurbs_curve_support(data: &[f64]) -> Result<VariableSupportKind, TheseusError> {
+    if data.len() < 6 {
+        return Err(TheseusError::Shape(
+            "NURBS curve support data is too short".into(),
+        ));
+    }
+    let degree = read_usize(data[0], "NURBS curve degree")?;
+    let knot_count = read_usize(data[1], "NURBS curve knot count")?;
+    let cp_count = read_usize(data[2], "NURBS curve control point count")?;
+    let domain = [data[3], data[4]];
+    let initial_t = data[5];
+    let expected = 6 + knot_count + cp_count * 4;
+    if data.len() != expected {
+        return Err(TheseusError::Shape(format!(
+            "NURBS curve support data length got {}, expected {expected}",
+            data.len()
+        )));
+    }
+    let knots = data[6..6 + knot_count].to_vec();
+    let cp_start = 6 + knot_count;
+    let mut control_points = Vec::with_capacity(cp_count);
+    for i in 0..cp_count {
+        let j = cp_start + i * 4;
+        control_points.push([data[j], data[j + 1], data[j + 2], data[j + 3]]);
+    }
+    let curve = nurbsbook::NurbsCurve::new(degree, knots, control_points)
+        .map_err(|e| TheseusError::Shape(format!("invalid NURBS curve support: {e}")))?;
+    Ok(VariableSupportKind::NurbsCurve {
+        curve,
+        domain,
+        initial_t,
+    })
+}
+
+fn parse_nurbs_surface_support(data: &[f64]) -> Result<VariableSupportKind, TheseusError> {
+    if data.len() < 12 {
+        return Err(TheseusError::Shape(
+            "NURBS surface support data is too short".into(),
+        ));
+    }
+    let degree_u = read_usize(data[0], "NURBS surface U degree")?;
+    let degree_v = read_usize(data[1], "NURBS surface V degree")?;
+    let count_u = read_usize(data[2], "NURBS surface U control point count")?;
+    let count_v = read_usize(data[3], "NURBS surface V control point count")?;
+    let knot_u_count = read_usize(data[4], "NURBS surface U knot count")?;
+    let knot_v_count = read_usize(data[5], "NURBS surface V knot count")?;
+    let domain_u = [data[6], data[7]];
+    let domain_v = [data[8], data[9]];
+    let initial_uv = [data[10], data[11]];
+    let cp_count = count_u
+        .checked_mul(count_v)
+        .ok_or_else(|| TheseusError::Shape("NURBS surface control point count overflow".into()))?;
+    let expected = 12 + knot_u_count + knot_v_count + cp_count * 4;
+    if data.len() != expected {
+        return Err(TheseusError::Shape(format!(
+            "NURBS surface support data length got {}, expected {expected}",
+            data.len()
+        )));
+    }
+    let ku_start = 12;
+    let kv_start = ku_start + knot_u_count;
+    let cp_start = kv_start + knot_v_count;
+    let knots_u = data[ku_start..ku_start + knot_u_count].to_vec();
+    let knots_v = data[kv_start..kv_start + knot_v_count].to_vec();
+    let mut control_points = Vec::with_capacity(cp_count);
+    for i in 0..cp_count {
+        let j = cp_start + i * 4;
+        control_points.push([data[j], data[j + 1], data[j + 2], data[j + 3]]);
+    }
+    let surface = nurbsbook::NurbsSurface::new(
+        degree_u,
+        degree_v,
+        knots_u,
+        knots_v,
+        count_u,
+        count_v,
+        control_points,
+    )
+    .map_err(|e| TheseusError::Shape(format!("invalid NURBS surface support: {e}")))?;
+    Ok(VariableSupportKind::NurbsSurface {
+        surface,
+        domain_u,
+        domain_v,
+        initial_uv,
+    })
 }
 
 unsafe fn create_inner_with_variable_supports(
@@ -347,6 +492,10 @@ unsafe fn create_inner_with_variable_supports(
     roller_upper: *const f64,
     rail_start: *const f64,
     rail_end: *const f64,
+    nurbs_offsets: *const usize,
+    nurbs_lengths: *const usize,
+    nurbs_data: *const f64,
+    nurbs_data_len: usize,
 ) -> Result<*mut TheseusHandle, TheseusError> {
     let rows = slice::from_raw_parts(coo_rows, coo_nnz);
     let cols = slice::from_raw_parts(coo_cols, coo_nnz);
@@ -397,6 +546,21 @@ unsafe fn create_inner_with_variable_supports(
         let roller_ub = slice::from_raw_parts(roller_upper, num_variable_supports * 3);
         let rail_s = slice::from_raw_parts(rail_start, num_variable_supports * 3);
         let rail_e = slice::from_raw_parts(rail_end, num_variable_supports * 3);
+        let nurbs_offsets_slice = if nurbs_offsets.is_null() {
+            &[][..]
+        } else {
+            slice::from_raw_parts(nurbs_offsets, num_variable_supports)
+        };
+        let nurbs_lengths_slice = if nurbs_lengths.is_null() {
+            &[][..]
+        } else {
+            slice::from_raw_parts(nurbs_lengths, num_variable_supports)
+        };
+        let nurbs_data_slice = if nurbs_data.is_null() {
+            &[][..]
+        } else {
+            slice::from_raw_parts(nurbs_data, nurbs_data_len)
+        };
 
         // Validate variable nodes are fixed support nodes.
         for &node in &var_nodes {
@@ -463,6 +627,24 @@ unsafe fn create_inner_with_variable_supports(
                     start: [rail_s[i * 3], rail_s[i * 3 + 1], rail_s[i * 3 + 2]],
                     end: [rail_e[i * 3], rail_e[i * 3 + 1], rail_e[i * 3 + 2]],
                 },
+                3 => {
+                    let data = nurbs_support_data(
+                        i,
+                        nurbs_offsets_slice,
+                        nurbs_lengths_slice,
+                        nurbs_data_slice,
+                    )?;
+                    parse_nurbs_curve_support(data)?
+                }
+                4 => {
+                    let data = nurbs_support_data(
+                        i,
+                        nurbs_offsets_slice,
+                        nurbs_lengths_slice,
+                        nurbs_data_slice,
+                    )?;
+                    parse_nurbs_surface_support(data)?
+                }
                 k => {
                     return Err(TheseusError::Shape(format!(
                         "unknown variable support kind code {k} at index {i}"
@@ -483,7 +665,10 @@ unsafe fn create_inner_with_variable_supports(
             initial_variable_positions: init_positions,
             variable_supports: supports,
         };
-        let latent_init = crate::variable_supports::initial_latents(&anchors)?;
+        let latent_init = crate::variable_supports::initial_latents(
+            &anchors,
+            SolverOptions::default().anchor_saturation_lambda,
+        )?;
         (anchors, latent_init)
     };
 
@@ -518,6 +703,7 @@ unsafe fn create_inner_with_variable_supports(
         progress_callback: None,
         report_frequency: 1,
         last_termination_reason: "not run".to_string(),
+        cancel_flag: AtomicBool::new(false),
     })))
 }
 
@@ -552,7 +738,7 @@ pub unsafe extern "C" fn theseus_add_target_xyz(
     target_xyz: *const f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let idx = slice::from_raw_parts(node_indices, num_nodes).to_vec();
         let target = Array2::from_shape_vec(
             (num_nodes, 3),
@@ -581,7 +767,7 @@ pub unsafe extern "C" fn theseus_add_target_length(
     targets: *const f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         let tgt = slice::from_raw_parts(targets, num_edges).to_vec();
         h.problem.objectives.push(Box::new(TargetLength {
@@ -606,7 +792,7 @@ pub unsafe extern "C" fn theseus_add_target_force(
     targets: *const f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         let tgt = slice::from_raw_parts(targets, num_edges).to_vec();
         h.problem.objectives.push(Box::new(TargetForce {
@@ -632,7 +818,7 @@ pub unsafe extern "C" fn theseus_add_min_length(
     sharpness: f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         let thr = slice::from_raw_parts(thresholds, num_edges).to_vec();
         h.problem.objectives.push(Box::new(MinLength {
@@ -662,7 +848,7 @@ pub unsafe extern "C" fn theseus_add_target_xy(
     target_xy: *const f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let idx = slice::from_raw_parts(node_indices, num_nodes).to_vec();
         let target = Array2::from_shape_vec(
             (num_nodes, 3),
@@ -698,7 +884,7 @@ pub unsafe extern "C" fn theseus_add_target_plane(
     y_axis: *const f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let idx = slice::from_raw_parts(node_indices, num_nodes).to_vec();
         let target = Array2::from_shape_vec(
             (num_nodes, 3),
@@ -740,12 +926,13 @@ pub unsafe extern "C" fn theseus_add_planar_constraint_along_direction(
     direction: *const f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let idx = slice::from_raw_parts(node_indices, num_nodes).to_vec();
         let origin_arr: [f64; 3] = [*origin.add(0), *origin.add(1), *origin.add(2)];
         let x_axis_arr: [f64; 3] = [*x_axis.add(0), *x_axis.add(1), *x_axis.add(2)];
         let y_axis_arr: [f64; 3] = [*y_axis.add(0), *y_axis.add(1), *y_axis.add(2)];
         let direction_arr: [f64; 3] = [*direction.add(0), *direction.add(1), *direction.add(2)];
+        crate::objectives::planar_constraint_n_dot_d(&x_axis_arr, &y_axis_arr, &direction_arr)?;
         h.problem
             .objectives
             .push(Box::new(PlanarConstraintAlongDirection {
@@ -775,7 +962,7 @@ pub unsafe extern "C" fn theseus_add_length_variation(
     normalization_strategy: i32,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         let normalization_strategy =
             LengthVarianceNormalizationStrategy::try_from(normalization_strategy)?;
@@ -805,7 +992,7 @@ pub unsafe extern "C" fn theseus_add_force_variation(
     normalization_strategy: i32,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         let normalization_strategy =
             ForceVarianceNormalizationStrategy::try_from(normalization_strategy)?;
@@ -832,7 +1019,7 @@ pub unsafe extern "C" fn theseus_add_sum_force_length(
     num_edges: usize,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         h.problem.objectives.push(Box::new(SumForceLength {
             weight,
@@ -856,7 +1043,7 @@ pub unsafe extern "C" fn theseus_add_max_length(
     sharpness: f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         let thr = slice::from_raw_parts(thresholds, num_edges).to_vec();
         h.problem.objectives.push(Box::new(MaxLength {
@@ -883,7 +1070,7 @@ pub unsafe extern "C" fn theseus_add_min_force(
     sharpness: f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         let thr = slice::from_raw_parts(thresholds, num_edges).to_vec();
         h.problem.objectives.push(Box::new(MinForce {
@@ -910,7 +1097,7 @@ pub unsafe extern "C" fn theseus_add_max_force(
     sharpness: f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         let thr = slice::from_raw_parts(thresholds, num_edges).to_vec();
         h.problem.objectives.push(Box::new(MaxForce {
@@ -939,7 +1126,7 @@ pub unsafe extern "C" fn theseus_add_rigid_set_compare(
     target_xyz: *const f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let idx = slice::from_raw_parts(node_indices, num_nodes).to_vec();
         let target = Array2::from_shape_vec(
             (num_nodes, 3),
@@ -990,7 +1177,7 @@ pub unsafe extern "C" fn theseus_add_reaction_direction(
     target_dirs: *const f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let idx = slice::from_raw_parts(anchor_indices, num_anchors).to_vec();
         let dirs = Array2::from_shape_vec(
             (num_anchors, 3),
@@ -1024,7 +1211,7 @@ pub unsafe extern "C" fn theseus_add_reaction_direction_magnitude(
     target_mags: *const f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let idx = slice::from_raw_parts(anchor_indices, num_anchors).to_vec();
         let dirs = Array2::from_shape_vec(
             (num_anchors, 3),
@@ -1065,7 +1252,7 @@ pub unsafe extern "C" fn theseus_add_reaction_magnitude(
     sign_semantics: i32,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let behavior = ReactionMagnitudeBehavior::try_from(behavior)?;
         let sign = ReactionMagnitudeSign::try_from(sign_semantics)?;
         let idx = slice::from_raw_parts(anchor_indices, num_anchors).to_vec();
@@ -1104,7 +1291,7 @@ pub unsafe extern "C" fn theseus_add_reaction_direction_magnitude_with_options(
     sign_semantics: i32,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let behavior = ReactionMagnitudeBehavior::try_from(behavior)?;
         let sign = ReactionMagnitudeSign::try_from(sign_semantics)?;
         let idx = slice::from_raw_parts(anchor_indices, num_anchors).to_vec();
@@ -1141,15 +1328,29 @@ pub unsafe extern "C" fn theseus_set_solver_options(
     rel_tol: f64,
     barrier_weight: f64,
     barrier_sharpness: f64,
+    anchor_saturation_lambda: f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         h.problem.solver.max_iterations = max_iterations;
         h.problem.solver.absolute_tolerance = abs_tol;
         h.problem.solver.relative_tolerance = rel_tol;
         h.problem.solver.report_frequency = 1;
         h.problem.solver.barrier_weight = barrier_weight;
         h.problem.solver.barrier_sharpness = barrier_sharpness;
+        h.problem.solver.anchor_saturation_lambda = anchor_saturation_lambda.max(1e-12);
+        let latent_dim = crate::variable_supports::latent_dim(&h.problem);
+        if latent_dim > 0 && !h.problem.anchors.variable_supports.is_empty() {
+            let latents = crate::variable_supports::initial_latents(
+                &h.problem.anchors,
+                h.problem.solver.anchor_saturation_lambda,
+            )?;
+            h.state.variable_anchor_latents = latents;
+            h.state.variable_anchor_positions = crate::variable_supports::map_latents_to_positions(
+                &h.problem,
+                &h.state.variable_anchor_latents,
+            )?;
+        }
         Ok(())
     }))
 }
@@ -1159,6 +1360,7 @@ pub unsafe extern "C" fn theseus_set_solver_options(
 /// mode:
 ///   0 = DirectSoftBounds (default; optimize q directly + soft bounds)
 ///   1 = ImplicitBounded  (optimize latent z; map to hard-bounded q)
+///   2 = DirectBoxBounds  (optimize physical q with hard L-BFGS-B boxes)
 ///
 /// # Safety
 /// Valid handle.
@@ -1168,7 +1370,7 @@ pub unsafe extern "C" fn theseus_set_q_parameterization_mode(
     mode: i32,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         h.problem.solver.q_parameterization_mode = QParameterizationMode::try_from(mode)?;
         Ok(())
     }))
@@ -1195,7 +1397,7 @@ pub unsafe extern "C" fn theseus_set_self_weight_prescribed(
     relaxation: f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let ne = h.problem.topology.num_edges;
         let mu = slice::from_raw_parts(linear_densities, ne).to_vec();
         let g = slice::from_raw_parts(gravity, 3);
@@ -1228,7 +1430,7 @@ pub unsafe extern "C" fn theseus_set_self_weight_sizing(
     relaxation: f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let g = slice::from_raw_parts(gravity, 3);
         h.problem.self_weight = Some(SelfWeightParams::Sizing {
             rho,
@@ -1249,7 +1451,7 @@ pub unsafe extern "C" fn theseus_set_self_weight_sizing(
 #[no_mangle]
 pub unsafe extern "C" fn theseus_clear_self_weight(handle: *mut TheseusHandle) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         h.problem.self_weight = None;
         Ok(())
     }))
@@ -1280,7 +1482,7 @@ pub unsafe extern "C" fn theseus_set_pressure(
     relaxation: f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let offsets = slice::from_raw_parts(face_offsets, num_faces + 1);
         let total_verts = offsets[num_faces];
         let verts = slice::from_raw_parts(face_vertices, total_verts);
@@ -1328,7 +1530,7 @@ pub unsafe extern "C" fn theseus_set_pressure_hydrostatic(
     relaxation: f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let offsets = slice::from_raw_parts(face_offsets, num_faces + 1);
         let total_verts = offsets[num_faces];
         let verts = slice::from_raw_parts(face_vertices, total_verts);
@@ -1376,7 +1578,7 @@ pub unsafe extern "C" fn theseus_set_pressure_directional(
     relaxation: f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let offsets = slice::from_raw_parts(face_offsets, num_faces + 1);
         let total_verts = offsets[num_faces];
         let verts = slice::from_raw_parts(face_vertices, total_verts);
@@ -1407,7 +1609,7 @@ pub unsafe extern "C" fn theseus_set_pressure_directional(
 #[no_mangle]
 pub unsafe extern "C" fn theseus_clear_pressure(handle: *mut TheseusHandle) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         h.problem.pressure = None;
         Ok(())
     }))
@@ -1431,7 +1633,7 @@ pub unsafe extern "C" fn theseus_set_progress_callback(
     frequency: usize,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         h.progress_callback = callback;
         h.report_frequency = if frequency == 0 { 1 } else { frequency };
         Ok(())
@@ -1467,6 +1669,26 @@ pub unsafe extern "C" fn theseus_get_termination_reason(
 }
 
 // ─────────────────────────────────────────────────────────────
+//  Cancellation
+// ─────────────────────────────────────────────────────────────
+
+/// Request cancellation of an in-progress optimization.
+///
+/// The flag is checked after each objective evaluation. Safe to call
+/// from any thread while `theseus_optimize` is running.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by `theseus_create`.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_cancel(handle: *mut TheseusHandle) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let h = require_handle(handle)?;
+        h.cancel_flag.store(true, Ordering::Relaxed);
+        Ok(())
+    }))
+}
+
+// ─────────────────────────────────────────────────────────────
 //  Run optimisation
 // ─────────────────────────────────────────────────────────────
 
@@ -1489,10 +1711,10 @@ pub unsafe extern "C" fn theseus_optimize(
     out_converged: *mut bool,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let cb = h.progress_callback;
         let freq = h.report_frequency;
-        let result = optimizer::optimize(&h.problem, &mut h.state, cb, freq)?;
+        let result = optimizer::optimize(&h.problem, &mut h.state, cb, freq, &h.cancel_flag)?;
         h.last_termination_reason = result.termination_reason.clone();
 
         let nn = h.problem.topology.num_nodes;
@@ -1526,6 +1748,42 @@ pub unsafe extern "C" fn theseus_optimize(
     }))
 }
 
+/// Return the number of loss values recorded by the last optimization.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by `theseus_create`.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_get_loss_trace_len(handle: *mut TheseusHandle) -> usize {
+    let Ok(h) = require_handle(handle) else {
+        return 0;
+    };
+    h.state.loss_trace.len()
+}
+
+/// Copy the loss trace from the last optimization into `out_loss_trace`.
+///
+/// Returns the number of values copied, capped by `out_len`.
+///
+/// # Safety
+/// `handle` must be valid and `out_loss_trace` must point to a buffer of at
+/// least `out_len` doubles when `out_len > 0`.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_get_loss_trace(
+    handle: *mut TheseusHandle,
+    out_loss_trace: *mut f64,
+    out_len: usize,
+) -> usize {
+    let Ok(h) = require_handle(handle) else {
+        return 0;
+    };
+    let n = h.state.loss_trace.len().min(out_len);
+    if n == 0 {
+        return 0;
+    }
+    slice::from_raw_parts_mut(out_loss_trace, n).copy_from_slice(&h.state.loss_trace[..n]);
+    n
+}
+
 // ─────────────────────────────────────────────────────────────
 //  Forward solve only  (no optimisation)
 // ─────────────────────────────────────────────────────────────
@@ -1546,7 +1804,7 @@ pub unsafe extern "C" fn theseus_solve_forward(
     out_reactions: *mut f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let mut cache = FdmCache::new(&h.problem)?;
         let anchors = crate::variable_supports::map_latents_to_positions(
             &h.problem,
@@ -1627,7 +1885,7 @@ pub unsafe extern "C" fn theseus_solve_pseudoinverse(
     out_reactions: *mut f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let nn_free = h.problem.topology.free_node_indices.len();
         let nn = h.problem.topology.num_nodes;
         let ne = h.problem.topology.num_edges;
@@ -1704,9 +1962,11 @@ pub unsafe extern "C" fn theseus_solve_nnls(
     out_lengths: *mut f64,
     out_forces: *mut f64,
     out_reactions: *mut f64,
+    out_iterations: *mut usize,
+    out_converged: *mut bool,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = &mut *handle;
+        let h = require_handle(handle)?;
         let nn_free = h.problem.topology.free_node_indices.len();
         let nn = h.problem.topology.num_nodes;
         let ne = h.problem.topology.num_edges;
@@ -1717,7 +1977,8 @@ pub unsafe extern "C" fn theseus_solve_nnls(
         )
         .map_err(|e| TheseusError::Shape(format!("target_free_xyz: {e}")))?;
 
-        let q = crate::inverse::solve_nnls(&h.problem, &target, max_iter, tol)?;
+        let result = crate::inverse::solve_nnls(&h.problem, &target, max_iter, tol)?;
+        let q = result.q;
 
         // Forward solve with the computed q (with self-weight/pressure if active)
         let mut cache = FdmCache::new(&h.problem)?;
@@ -1745,6 +2006,9 @@ pub unsafe extern "C" fn theseus_solve_nnls(
                 r_out[i * 3 + d] = cache.reactions[[i, d]];
             }
         }
+
+        *out_iterations = result.iterations;
+        *out_converged = result.converged;
 
         Ok(())
     }))

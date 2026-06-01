@@ -90,21 +90,7 @@ public class FindFacesComponent : GH_Component
                 pts.Add(graph.Nodes[idx].Value);
             pts.Add(pts[0]); // close
             polylines.Add(new Polyline(pts));
-
-            // Newell normal
-            var normal = Vector3d.Zero;
-            for (int i = 0; i < face.Count; i++)
-            {
-                var vi = graph.Nodes[face[i]].Value;
-                var vj = graph.Nodes[face[(i + 1) % face.Count]].Value;
-                normal.X += (vi.Y - vj.Y) * (vi.Z + vj.Z);
-                normal.Y += (vi.Z - vj.Z) * (vi.X + vj.X);
-                normal.Z += (vi.X - vj.X) * (vi.Y + vj.Y);
-            }
-            normal *= 0.5;
-            if (normal.Length > 1e-12)
-                normal.Unitize();
-            normals.Add(normal);
+            normals.Add(FaceGeometry.ComputeNewellNormal(pts));
         }
 
         DA.SetDataTree(0, faceTree);

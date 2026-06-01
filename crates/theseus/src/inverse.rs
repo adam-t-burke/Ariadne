@@ -30,6 +30,15 @@ use crate::sparse::SparseColMatOwned;
 use crate::types::{Factorization, FactorizationStrategy, Problem, TheseusError};
 use ndarray::Array2;
 
+/// Factorise with LDL and solve a single RHS using ephemeral workspace.
+fn ldl_solve(g: &SparseColMatOwned, rhs: &[f64]) -> Result<Vec<f64>, TheseusError> {
+    let mut factor_stack = dyn_stack::GlobalPodBuffer::new(dyn_stack::StackReq::empty());
+    let mut solve_stack = dyn_stack::GlobalPodBuffer::new(dyn_stack::StackReq::empty());
+    let mut workspace = vec![0.0; rhs.len().max(1)];
+    let fac = Factorization::new(g, FactorizationStrategy::LDL, &mut factor_stack)?;
+    fac.solve(rhs, &mut workspace, &mut solve_stack)
+}
+
 // ─────────────────────────────────────────────────────────────
 //  Target member vectors
 // ─────────────────────────────────────────────────────────────
@@ -37,10 +46,7 @@ use ndarray::Array2;
 /// Compute target member coordinate differences from full node positions.
 ///
 /// Returns `u` (ne × 3) where `u[k,:] = N_target[end_k] − N_target[start_k]`.
-fn compute_target_member_vectors(
-    problem: &Problem,
-    target_free_xyz: &Array2<f64>,
-) -> Array2<f64> {
+fn compute_target_member_vectors(problem: &Problem, target_free_xyz: &Array2<f64>) -> Array2<f64> {
     let topo = &problem.topology;
     let ne = topo.num_edges;
     let nn = topo.num_nodes;
@@ -140,9 +146,15 @@ fn build_equilibrium_matrix(
     let nn_fixed = topo.fixed_node_indices.len();
 
     let mut enforce_dims: Vec<usize> = Vec::new();
-    if enforce_zero_rx && nn_fixed > 0 { enforce_dims.push(0); }
-    if enforce_zero_ry && nn_fixed > 0 { enforce_dims.push(1); }
-    if enforce_zero_rz && nn_fixed > 0 { enforce_dims.push(2); }
+    if enforce_zero_rx && nn_fixed > 0 {
+        enforce_dims.push(0);
+    }
+    if enforce_zero_ry && nn_fixed > 0 {
+        enforce_dims.push(1);
+    }
+    if enforce_zero_rz && nn_fixed > 0 {
+        enforce_dims.push(2);
+    }
     let extra_rows = enforce_dims.len() * nn_fixed;
     let m_rows = 3 * nn_free + extra_rows;
 
@@ -188,8 +200,8 @@ fn build_equilibrium_matrix(
         }
     }
 
-    let m_mat = SparseColMatOwned::from_triplets(m_rows, ne, &triplets)
-        .expect("build_equilibrium_matrix");
+    let m_mat =
+        SparseColMatOwned::from_triplets(m_rows, ne, &triplets).expect("build_equilibrium_matrix");
 
     // p = [Pn_x; Pn_y; Pn_z; 0; ...; 0]  (zeros for reaction rows)
     let loads = &problem.free_node_loads;
@@ -254,8 +266,8 @@ fn build_augmented_system(
         triplets.push(((m + j) as u32, (m + j) as u32, -regularization));
     }
 
-    let k_mat = SparseColMatOwned::from_triplets(total, total, &triplets)
-        .expect("build_augmented_system");
+    let k_mat =
+        SparseColMatOwned::from_triplets(total, total, &triplets).expect("build_augmented_system");
 
     // RHS = [rhs_top; 0]
     let mut rhs = vec![0.0; total];
@@ -348,7 +360,13 @@ pub fn solve_pseudoinverse(
     } else {
         Some(normalise_member_vectors(&mut u)?)
     };
-    let (m_mat, p) = build_equilibrium_matrix(problem, &u, enforce_zero_rx, enforce_zero_ry, enforce_zero_rz);
+    let (m_mat, p) = build_equilibrium_matrix(
+        problem,
+        &u,
+        enforce_zero_rx,
+        enforce_zero_ry,
+        enforce_zero_rz,
+    );
 
     // G = M^T M  (ne × ne, sparse)
     let m_t = m_mat.transpose();
@@ -364,8 +382,7 @@ pub fn solve_pseudoinverse(
     let h = m_t.matvec(&p);
 
     // Factorise G and solve (LDL for normal equations)
-    let fac = Factorization::new(&g, FactorizationStrategy::LDL)?;
-    let sol = fac.solve(&h);
+    let sol = ldl_solve(&g, &h)?;
 
     let q = match target_lengths {
         Some(ref lengths) => forces_to_q(&sol, lengths),
@@ -431,13 +448,18 @@ pub fn solve_pseudoinverse_augmented(
     } else {
         Some(normalise_member_vectors(&mut u)?)
     };
-    let (m_mat, p) = build_equilibrium_matrix(problem, &u, enforce_zero_rx, enforce_zero_ry, enforce_zero_rz);
+    let (m_mat, p) = build_equilibrium_matrix(
+        problem,
+        &u,
+        enforce_zero_rx,
+        enforce_zero_ry,
+        enforce_zero_rz,
+    );
     let m_rows = p.len();
 
     let (k_mat, rhs) = build_augmented_system(&m_mat, &p, regularization);
 
-    let fac = Factorization::new(&k_mat, FactorizationStrategy::LDL)?;
-    let sol = fac.solve(&rhs);
+    let sol = ldl_solve(&k_mat, &rhs)?;
 
     let raw: Vec<f64> = sol[m_rows..m_rows + ne].to_vec();
     let q = match target_lengths {
@@ -495,7 +517,13 @@ pub fn solve_pseudoinverse_l1(
     } else {
         Some(normalise_member_vectors(&mut u)?)
     };
-    let (m_mat, p) = build_equilibrium_matrix(problem, &u, enforce_zero_rx, enforce_zero_ry, enforce_zero_rz);
+    let (m_mat, p) = build_equilibrium_matrix(
+        problem,
+        &u,
+        enforce_zero_rx,
+        enforce_zero_ry,
+        enforce_zero_rz,
+    );
 
     let m_t = m_mat.transpose();
     let m_rows = p.len();
@@ -507,8 +535,7 @@ pub fn solve_pseudoinverse_l1(
         g_l2.add_diagonal(regularization);
     }
     let h_l2 = m_t.matvec(&p);
-    let fac_l2 = Factorization::new(&g_l2, FactorizationStrategy::LDL)?;
-    let mut sol = fac_l2.solve(&h_l2);
+    let mut sol = ldl_solve(&g_l2, &h_l2)?;
 
     const ABS_EPS: f64 = 1e-12;
     let mut prev_l1 = f64::MAX;
@@ -571,8 +598,7 @@ pub fn solve_pseudoinverse_l1(
         }
         let h = m_t.matvec(&wp);
 
-        let fac = Factorization::new(&g, FactorizationStrategy::LDL)?;
-        sol = fac.solve(&h);
+        sol = ldl_solve(&g, &h)?;
     }
 
     let q = match target_lengths {
@@ -634,14 +660,19 @@ pub fn solve_pseudoinverse_l1_augmented(
     } else {
         Some(normalise_member_vectors(&mut u)?)
     };
-    let (m_mat, p) = build_equilibrium_matrix(problem, &u, enforce_zero_rx, enforce_zero_ry, enforce_zero_rz);
+    let (m_mat, p) = build_equilibrium_matrix(
+        problem,
+        &u,
+        enforce_zero_rx,
+        enforce_zero_ry,
+        enforce_zero_rz,
+    );
 
     let m_rows = p.len();
 
     // Warm-start: L2 solution via augmented system
     let (k_l2, rhs_l2) = build_augmented_system(&m_mat, &p, regularization);
-    let fac_l2 = Factorization::new(&k_l2, FactorizationStrategy::LDL)?;
-    let sol_l2 = fac_l2.solve(&rhs_l2);
+    let sol_l2 = ldl_solve(&k_l2, &rhs_l2)?;
     let mut sol: Vec<f64> = sol_l2[m_rows..m_rows + ne].to_vec();
 
     const ABS_EPS: f64 = 1e-12;
@@ -695,8 +726,7 @@ pub fn solve_pseudoinverse_l1_augmented(
 
         let (k_mat, rhs) = build_augmented_system(&m_w, &rhs_top, effective_reg);
 
-        let fac = Factorization::new(&k_mat, FactorizationStrategy::LDL)?;
-        let iter_sol = fac.solve(&rhs);
+        let iter_sol = ldl_solve(&k_mat, &rhs)?;
         sol = iter_sol[m_rows..m_rows + ne].to_vec();
     }
 
@@ -752,16 +782,57 @@ pub fn solve_pseudoinverse_dispatch(
     solve_for_q: bool,
 ) -> Result<Vec<f64>, TheseusError> {
     match (use_l2, use_augmented) {
-        (true, false) => solve_pseudoinverse(problem, target_free_xyz, regularization, enforce_zero_rx, enforce_zero_ry, enforce_zero_rz, solve_for_q),
-        (true, true) => solve_pseudoinverse_augmented(problem, target_free_xyz, regularization, enforce_zero_rx, enforce_zero_ry, enforce_zero_rz, solve_for_q),
-        (false, false) => solve_pseudoinverse_l1(problem, target_free_xyz, regularization, max_l1_iter, enforce_zero_rx, enforce_zero_ry, enforce_zero_rz, solve_for_q),
-        (false, true) => solve_pseudoinverse_l1_augmented(problem, target_free_xyz, regularization, max_l1_iter, enforce_zero_rx, enforce_zero_ry, enforce_zero_rz, solve_for_q),
+        (true, false) => solve_pseudoinverse(
+            problem,
+            target_free_xyz,
+            regularization,
+            enforce_zero_rx,
+            enforce_zero_ry,
+            enforce_zero_rz,
+            solve_for_q,
+        ),
+        (true, true) => solve_pseudoinverse_augmented(
+            problem,
+            target_free_xyz,
+            regularization,
+            enforce_zero_rx,
+            enforce_zero_ry,
+            enforce_zero_rz,
+            solve_for_q,
+        ),
+        (false, false) => solve_pseudoinverse_l1(
+            problem,
+            target_free_xyz,
+            regularization,
+            max_l1_iter,
+            enforce_zero_rx,
+            enforce_zero_ry,
+            enforce_zero_rz,
+            solve_for_q,
+        ),
+        (false, true) => solve_pseudoinverse_l1_augmented(
+            problem,
+            target_free_xyz,
+            regularization,
+            max_l1_iter,
+            enforce_zero_rx,
+            enforce_zero_ry,
+            enforce_zero_rz,
+            solve_for_q,
+        ),
     }
 }
 
 // ─────────────────────────────────────────────────────────────
 //  NNLS  (spectral projected gradient)
 // ─────────────────────────────────────────────────────────────
+
+/// Result from the NNLS spectral projected-gradient solver.
+pub struct NnlsResult {
+    pub q: Vec<f64>,
+    pub iterations: usize,
+    pub converged: bool,
+}
 
 /// Find non-negative force densities via spectral projected gradient.
 ///
@@ -771,7 +842,7 @@ pub fn solve_nnls(
     target_free_xyz: &Array2<f64>,
     max_iter: usize,
     tol: f64,
-) -> Result<Vec<f64>, TheseusError> {
+) -> Result<NnlsResult, TheseusError> {
     let ne = problem.topology.num_edges;
     let nn_free = problem.topology.free_node_indices.len();
 
@@ -797,7 +868,12 @@ pub fn solve_nnls(
     let mut prev_q = vec![0.0; ne];
     let mut alpha = 1.0;
 
+    let mut iterations = 0;
+    let mut converged = false;
+
     for iter in 0..max_iter {
+        iterations = iter + 1;
+
         // r = M·q − p
         let mut r = apply_m(&cn_t, &u, &q, nn_free);
         for (ri, &pi) in r.iter_mut().zip(p.iter()) {
@@ -837,6 +913,7 @@ pub fn solve_nnls(
 
         // Convergence check: ‖projected gradient‖ < tol
         if proj_grad_norm_sq.sqrt() < tol {
+            converged = true;
             break;
         }
     }
@@ -850,7 +927,11 @@ pub fn solve_nnls(
         }
     }
 
-    Ok(q)
+    Ok(NnlsResult {
+        q,
+        iterations,
+        converged,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────

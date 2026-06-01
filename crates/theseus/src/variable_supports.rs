@@ -11,6 +11,8 @@ use crate::types::{AnchorInfo, Problem, TheseusError, VariableSupportKind};
 const SIGMOID_EPS: f64 = 1e-9;
 const SPHERE_NORM_EPS: f64 = 1e-6;
 const RAIL_LENGTH_EPS: f64 = 1e-9;
+const DOMAIN_LENGTH_EPS: f64 = 1e-9;
+const ANCHOR_LAMBDA_EPS: f64 = 1e-12;
 
 #[inline]
 fn sigmoid(z: f64) -> f64 {
@@ -21,6 +23,20 @@ fn sigmoid(z: f64) -> f64 {
 fn logit(p: f64) -> f64 {
     let pc = p.clamp(SIGMOID_EPS, 1.0 - SIGMOID_EPS);
     (pc / (1.0 - pc)).ln()
+}
+
+#[inline]
+fn anchor_lambda(problem: &Problem) -> f64 {
+    problem
+        .solver
+        .anchor_saturation_lambda
+        .abs()
+        .max(ANCHOR_LAMBDA_EPS)
+}
+
+#[inline]
+fn scaled_sigmoid(latent: f64, scale: f64) -> f64 {
+    sigmoid(latent / scale.max(ANCHOR_LAMBDA_EPS))
 }
 
 /// Total latent dimension for all variable supports.
@@ -45,8 +61,33 @@ fn rail_delta(start: &[f64; 3], end: &[f64; 3]) -> ([f64; 3], f64) {
     (delta, length)
 }
 
+fn domain_width(domain: &[f64; 2], label: &str) -> Result<f64, TheseusError> {
+    let width = domain[1] - domain[0];
+    if !width.is_finite() || width <= DOMAIN_LENGTH_EPS {
+        return Err(TheseusError::Shape(format!(
+            "{label} domain must be increasing and finite"
+        )));
+    }
+    Ok(width)
+}
+
+fn latent_to_domain(
+    latent: f64,
+    domain: &[f64; 2],
+    lambda: f64,
+) -> Result<(f64, f64, f64), TheseusError> {
+    let width = domain_width(domain, "NURBS support")?;
+    let scale = lambda * width.max(DOMAIN_LENGTH_EPS);
+    let a = scaled_sigmoid(latent, scale);
+    Ok((domain[0] + width * a, a, scale))
+}
+
 /// Build a deterministic initial latent vector from support definitions.
-pub fn initial_latents(anchors: &AnchorInfo) -> Result<Vec<f64>, TheseusError> {
+pub fn initial_latents(
+    anchors: &AnchorInfo,
+    anchor_saturation_lambda: f64,
+) -> Result<Vec<f64>, TheseusError> {
+    let lambda = anchor_saturation_lambda.abs().max(ANCHOR_LAMBDA_EPS);
     let nvar = anchors.variable_indices.len();
     if nvar == 0 {
         return Ok(Vec::new());
@@ -97,7 +138,7 @@ pub fn initial_latents(anchors: &AnchorInfo) -> Result<Vec<f64>, TheseusError> {
                         )));
                     }
                     let alpha = (0.0 - lower[d]) / w;
-                    latents.push(logit(alpha));
+                    latents.push(logit(alpha) * lambda * w.max(ANCHOR_LAMBDA_EPS));
                 }
             }
             VariableSupportKind::Rail { start, end } => {
@@ -112,7 +153,25 @@ pub fn initial_latents(anchors: &AnchorInfo) -> Result<Vec<f64>, TheseusError> {
                 let py = p[1] - start[1];
                 let pz = p[2] - start[2];
                 let t = (px * delta[0] + py * delta[1] + pz * delta[2]) / (length * length);
-                latents.push(logit(t) * length);
+                latents.push(logit(t) * lambda * length);
+            }
+            VariableSupportKind::NurbsCurve {
+                domain, initial_t, ..
+            } => {
+                let width = domain_width(domain, "NURBS curve")?;
+                let alpha = (*initial_t - domain[0]) / width;
+                latents.push(logit(alpha) * lambda * width);
+            }
+            VariableSupportKind::NurbsSurface {
+                domain_u,
+                domain_v,
+                initial_uv,
+                ..
+            } => {
+                let wu = domain_width(domain_u, "NURBS surface U")?;
+                let wv = domain_width(domain_v, "NURBS surface V")?;
+                latents.push(logit((initial_uv[0] - domain_u[0]) / wu) * lambda * wu);
+                latents.push(logit((initial_uv[1] - domain_v[0]) / wv) * lambda * wv);
             }
         }
     }
@@ -162,6 +221,7 @@ pub fn map_latents_to_positions(
     }
 
     let mut out = Array2::<f64>::zeros((nvar, 3));
+    let lambda = anchor_lambda(problem);
     let mut p = 0usize;
     for (i, support) in problem.anchors.variable_supports.iter().enumerate() {
         let x0 = support.reference_position;
@@ -172,7 +232,8 @@ pub fn map_latents_to_positions(
                 let uz = latents[p + 2];
                 p += 3;
                 let n = (ux * ux + uy * uy + uz * uz + SPHERE_NORM_EPS * SPHERE_NORM_EPS).sqrt();
-                let s = radius * n.tanh() / n;
+                let scale = lambda * radius.abs().max(SPHERE_NORM_EPS);
+                let s = radius * (n / scale).tanh() / n;
                 out[[i, 0]] = x0[0] + s * ux;
                 out[[i, 1]] = x0[1] + s * uy;
                 out[[i, 2]] = x0[2] + s * uz;
@@ -185,9 +246,11 @@ pub fn map_latents_to_positions(
                 let mut d = [0.0f64; 3];
                 for axis in 0..3 {
                     if enabled[axis] {
-                        let a = sigmoid(latents[p]);
+                        let span = upper[axis] - lower[axis];
+                        let scale = lambda * span.abs().max(ANCHOR_LAMBDA_EPS);
+                        let a = scaled_sigmoid(latents[p], scale);
                         p += 1;
-                        d[axis] = lower[axis] + (upper[axis] - lower[axis]) * a;
+                        d[axis] = lower[axis] + span * a;
                     }
                 }
                 out[[i, 0]] = x0[0] + d[0];
@@ -196,11 +259,38 @@ pub fn map_latents_to_positions(
             }
             VariableSupportKind::Rail { start, end } => {
                 let (delta, length) = rail_delta(start, end);
-                let t = sigmoid(latents[p] / length.max(RAIL_LENGTH_EPS));
+                let scale = lambda * length.max(RAIL_LENGTH_EPS);
+                let t = scaled_sigmoid(latents[p], scale);
                 p += 1;
                 out[[i, 0]] = start[0] + t * delta[0];
                 out[[i, 1]] = start[1] + t * delta[1];
                 out[[i, 2]] = start[2] + t * delta[2];
+            }
+            VariableSupportKind::NurbsCurve { curve, domain, .. } => {
+                let (t, _, _) = latent_to_domain(latents[p], domain, lambda)?;
+                p += 1;
+                let point = curve.point(t).map_err(|e| {
+                    TheseusError::Shape(format!("NURBS curve evaluation failed: {e}"))
+                })?;
+                out[[i, 0]] = point[0];
+                out[[i, 1]] = point[1];
+                out[[i, 2]] = point[2];
+            }
+            VariableSupportKind::NurbsSurface {
+                surface,
+                domain_u,
+                domain_v,
+                ..
+            } => {
+                let (u, _, _) = latent_to_domain(latents[p], domain_u, lambda)?;
+                let (v, _, _) = latent_to_domain(latents[p + 1], domain_v, lambda)?;
+                p += 2;
+                let point = surface.point(u, v).map_err(|e| {
+                    TheseusError::Shape(format!("NURBS surface evaluation failed: {e}"))
+                })?;
+                out[[i, 0]] = point[0];
+                out[[i, 1]] = point[1];
+                out[[i, 2]] = point[2];
             }
         }
     }
@@ -242,6 +332,7 @@ pub fn accumulate_latent_gradient(
         ));
     }
 
+    let lambda = anchor_lambda(problem);
     let mut p = 0usize;
     for (i, support) in problem.anchors.variable_supports.iter().enumerate() {
         let node = problem.anchors.variable_indices[i];
@@ -253,10 +344,12 @@ pub fn accumulate_latent_gradient(
                 let uz = latents[p + 2];
                 let u = [ux, uy, uz];
                 let n = (ux * ux + uy * uy + uz * uz + SPHERE_NORM_EPS * SPHERE_NORM_EPS).sqrt();
-                let tanh_n = n.tanh();
-                let sech2 = 1.0 - tanh_n * tanh_n;
-                let s = radius * tanh_n / n;
-                let gprime = (sech2 * n - tanh_n) / (n * n);
+                let scale = lambda * radius.abs().max(SPHERE_NORM_EPS);
+                let rho = n / scale;
+                let tanh_rho = rho.tanh();
+                let sech2 = 1.0 - tanh_rho * tanh_rho;
+                let s = radius * tanh_rho / n;
+                let gprime = (sech2 * n / scale - tanh_rho) / (n * n);
                 let dot = dl_dx[0] * ux + dl_dx[1] * uy + dl_dx[2] * uz;
                 for j in 0..3 {
                     let ds_duj = radius * gprime * u[j] / n;
@@ -273,20 +366,51 @@ pub fn accumulate_latent_gradient(
                     if !enabled[axis] {
                         continue;
                     }
-                    let a = sigmoid(latents[p]);
-                    let ddelta = (upper[axis] - lower[axis]) * a * (1.0 - a);
+                    let span = upper[axis] - lower[axis];
+                    let scale = lambda * span.abs().max(ANCHOR_LAMBDA_EPS);
+                    let a = scaled_sigmoid(latents[p], scale);
+                    let ddelta = span * a * (1.0 - a) / scale;
                     out_latent_grad[p] += dl_dx[axis] * ddelta;
                     p += 1;
                 }
             }
             VariableSupportKind::Rail { start, end } => {
                 let (dx_dt, length) = rail_delta(start, end);
-                let latent_scale = length.max(RAIL_LENGTH_EPS);
-                let a = sigmoid(latents[p] / latent_scale);
+                let latent_scale = lambda * length.max(RAIL_LENGTH_EPS);
+                let a = scaled_sigmoid(latents[p], latent_scale);
                 let dt = a * (1.0 - a);
                 let dldt = dl_dx[0] * dx_dt[0] + dl_dx[1] * dx_dt[1] + dl_dx[2] * dx_dt[2];
                 out_latent_grad[p] += dldt * dt / latent_scale;
                 p += 1;
+            }
+            VariableSupportKind::NurbsCurve { curve, domain, .. } => {
+                let (t, a, scale) = latent_to_domain(latents[p], domain, lambda)?;
+                let tangent = curve.derivatives(t, 1).map_err(|e| {
+                    TheseusError::Shape(format!("NURBS curve derivative failed: {e}"))
+                })?[1];
+                let width = domain_width(domain, "NURBS curve")?;
+                let dldt = dl_dx[0] * tangent[0] + dl_dx[1] * tangent[1] + dl_dx[2] * tangent[2];
+                out_latent_grad[p] += dldt * width * a * (1.0 - a) / scale;
+                p += 1;
+            }
+            VariableSupportKind::NurbsSurface {
+                surface,
+                domain_u,
+                domain_v,
+                ..
+            } => {
+                let (u, au, scale_u) = latent_to_domain(latents[p], domain_u, lambda)?;
+                let (v, av, scale_v) = latent_to_domain(latents[p + 1], domain_v, lambda)?;
+                let (du, dv) = surface.partials(u, v).map_err(|e| {
+                    TheseusError::Shape(format!("NURBS surface derivative failed: {e}"))
+                })?;
+                let width_u = domain_width(domain_u, "NURBS surface U")?;
+                let width_v = domain_width(domain_v, "NURBS surface V")?;
+                let dl_du = dl_dx[0] * du[0] + dl_dx[1] * du[1] + dl_dx[2] * du[2];
+                let dl_dv = dl_dx[0] * dv[0] + dl_dx[1] * dv[1] + dl_dx[2] * dv[2];
+                out_latent_grad[p] += dl_du * width_u * au * (1.0 - au) / scale_u;
+                out_latent_grad[p + 1] += dl_dv * width_v * av * (1.0 - av) / scale_v;
+                p += 2;
             }
         }
     }
@@ -295,7 +419,7 @@ pub fn accumulate_latent_gradient(
 
 #[cfg(test)]
 mod tests {
-    use super::map_latents_to_positions;
+    use super::{initial_latents, map_latents_to_positions};
     use crate::sparse::SparseColMatOwned;
     use crate::types::{
         AnchorInfo, Bounds, NetworkTopology, Problem, SolverOptions, VariableSupport,
@@ -410,5 +534,183 @@ mod tests {
         assert!(x[[0, 0]] > 0.0 && x[[0, 0]] < 4.0);
         assert!(x[[0, 1]].abs() < 1e-12);
         assert!(x[[0, 2]].abs() < 1e-12);
+    }
+
+    #[test]
+    fn nurbs_curve_map_stays_on_curve() {
+        let curve = nurbsbook::NurbsCurve::from_cartesian(
+            2,
+            vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            vec![[0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0]],
+            vec![1.0, 1.0, 1.0],
+        )
+        .unwrap();
+        let p = tiny_problem_with_support(VariableSupport {
+            node_index: 1,
+            reference_position: [1.0, 0.5, 0.0],
+            kind: VariableSupportKind::NurbsCurve {
+                curve,
+                domain: [0.0, 1.0],
+                initial_t: 0.5,
+            },
+        });
+        let x = map_latents_to_positions(&p, &[0.0]).unwrap();
+        assert!((x[[0, 0]] - 1.0).abs() < 1e-12);
+        assert!((x[[0, 1]] - 0.5).abs() < 1e-12);
+        assert!(x[[0, 2]].abs() < 1e-12);
+    }
+
+    #[test]
+    fn nurbs_surface_map_stays_on_surface() {
+        let surface = nurbsbook::NurbsSurface::from_cartesian(
+            1,
+            1,
+            vec![0.0, 0.0, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 1.0],
+            2,
+            2,
+            vec![
+                [0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+            ],
+            vec![1.0; 4],
+        )
+        .unwrap();
+        let p = tiny_problem_with_support(VariableSupport {
+            node_index: 1,
+            reference_position: [0.5, 0.5, 0.0],
+            kind: VariableSupportKind::NurbsSurface {
+                surface,
+                domain_u: [0.0, 1.0],
+                domain_v: [0.0, 1.0],
+                initial_uv: [0.5, 0.5],
+            },
+        });
+        let x = map_latents_to_positions(&p, &[0.0, 0.0]).unwrap();
+        assert!((x[[0, 0]] - 0.5).abs() < 1e-12);
+        assert!((x[[0, 1]] - 0.5).abs() < 1e-12);
+        assert!(x[[0, 2]].abs() < 1e-12);
+    }
+
+    #[test]
+    fn anchor_lambda_initial_latents_round_trip_roller() {
+        let mut p = tiny_problem_with_support(VariableSupport {
+            node_index: 1,
+            reference_position: [0.0, 0.0, 0.0],
+            kind: VariableSupportKind::Roller {
+                enabled: [true, false, true],
+                lower: [-1.0, 0.0, -2.0],
+                upper: [3.0, 0.0, 2.0],
+            },
+        });
+        p.solver.anchor_saturation_lambda = 2.5;
+        let latents = initial_latents(&p.anchors, p.solver.anchor_saturation_lambda).unwrap();
+        let x = map_latents_to_positions(&p, &latents).unwrap();
+
+        assert!(x[[0, 0]].abs() < 1e-12);
+        assert!(x[[0, 1]].abs() < 1e-12);
+        assert!(x[[0, 2]].abs() < 1e-12);
+    }
+
+    #[test]
+    fn anchor_lambda_initial_latents_round_trip_rail() {
+        let mut p = tiny_problem_with_support(VariableSupport {
+            node_index: 1,
+            reference_position: [1.0, 0.0, 0.0],
+            kind: VariableSupportKind::Rail {
+                start: [0.0, 0.0, 0.0],
+                end: [4.0, 0.0, 0.0],
+            },
+        });
+        p.solver.anchor_saturation_lambda = 0.5;
+        let latents = initial_latents(&p.anchors, p.solver.anchor_saturation_lambda).unwrap();
+        let x = map_latents_to_positions(&p, &latents).unwrap();
+
+        assert!((x[[0, 0]] - 1.0).abs() < 1e-12);
+        assert!(x[[0, 1]].abs() < 1e-12);
+        assert!(x[[0, 2]].abs() < 1e-12);
+    }
+
+    #[test]
+    fn anchor_lambda_initial_latents_round_trip_nurbs_curve() {
+        let curve = nurbsbook::NurbsCurve::from_cartesian(
+            2,
+            vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            vec![[0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0]],
+            vec![1.0, 1.0, 1.0],
+        )
+        .unwrap();
+        let mut p = tiny_problem_with_support(VariableSupport {
+            node_index: 1,
+            reference_position: [1.0, 0.5, 0.0],
+            kind: VariableSupportKind::NurbsCurve {
+                curve,
+                domain: [0.0, 1.0],
+                initial_t: 0.5,
+            },
+        });
+        p.solver.anchor_saturation_lambda = 3.0;
+        let latents = initial_latents(&p.anchors, p.solver.anchor_saturation_lambda).unwrap();
+        let x = map_latents_to_positions(&p, &latents).unwrap();
+
+        assert!((x[[0, 0]] - 1.0).abs() < 1e-12);
+        assert!((x[[0, 1]] - 0.5).abs() < 1e-12);
+        assert!(x[[0, 2]].abs() < 1e-12);
+    }
+
+    #[test]
+    fn anchor_lambda_initial_latents_round_trip_nurbs_surface() {
+        let surface = nurbsbook::NurbsSurface::from_cartesian(
+            1,
+            1,
+            vec![0.0, 0.0, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 1.0],
+            2,
+            2,
+            vec![
+                [0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+            ],
+            vec![1.0; 4],
+        )
+        .unwrap();
+        let mut p = tiny_problem_with_support(VariableSupport {
+            node_index: 1,
+            reference_position: [0.25, 0.75, 0.0],
+            kind: VariableSupportKind::NurbsSurface {
+                surface,
+                domain_u: [0.0, 1.0],
+                domain_v: [0.0, 1.0],
+                initial_uv: [0.25, 0.75],
+            },
+        });
+        p.solver.anchor_saturation_lambda = 0.25;
+        let latents = initial_latents(&p.anchors, p.solver.anchor_saturation_lambda).unwrap();
+        let x = map_latents_to_positions(&p, &latents).unwrap();
+
+        assert!((x[[0, 0]] - 0.25).abs() < 1e-12);
+        assert!((x[[0, 1]] - 0.75).abs() < 1e-12);
+        assert!(x[[0, 2]].abs() < 1e-12);
+    }
+
+    #[test]
+    fn anchor_lambda_sphere_map_stays_within_radius() {
+        let mut p = tiny_problem_with_support(VariableSupport {
+            node_index: 1,
+            reference_position: [1.0, 2.0, 3.0],
+            kind: VariableSupportKind::Sphere { radius: 0.5 },
+        });
+        p.solver.anchor_saturation_lambda = 4.0;
+        let x = map_latents_to_positions(&p, &[10.0, -2.0, 5.0]).unwrap();
+        let dx = x[[0, 0]] - 1.0;
+        let dy = x[[0, 1]] - 2.0;
+        let dz = x[[0, 2]] - 3.0;
+        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+
+        assert!(dist < 0.5 + 1e-12);
     }
 }

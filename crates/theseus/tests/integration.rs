@@ -5,6 +5,7 @@
 //! and actually reduces the objective value.
 
 use ndarray::Array2;
+use std::sync::atomic::AtomicBool;
 use theseus::optimizer;
 use theseus::sparse::SparseColMatOwned;
 use theseus::types::*;
@@ -127,7 +128,8 @@ fn optimize_target_xyz() {
     let problem = make_arch_problem(bounds, objectives);
     let mut state = OptimizationState::new(vec![1.0; ne], Array2::zeros((0, 3)));
 
-    let result = optimizer::optimize(&problem, &mut state, None, 1).unwrap();
+    let cancel = AtomicBool::new(false);
+    let result = optimizer::optimize(&problem, &mut state, None, 1, &cancel).unwrap();
 
     // Basic sanity
     assert!(result.iterations > 0, "should run at least 1 iteration");
@@ -212,7 +214,8 @@ fn optimize_combined_objectives() {
     let problem = make_arch_problem(bounds, objectives);
     let mut state = OptimizationState::new(vec![2.0; ne], Array2::zeros((0, 3)));
 
-    let result = optimizer::optimize(&problem, &mut state, None, 1).unwrap();
+    let cancel = AtomicBool::new(false);
+    let result = optimizer::optimize(&problem, &mut state, None, 1, &cancel).unwrap();
 
     assert!(result.iterations > 0);
     // Check that all results are finite
@@ -224,6 +227,43 @@ fn optimize_combined_objectives() {
         "optimize_combined: {} iterations, converged={}",
         result.iterations, result.converged
     );
+}
+
+#[test]
+fn optimize_direct_box_bounds_keeps_physical_q_inside_bounds() {
+    let ne = 8;
+    let bounds = Bounds {
+        lower: vec![0.5; ne],
+        upper: vec![5.0; ne],
+    };
+
+    let target = Array2::from_shape_vec(
+        (5, 3),
+        vec![
+            1.0, 0.0, 0.8, 2.0, 0.0, 1.5, 3.0, 0.0, 2.0, 4.0, 0.0, 1.5, 5.0, 0.0, 0.8,
+        ],
+    )
+    .unwrap();
+    let objectives: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(TargetXYZ {
+        weight: 1.0,
+        node_indices: vec![1, 2, 3, 4, 5],
+        target,
+    })];
+
+    let mut problem = make_arch_problem(bounds, objectives);
+    problem.solver.q_parameterization_mode = QParameterizationMode::DirectBoxBounds;
+    problem.solver.max_iterations = 50;
+    let mut state = OptimizationState::new(vec![2.0; ne], Array2::zeros((0, 3)));
+    let cancel = AtomicBool::new(false);
+    let result = optimizer::optimize(&problem, &mut state, None, 1, &cancel).unwrap();
+
+    assert!(!result.loss_trace.is_empty());
+    for &q in &result.q {
+        assert!(
+            (0.5..=5.0).contains(&q),
+            "q={q} outside DirectBoxBounds range"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────

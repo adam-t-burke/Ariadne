@@ -11,9 +11,9 @@
 use crate::objectives::{bounds_penalty_grad, softplus_grad};
 use crate::q_parameterization;
 use crate::types::{
-    FdmCache, ForceVarianceNormalizationStrategy, GeometrySnapshot, QParameterizationMode,
-    LengthVarianceNormalizationStrategy, PressureParams, Problem, ReactionMagnitudeBehavior,
-    ReactionMagnitudeSign, SelfWeightParams, TheseusError,
+    FdmCache, ForceVarianceNormalizationStrategy, GeometrySnapshot,
+    LengthVarianceNormalizationStrategy, PressureParams, Problem, QParameterizationMode,
+    ReactionMagnitudeBehavior, ReactionMagnitudeSign, SelfWeightParams, TheseusError,
 };
 use crate::variable_supports;
 use ndarray::Array2;
@@ -27,25 +27,16 @@ use ndarray::Array2;
 /// Since A is symmetric (A = Aᵀ), we reuse the **same** factorization
 /// (Cholesky or LDL) from the forward solve — no refactoring needed.
 pub fn solve_adjoint(cache: &mut FdmCache) -> Result<(), TheseusError> {
-    let n = cache.a_matrix.nrows;
-    let mut rhs_flat = Vec::with_capacity(n * 3);
-    for d in 0..3 {
-        for i in 0..n {
-            rhs_flat.push(cache.grad_x[[i, d]]);
-        }
-    }
     let fac = cache
         .factorization
         .as_ref()
         .ok_or(TheseusError::MissingFactorization)?;
-    let solutions = fac.solve_batch(&rhs_flat, 3);
-    for (d, x) in solutions.into_iter().enumerate() {
-        for i in 0..n {
-            cache.lambda[[i, d]] = x[i];
-        }
-    }
-
-    Ok(())
+    fac.solve_into(
+        &cache.grad_x,
+        &mut cache.lambda,
+        &mut cache.solve_workspace,
+        &mut cache.solve_stack,
+    )
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -371,11 +362,11 @@ fn solve_modified_adjoint(
     tolerance: f64,
 ) -> Result<(), TheseusError> {
     let n = cache.a_matrix.nrows;
-    let nn_free = n;
+    let mut converged = false;
 
     for _iter in 0..max_iters {
         // Compute correction = (dpn/dx)^T * lambda
-        let mut correction = Array2::<f64>::zeros((nn_free, 3));
+        let mut correction = Array2::<f64>::zeros((n, 3));
 
         if let Some(sw) = &problem.self_weight {
             dpn_sw_dx_transpose_matvec(
@@ -394,28 +385,37 @@ fn solve_modified_adjoint(
         let corr_norm_sq: f64 = correction.iter().map(|v| v * v).sum();
         let grad_norm_sq: f64 = cache.grad_x.iter().map(|v| v * v).sum();
         if grad_norm_sq > 0.0 && corr_norm_sq / grad_norm_sq < tolerance * tolerance {
+            converged = true;
+            break;
+        }
+        if grad_norm_sq == 0.0 && corr_norm_sq == 0.0 {
+            converged = true;
             break;
         }
 
         // New RHS = dJ/dx + correction
-        let mut rhs_flat = Vec::with_capacity(n * 3);
         for d in 0..3 {
             for i in 0..n {
-                rhs_flat.push(cache.grad_x[[i, d]] + correction[[i, d]]);
+                cache.rhs[[i, d]] = cache.grad_x[[i, d]] + correction[[i, d]];
             }
         }
 
-        // Solve A^T lambda = new_rhs (reuse existing factorization)
         let fac = cache
             .factorization
             .as_ref()
             .ok_or(TheseusError::MissingFactorization)?;
-        let solutions = fac.solve_batch(&rhs_flat, 3);
-        for (d, x) in solutions.into_iter().enumerate() {
-            for i in 0..n {
-                cache.lambda[[i, d]] = x[i];
-            }
-        }
+        fac.solve_into(
+            &cache.rhs,
+            &mut cache.lambda,
+            &mut cache.solve_workspace,
+            &mut cache.solve_stack,
+        )?;
+    }
+
+    if !converged {
+        return Err(TheseusError::Solver(format!(
+            "Neumann adjoint did not converge within {max_iters} iterations (tolerance {tolerance})"
+        )));
     }
 
     Ok(())
@@ -641,14 +641,11 @@ pub(crate) fn grad_planar_constraint_along_direction(
     y_axis: &[f64; 3],
     direction: &[f64; 3],
     _free_node_indices: &[usize],
-) {
+) -> Result<(), TheseusError> {
+    let n_dot_d = crate::objectives::planar_constraint_n_dot_d(x_axis, y_axis, direction)?;
     let nx = x_axis[1] * y_axis[2] - x_axis[2] * y_axis[1];
     let ny = x_axis[2] * y_axis[0] - x_axis[0] * y_axis[2];
     let nz = x_axis[0] * y_axis[1] - x_axis[1] * y_axis[0];
-    let n_dot_d = nx * direction[0] + ny * direction[1] + nz * direction[2];
-    if n_dot_d.abs() < 1e-12 {
-        return;
-    }
     let scale = -2.0 * weight / n_dot_d;
     for &idx in node_indices {
         let n_dot_op = nx * (origin[0] - cache.nf[[idx, 0]])
@@ -659,6 +656,7 @@ pub(crate) fn grad_planar_constraint_along_direction(
         add_node_position_grad(cache, idx, 1, scale * t * ny);
         add_node_position_grad(cache, idx, 2, scale * t * nz);
     }
+    Ok(())
 }
 
 /// TargetLength:  L = w Σ (ℓ_k − t_k)²
@@ -708,23 +706,37 @@ const MIN_VARIATION_SHARPNESS: f64 = 1e-10;
 const NORMALIZED_VARIANCE_EPSILON: f64 = 1e-12;
 
 /// Softmax weights: w_i = exp(β(v_i − m)) / Σ exp(β(v_j − m))
-/// Returns one weight per edge in `edge_indices`.
-/// If sum is zero or non-finite (e.g. all values NaN), returns uniform weights to avoid NaN.
-fn softmax_weights(values: &[f64], edge_indices: &[usize], beta: f64) -> Vec<f64> {
+/// Writes weights into `scratch` and returns a slice over them.
+fn softmax_weights<'a>(
+    values: &[f64],
+    edge_indices: &[usize],
+    beta: f64,
+    scratch: &'a mut Vec<f64>,
+) -> &'a [f64] {
     let n = edge_indices.len();
+    scratch.resize(n, 0.0);
+    if n == 0 {
+        return scratch;
+    }
     let m = edge_indices
         .iter()
         .map(|&i| values[i])
         .fold(f64::NEG_INFINITY, f64::max);
-    let exps: Vec<f64> = edge_indices
-        .iter()
-        .map(|&i| ((values[i] - m) * beta).exp())
-        .collect();
-    let sum: f64 = exps.iter().sum();
-    if !sum.is_finite() || sum <= 0.0 {
-        return vec![1.0 / n as f64; n];
+    let mut sum = 0.0;
+    for (out, &idx) in scratch.iter_mut().zip(edge_indices.iter()) {
+        let e = ((values[idx] - m) * beta).exp();
+        *out = e;
+        sum += e;
     }
-    exps.into_iter().map(|e| e / sum).collect()
+    if !sum.is_finite() || sum <= 0.0 {
+        let uniform = 1.0 / n as f64;
+        scratch.fill(uniform);
+    } else {
+        for w in scratch.iter_mut() {
+            *w /= sum;
+        }
+    }
+    scratch.as_slice()
 }
 
 fn normalized_variance_value_grad(values: &[f64], edge_indices: &[usize]) -> Vec<f64> {
@@ -832,13 +844,27 @@ pub(crate) fn grad_length_variation(
     let beta = beta.abs().max(MIN_VARIATION_SHARPNESS);
 
     // softmax for smooth_max  (positive β)
-    let w_max = softmax_weights(&cache.member_lengths, edge_indices, beta);
+    let w_max = softmax_weights(
+        &cache.member_lengths,
+        edge_indices,
+        beta,
+        &mut cache.softmax_scratch,
+    );
     // softmax for smooth_min = −smooth_max(−v):  d(smooth_min)/dv_i = softmax_i(−β v)
-    let w_min = softmax_weights(&cache.member_lengths, edge_indices, -beta);
+    let w_min = softmax_weights(
+        &cache.member_lengths,
+        edge_indices,
+        -beta,
+        &mut cache.softmax_scratch_b,
+    );
 
+    let n = edge_indices.len();
+    let mut deltas = vec![0.0; n];
+    for j in 0..n {
+        deltas[j] = weight * (w_max[j] - w_min[j]);
+    }
     for (j, &k) in edge_indices.iter().enumerate() {
-        let dl_dl = weight * (w_max[j] - w_min[j]);
-        add_length_grad_to_x(cache, k, dl_dl);
+        add_length_grad_to_x(cache, k, deltas[j]);
     }
 }
 
@@ -876,12 +902,26 @@ pub(crate) fn grad_force_variation(
 
     let beta = beta.abs().max(MIN_VARIATION_SHARPNESS);
 
-    let w_max = softmax_weights(&cache.member_forces, edge_indices, beta);
-    let w_min = softmax_weights(&cache.member_forces, edge_indices, -beta);
+    let w_max = softmax_weights(
+        &cache.member_forces,
+        edge_indices,
+        beta,
+        &mut cache.softmax_scratch,
+    );
+    let w_min = softmax_weights(
+        &cache.member_forces,
+        edge_indices,
+        -beta,
+        &mut cache.softmax_scratch_b,
+    );
 
+    let n = edge_indices.len();
+    let mut deltas = vec![0.0; n];
+    for j in 0..n {
+        deltas[j] = weight * (w_max[j] - w_min[j]);
+    }
     for (j, &k) in edge_indices.iter().enumerate() {
-        let dl_df = weight * (w_max[j] - w_min[j]);
-        add_force_grad(cache, k, dl_df);
+        add_force_grad(cache, k, deltas[j]);
     }
 }
 
@@ -1041,18 +1081,24 @@ pub(crate) fn grad_reaction_direction(
         ];
 
         let r_norm = (r[0].powi(2) + r[1].powi(2) + r[2].powi(2)).sqrt();
-        if r_norm < f64::EPSILON {
-            continue;
-        }
+        let d_norm = (d_hat[0].powi(2) + d_hat[1].powi(2) + d_hat[2].powi(2)).sqrt();
 
-        let dot: f64 = (0..3).map(|d| r[d] * d_hat[d]).sum();
-        let cos = dot / r_norm;
-
-        // d(1 − cos)/dR[d] = −(d̂[d]/‖R‖ − cos·R[d]/‖R‖²)
-        //                   = −(d̂[d] − cos·R̂[d]) / ‖R‖
         let mut dl_dr = [0.0f64; 3];
-        for d in 0..3 {
-            dl_dr[d] = -weight * (d_hat[d] - cos * r[d] / r_norm) / r_norm;
+        if r_norm < f64::EPSILON {
+            if d_norm < f64::EPSILON {
+                continue;
+            }
+            // Align with loss: direction_misalignment returns 1.0 when ||R||≈0.
+            // Subgradient pushes R toward the target direction.
+            for d in 0..3 {
+                dl_dr[d] = -weight * d_hat[d] / d_norm;
+            }
+        } else {
+            let dot: f64 = (0..3).map(|d| r[d] * d_hat[d]).sum();
+            let cos = dot / r_norm;
+            for d in 0..3 {
+                dl_dr[d] = -weight * (d_hat[d] - cos * r[d] / r_norm) / r_norm;
+            }
         }
 
         // Chain dL/dR → dL/dx̂ and dL/dq through reaction formula:
@@ -1218,12 +1264,12 @@ fn add_force_grad(cache: &mut FdmCache, k: usize, dl_df: f64) {
 ///   if node == edge_end:    R -= q_k * (x_end − x_start)  →  sign = −1
 fn accumulate_reaction_grad(
     cache: &mut FdmCache,
-    problem: &Problem,
+    _problem: &Problem,
     node: usize,
     dl_dr: &[f64; 3],
 ) {
-    let ne = problem.topology.num_edges;
-    for k in 0..ne {
+    let incident = cache.node_incident_edges[node].clone();
+    for &k in &incident {
         let s = cache.edge_starts[k];
         let e = cache.edge_ends[k];
         let qi = cache.q[k];
@@ -1296,7 +1342,10 @@ pub fn value_and_gradient(
     let theta_q = &theta[..ne];
     let q_mode = problem.solver.q_parameterization_mode;
     let mut q_storage = vec![0.0; ne];
-    let q: &[f64] = if q_mode == QParameterizationMode::DirectSoftBounds {
+    let q: &[f64] = if matches!(
+        q_mode,
+        QParameterizationMode::DirectSoftBounds | QParameterizationMode::DirectBoxBounds
+    ) {
         theta_q
     } else {
         q_parameterization::map_q_slice(
@@ -1316,6 +1365,8 @@ pub fn value_and_gradient(
         )));
     }
     let anchor_positions = variable_supports::map_latents_to_positions(problem, anchor_data)?;
+
+    crate::objectives::validate_objectives(&problem.objectives)?;
 
     // 2. Forward solve (with self-weight/pressure iteration if active)
     crate::fdm::solve_fdm_with_loads(cache, q, problem, &anchor_positions, 1e-12)?;
@@ -1354,7 +1405,10 @@ pub fn value_and_gradient(
 
     // 7. Pack into output gradient
     grad.fill(0.0);
-    if q_mode == QParameterizationMode::DirectSoftBounds {
+    if matches!(
+        q_mode,
+        QParameterizationMode::DirectSoftBounds | QParameterizationMode::DirectBoxBounds
+    ) {
         grad[..ne].copy_from_slice(&cache.grad_q);
     } else {
         for i in 0..ne {
