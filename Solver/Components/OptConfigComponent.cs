@@ -19,6 +19,7 @@ public class OptConfigComponent : GH_Component
 {
     private const string QParameterizationModeKey = "QParameterizationMode";
     private QParameterizationMode _qParameterizationMode = QParameterizationMode.DirectSoftBounds;
+    private bool _hasLegacyImplicitBoundedMode;
 
     public OptConfigComponent()
         : base("Optimization Config", "OptConfig",
@@ -124,6 +125,7 @@ public class OptConfigComponent : GH_Component
                 break;
             }
         }
+        ResolveLegacyImplicitBoundedMode(lb, ub);
 
         var config = new OptimizationConfig
         {
@@ -158,12 +160,6 @@ public class OptConfigComponent : GH_Component
             _qParameterizationMode == QParameterizationMode.DirectSoftBounds);
         Menu_AppendItem(
             menu,
-            "q Mode: Implicit Bounded",
-            (_, _) => SetQParameterizationMode(QParameterizationMode.ImplicitBounded),
-            true,
-            _qParameterizationMode == QParameterizationMode.ImplicitBounded);
-        Menu_AppendItem(
-            menu,
             "q Mode: Direct Box Bounds",
             (_, _) => SetQParameterizationMode(QParameterizationMode.DirectBoxBounds),
             true,
@@ -176,6 +172,7 @@ public class OptConfigComponent : GH_Component
             return;
 
         RecordUndoEvent("Set q Parameterization Mode");
+        _hasLegacyImplicitBoundedMode = false;
         _qParameterizationMode = mode;
         UpdateMessage();
         ExpireSolution(true);
@@ -186,7 +183,6 @@ public class OptConfigComponent : GH_Component
         Message = _qParameterizationMode switch
         {
             QParameterizationMode.DirectSoftBounds => "q: SoftBounds",
-            QParameterizationMode.ImplicitBounded => "q: ImplicitBounds",
             QParameterizationMode.DirectBoxBounds => "q: BoxBounds",
             _ => "q: SoftBounds",
         };
@@ -203,11 +199,48 @@ public class OptConfigComponent : GH_Component
         if (reader.ItemExists(QParameterizationModeKey))
         {
             int value = reader.GetInt32(QParameterizationModeKey);
-            if (Enum.IsDefined(typeof(QParameterizationMode), value))
+            if (value == 1)
+            {
+                _hasLegacyImplicitBoundedMode = true;
+                _qParameterizationMode = QParameterizationMode.DirectSoftBounds;
+            }
+            else if (Enum.IsDefined(typeof(QParameterizationMode), value))
+            {
                 _qParameterizationMode = (QParameterizationMode)value;
+            }
         }
         UpdateMessage();
         return base.Read(reader);
+    }
+
+    private void ResolveLegacyImplicitBoundedMode(IReadOnlyList<double> lb, IReadOnlyList<double> ub)
+    {
+        if (!_hasLegacyImplicitBoundedMode)
+            return;
+
+        _qParameterizationMode = HasFiniteTwoSidedBounds(lb, ub)
+            ? QParameterizationMode.DirectBoxBounds
+            : QParameterizationMode.DirectSoftBounds;
+        _hasLegacyImplicitBoundedMode = false;
+        UpdateMessage();
+        AddRuntimeMessage(
+            GH_RuntimeMessageLevel.Remark,
+            $"Migrated legacy q: ImplicitBounds mode to {_qParameterizationMode}. " +
+            "Use BoxBounds for finite two-sided q bounds, or SoftBounds for one-sided/infinite bounds.");
+    }
+
+    private static bool HasFiniteTwoSidedBounds(IReadOnlyList<double> lb, IReadOnlyList<double> ub)
+    {
+        int n = Math.Min(lb.Count, ub.Count);
+        if (n == 0)
+            return false;
+
+        for (int i = 0; i < n; i++)
+        {
+            if (!double.IsFinite(lb[i]) || !double.IsFinite(ub[i]) || ub[i] <= lb[i])
+                return false;
+        }
+        return true;
     }
 
     protected override Bitmap Icon => Properties.Resources.parameters;

@@ -32,6 +32,7 @@ Define an FDM network (nodes, branches, fixed nodes), set initial force densitie
 - **Memory:** `TheseusSolver` implements `IDisposable`. Always use `using` or call `Dispose()` to free the native handle.
 - **Layout:** All flattened arrays (xyz, loads, targets) use row-major layout: `array[index * 3 + dim]`.
 - **Native library:** `theseus.dll` / `libtheseus.dylib` is built from the Rust workspace under `crates/` via `build.ps1` or `build.sh`.
+- **q bounds:** Optimization supports `DirectSoftBounds` (soft penalty; one-sided or infinite bounds allowed) and `DirectBoxBounds` (strict finite lower/upper bounds on every edge). Legacy saved configs using the removed implicit bounded mode are migrated to box bounds when all q bounds are finite, otherwise to soft bounds.
 
 ## Objective reference
 
