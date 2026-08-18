@@ -43,6 +43,10 @@ namespace Ariadne.Graphs
         [JsonIgnore]
         public List<(int branchIndex, int itemIndex)> EdgeInputMap { get; set; }
 
+        /// <summary>Original Grasshopper path for each edge, parallel to <see cref="Edges"/>.</summary>
+        [JsonIgnore]
+        public List<GH_Path> EdgeInputPaths { get; set; }
+
         /// <summary>Output edge tree matching Grasshopper structure for downstream components.</summary>
         [JsonIgnore]
         public GH_Structure<Edge> OutputEdgeTree { get; set; }
@@ -55,6 +59,7 @@ namespace Ariadne.Graphs
             IndicesTree = new GH_Structure<GH_Number>();
             AdjacencyTree = new GH_Structure<GH_Number>();
             EdgeInputMap = new List<(int branchIndex, int itemIndex)>();
+            EdgeInputPaths = new List<GH_Path>();
             OutputEdgeTree = new GH_Structure<Edge>();
         }
 
@@ -68,8 +73,14 @@ namespace Ariadne.Graphs
             IndicesTree = new GH_Structure<GH_Number>();
             AdjacencyTree = new GH_Structure<GH_Number>();
             EdgeInputMap = new List<(int branchIndex, int itemIndex)>();
+            EdgeInputPaths = new List<GH_Path>();
             OutputEdgeTree = new GH_Structure<Edge>();
             ConstructGraph(_InputCurves, _Tolerance);
+            for (int itemIdx = 0; itemIdx < Edges.Count; itemIdx++)
+            {
+                EdgeInputMap.Add((0, itemIdx));
+                EdgeInputPaths.Add(new GH_Path(0));
+            }
         }
 
         /// <summary>Builds a graph from a Grasshopper tree of curves.</summary>
@@ -82,6 +93,7 @@ namespace Ariadne.Graphs
             IndicesTree = new GH_Structure<GH_Number>();
             AdjacencyTree = new GH_Structure<GH_Number>();
             EdgeInputMap = new List<(int branchIndex, int itemIndex)>();
+            EdgeInputPaths = new List<GH_Path>();
             OutputEdgeTree = new GH_Structure<Edge>();
             ConstructGraphFromTree(inputTree, tol);
         }
@@ -123,6 +135,9 @@ namespace Ariadne.Graphs
             IndicesTree = other.IndicesTree ?? new GH_Structure<GH_Number>();
             AdjacencyTree = other.AdjacencyTree ?? new GH_Structure<GH_Number>();
             EdgeInputMap = other.EdgeInputMap != null ? new List<(int, int)>(other.EdgeInputMap) : new List<(int, int)>();
+            EdgeInputPaths = other.EdgeInputPaths != null
+                ? other.EdgeInputPaths.Select(path => new GH_Path(path)).ToList()
+                : new List<GH_Path>();
             OutputEdgeTree = other.OutputEdgeTree ?? new GH_Structure<Edge>();
         }
 
@@ -464,6 +479,7 @@ namespace Ariadne.Graphs
             // Flatten curves while preserving mapping
             var allCurves = new List<GH_Curve>();
             EdgeInputMap = new List<(int branchIndex, int itemIndex)>();
+            EdgeInputPaths = new List<GH_Path>();
             
             for (int branchIdx = 0; branchIdx < inputTree.PathCount; branchIdx++)
             {
@@ -474,6 +490,7 @@ namespace Ariadne.Graphs
                 {
                     allCurves.Add((GH_Curve)branch[itemIdx]!);
                     EdgeInputMap.Add((branchIdx, itemIdx));
+                    EdgeInputPaths.Add(new GH_Path(path));
                 }
             }
             
@@ -485,7 +502,7 @@ namespace Ariadne.Graphs
         public void BuildOutputEdgeTree()
         {
 
-            if (EdgeInputMap == null || EdgeInputMap.Count != Edges.Count)
+            if (EdgeInputPaths == null || EdgeInputPaths.Count != Edges.Count)
             {
                 // Fallback to simple list structure if no mapping exists
                 OutputEdgeTree = new GH_Structure<Edge>();
@@ -500,9 +517,7 @@ namespace Ariadne.Graphs
     
             for (int edgeIdx = 0; edgeIdx < Edges.Count; edgeIdx++)
             {
-                var (branchIdx, itemIdx) = EdgeInputMap[edgeIdx];
-                var path = new GH_Path(branchIdx);
-                OutputEdgeTree.Append(Edges[edgeIdx], path);
+                OutputEdgeTree.Append(Edges[edgeIdx], new GH_Path(EdgeInputPaths[edgeIdx]));
             }
         }
 

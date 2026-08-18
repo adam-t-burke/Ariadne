@@ -6,6 +6,8 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Grasshopper.Kernel;
+using Grasshopper.Kernel.Data;
+using Grasshopper.Kernel.Types;
 using Rhino.Geometry;
 using Ariadne.FDM;
 using Ariadne.Graphs;
@@ -78,7 +80,7 @@ public class TheseusSolveComponent : GH_Component
     protected override void RegisterInputParams(GH_InputParamManager pManager)
     {
         pManager.AddGenericParameter("Network", "Network", "FDM Network to solve", GH_ParamAccess.item);
-        pManager.AddNumberParameter("Force Densities", "q", "Initial force densities", GH_ParamAccess.list, 10.0);
+        pManager.AddNumberParameter("Force Densities", "q", "Initial force densities", GH_ParamAccess.tree, 10.0);
         pManager.AddBooleanParameter("Cache Q", "CacheQ", "Reuse optimized q values for matching edges across solves/topology rebuilds; unmatched edges use input q", GH_ParamAccess.item, false);
         pManager.AddBooleanParameter("Reset Cache", "ResetQ", "Button input that clears stored q values on the rising edge", GH_ParamAccess.item, false);
         pManager.AddVectorParameter("Loads", "Loads", "Loads on free nodes", GH_ParamAccess.list, new Vector3d(0, 0, -1));
@@ -110,11 +112,13 @@ public class TheseusSolveComponent : GH_Component
 
     protected override void SolveInstance(IGH_DataAccess DA)
     {
+        DA.DisableGapLogic();
         _uiContext ??= SynchronizationContext.Current;
 
         // ── Gather inputs (always, so edge detection stays in sync) ──
         FDM_Network? network = null;
         List<double> q = [];
+        var qTree = new GH_Structure<GH_Number>();
         bool cacheQ = false;
         bool resetCache = false;
         List<Vector3d> loads = [];
@@ -126,7 +130,7 @@ public class TheseusSolveComponent : GH_Component
         if (_state != SolverState.Done)
         {
             if (!DA.GetData(0, ref network)) return;
-            DA.GetDataList(1, q);
+            if (!DA.GetDataTree(1, out qTree)) return;
             DA.GetData(2, ref cacheQ);
             DA.GetData(3, ref resetCache);
             DA.GetDataList(4, loads);
@@ -140,6 +144,17 @@ public class TheseusSolveComponent : GH_Component
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Invalid or null network");
                 return;
             }
+
+            var qMapping = QTreeMapper.Map(qTree, network.Graph.EdgeInputPaths);
+            if (!qMapping.Success)
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Error, qMapping.Error!);
+                return;
+            }
+
+            q = qMapping.Values!.ToList();
+            if (qMapping.Warning is not null)
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, qMapping.Warning);
         }
 
         // ── Harvest completed optimization result ────────────────
@@ -565,7 +580,7 @@ public class TheseusSolveComponent : GH_Component
         SelfWeightConfig? selfWeight,
         PressureConfig? pressure)
     {
-        var resolvedQ = ExpandInputQ(inputQ, network.Graph.Ne);
+        var resolvedQ = inputQ.ToList();
         EdgeKey[]? edgeKeys = null;
         HashSet<EdgeKey>? ambiguousKeys = null;
 
@@ -600,17 +615,6 @@ public class TheseusSolveComponent : GH_Component
             ambiguousKeys,
             selfWeight,
             pressure);
-    }
-
-    private static List<double> ExpandInputQ(IReadOnlyList<double> inputQ, int edgeCount)
-    {
-        if (inputQ.Count == 0)
-            throw new ArgumentException("Initial force densities cannot be empty.", nameof(inputQ));
-
-        var result = new List<double>(edgeCount);
-        for (int i = 0; i < edgeCount; i++)
-            result.Add(i < inputQ.Count ? inputQ[i] : inputQ[^1]);
-        return result;
     }
 
     private void UpdateQCacheIfNeeded(SolveResult result, PendingCacheUpdate? update)
