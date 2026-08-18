@@ -1359,7 +1359,6 @@ pub unsafe extern "C" fn theseus_set_solver_options(
 ///
 /// mode:
 ///   0 = DirectSoftBounds (default; optimize q directly + soft bounds)
-///   1 = ImplicitBounded  (optimize latent z; map to hard-bounded q)
 ///   2 = DirectBoxBounds  (optimize physical q with hard L-BFGS-B boxes)
 ///
 /// # Safety

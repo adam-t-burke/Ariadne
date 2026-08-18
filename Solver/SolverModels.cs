@@ -43,7 +43,6 @@ public sealed record SolverOptions : SolverTuningOptions
 public enum QParameterizationMode
 {
     DirectSoftBounds = 0,
-    ImplicitBounded = 1,
     DirectBoxBounds = 2,
 }
 
@@ -59,7 +58,7 @@ public sealed record OptimizationConfig : SolverTuningOptions
     public IReadOnlyList<double> LowerBounds { get; init; } = [0.1];
     /// <summary>Upper bounds on force densities per edge.</summary>
     public IReadOnlyList<double> UpperBounds { get; init; } = [100.0];
-    /// <summary>q optimization mode: direct soft bounds (default), implicit hard-bounded mapping, or direct box bounds.</summary>
+    /// <summary>q optimization mode: direct soft bounds (default) or direct finite box bounds.</summary>
     public QParameterizationMode QParameterizationMode { get; init; } = QParameterizationMode.DirectSoftBounds;
     /// <summary>When true, optimization runs (e.g. from a button or toggle).</summary>
     public bool Run { get; init; } = false;

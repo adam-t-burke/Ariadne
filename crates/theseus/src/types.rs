@@ -327,7 +327,6 @@ impl TryFrom<i32> for ReactionMagnitudeSign {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QParameterizationMode {
     DirectSoftBounds,
-    ImplicitBounded,
     DirectBoxBounds,
 }
 
@@ -337,7 +336,6 @@ impl TryFrom<i32> for QParameterizationMode {
     fn try_from(value: i32) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(Self::DirectSoftBounds),
-            1 => Ok(Self::ImplicitBounded),
             2 => Ok(Self::DirectBoxBounds),
             _ => Err(TheseusError::Shape(format!(
                 "invalid q parameterization mode: {value}"

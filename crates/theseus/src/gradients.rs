@@ -9,11 +9,10 @@
 //! All gradients derived analytically — no AD framework needed.
 
 use crate::objectives::{bounds_penalty_grad, softplus_grad};
-use crate::q_parameterization;
 use crate::types::{
     FdmCache, ForceVarianceNormalizationStrategy, GeometrySnapshot,
-    LengthVarianceNormalizationStrategy, PressureParams, Problem, QParameterizationMode,
-    ReactionMagnitudeBehavior, ReactionMagnitudeSign, SelfWeightParams, TheseusError,
+    LengthVarianceNormalizationStrategy, PressureParams, Problem, ReactionMagnitudeBehavior,
+    ReactionMagnitudeSign, SelfWeightParams, TheseusError,
 };
 use crate::variable_supports;
 use ndarray::Array2;
@@ -1339,24 +1338,7 @@ pub fn value_and_gradient(
     let n_lat = variable_supports::latent_dim(problem);
 
     // 1. Unpack
-    let theta_q = &theta[..ne];
-    let q_mode = problem.solver.q_parameterization_mode;
-    let mut q_storage = vec![0.0; ne];
-    let q: &[f64] = if matches!(
-        q_mode,
-        QParameterizationMode::DirectSoftBounds | QParameterizationMode::DirectBoxBounds
-    ) {
-        theta_q
-    } else {
-        q_parameterization::map_q_slice(
-            q_mode,
-            theta_q,
-            &problem.bounds.lower,
-            &problem.bounds.upper,
-            &mut q_storage,
-        );
-        &q_storage
-    };
+    let q = &theta[..ne];
     let anchor_data = &theta[ne..];
     if anchor_data.len() != n_lat {
         return Err(TheseusError::Shape(format!(
@@ -1405,22 +1387,7 @@ pub fn value_and_gradient(
 
     // 7. Pack into output gradient
     grad.fill(0.0);
-    if matches!(
-        q_mode,
-        QParameterizationMode::DirectSoftBounds | QParameterizationMode::DirectBoxBounds
-    ) {
-        grad[..ne].copy_from_slice(&cache.grad_q);
-    } else {
-        for i in 0..ne {
-            let dq_dz = q_parameterization::dq_dz_single(
-                q_mode,
-                theta_q[i],
-                problem.bounds.lower[i],
-                problem.bounds.upper[i],
-            );
-            grad[i] = cache.grad_q[i] * dq_dz;
-        }
-    }
+    grad[..ne].copy_from_slice(&cache.grad_q);
 
     // Support latent gradients via chain rule from dJ/d(anchor_xyz).
     if nvar > 0 && n_lat > 0 {

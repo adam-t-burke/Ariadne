@@ -83,7 +83,8 @@ public static class TheseusSolverService
             barrierWeight: options.BarrierWeight,
             barrierSharpness: options.BarrierSharpness,
             anchorSaturationLambda: options.AnchorSaturationLambda);
-        solver.SetQParameterizationMode((int)inputs.QParameterizationMode);
+        solver.SetQParameterizationMode((int)ResolveQParameterizationMode(
+            inputs.QParameterizationMode, data.LowerBounds, data.UpperBounds));
 
         if (progressCallback != null)
             solver.SetProgressCallback(progressCallback, options.ReportFrequency, options.CopyProgressState);
@@ -123,7 +124,8 @@ public static class TheseusSolverService
             data.VariableNodeIndices, data.VariableSupportKinds, data.SphereRadii,
             data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd,
             data.NurbsOffsets, data.NurbsLengths, data.NurbsData);
-        solver.SetQParameterizationMode((int)inputs.QParameterizationMode);
+        solver.SetQParameterizationMode((int)ResolveQParameterizationMode(
+            inputs.QParameterizationMode, data.LowerBounds, data.UpperBounds));
 
         ApplyLoadConfig(solver, inputs, context);
 
@@ -163,7 +165,8 @@ public static class TheseusSolverService
             data.VariableNodeIndices, data.VariableSupportKinds, data.SphereRadii,
             data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd,
             data.NurbsOffsets, data.NurbsLengths, data.NurbsData);
-        solver.SetQParameterizationMode((int)inputs.QParameterizationMode);
+        solver.SetQParameterizationMode((int)ResolveQParameterizationMode(
+            inputs.QParameterizationMode, data.LowerBounds, data.UpperBounds));
 
         ApplyLoadConfig(solver, inputs, context);
 
@@ -197,7 +200,8 @@ public static class TheseusSolverService
             data.VariableNodeIndices, data.VariableSupportKinds, data.SphereRadii,
             data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd,
             data.NurbsOffsets, data.NurbsLengths, data.NurbsData);
-        solver.SetQParameterizationMode((int)inputs.QParameterizationMode);
+        solver.SetQParameterizationMode((int)ResolveQParameterizationMode(
+            inputs.QParameterizationMode, data.LowerBounds, data.UpperBounds));
 
         ApplyLoadConfig(solver, inputs, context);
 
@@ -262,6 +266,38 @@ public static class TheseusSolverService
             throw new ArgumentException("Lower bounds cannot be empty for optimization.", nameof(inputs));
         if (inputs.UpperBounds == null || inputs.UpperBounds.Count == 0)
             throw new ArgumentException("Upper bounds cannot be empty for optimization.", nameof(inputs));
+    }
+
+    internal static QParameterizationMode ResolveQParameterizationMode(
+        QParameterizationMode mode,
+        IReadOnlyList<double> lowerBounds,
+        IReadOnlyList<double> upperBounds)
+    {
+        const int legacyImplicitBounded = 1;
+        if ((int)mode != legacyImplicitBounded)
+            return mode;
+
+        return HasFiniteTwoSidedBounds(lowerBounds, upperBounds)
+            ? QParameterizationMode.DirectBoxBounds
+            : QParameterizationMode.DirectSoftBounds;
+    }
+
+    private static bool HasFiniteTwoSidedBounds(
+        IReadOnlyList<double> lowerBounds,
+        IReadOnlyList<double> upperBounds)
+    {
+        int n = Math.Min(lowerBounds.Count, upperBounds.Count);
+        if (n == 0)
+            return false;
+
+        for (int i = 0; i < n; i++)
+        {
+            if (!double.IsFinite(lowerBounds[i])
+                || !double.IsFinite(upperBounds[i])
+                || upperBounds[i] <= lowerBounds[i])
+                return false;
+        }
+        return true;
     }
 
     #endregion

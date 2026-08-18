@@ -17,7 +17,6 @@ pub mod gradients;
 pub mod inverse;
 pub mod objectives;
 pub mod optimizer;
-pub mod q_parameterization;
 pub mod sparse;
 pub mod types;
 pub mod variable_supports;

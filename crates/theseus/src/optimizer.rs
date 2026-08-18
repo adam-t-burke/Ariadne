@@ -8,7 +8,6 @@
 
 use crate::ffi::ProgressCallback;
 use crate::gradients::value_and_gradient;
-use crate::q_parameterization;
 use crate::types::{
     FdmCache, OptimizationState, Problem, QParameterizationMode, SolverResult, TheseusError,
     VariableSupportKind,
@@ -29,6 +28,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 const DIRECT_BOX_SCALE_EPS: f64 = 1e-12;
 const DIRECT_BOX_ERROR_COST: f64 = 1.0e300;
 const DIRECT_BOX_MAX_BACKTRACK: usize = 32;
+const DIRECT_BOX_FALLBACK_RESERVE_FRACTION: usize = 5;
+const DIRECT_BOX_FALLBACK_MAX_RESERVED: usize = 50;
 
 // ─────────────────────────────────────────────────────────────
 //  argmin problem wrapper
@@ -150,15 +151,7 @@ impl MajorIterationProgressObserver {
             }
         }
 
-        let q_mode = problem.solver.q_parameterization_mode;
-        let mut q = vec![0.0; ne];
-        q_parameterization::map_q_slice(
-            q_mode,
-            &theta[..ne],
-            &problem.bounds.lower,
-            &problem.bounds.upper,
-            &mut q,
-        );
+        let q = theta[..ne].to_vec();
         let anchors = variable_supports::map_latents_to_positions(problem, &theta[ne..])
             .map_err(|e| Error::msg(e.to_string()))?;
         let mut cache = self.cache.borrow_mut();
@@ -190,15 +183,7 @@ impl Observe<LbfgsState> for MajorIterationProgressObserver {
         }
 
         let xyz_flat = self.xyz_for(theta)?;
-        let q_mode = problem.solver.q_parameterization_mode;
-        let mut q = vec![0.0; ne];
-        q_parameterization::map_q_slice(
-            q_mode,
-            &theta[..ne],
-            &problem.bounds.lower,
-            &problem.bounds.upper,
-            &mut q,
-        );
+        let q = theta[..ne].to_vec();
         let should_continue = unsafe {
             (self.callback)(
                 major_iteration,
@@ -290,13 +275,13 @@ mod tests {
     }
 
     #[test]
-    fn direct_box_unit_coordinate_maps_to_physical_q() {
+    fn direct_box_physical_q_remains_identity() {
         let problem = tiny_problem(Bounds {
             lower: vec![2.0],
             upper: vec![10.0],
         });
-        let q_spans = direct_box_spans(&problem).unwrap();
-        let theta = direct_box_scaled_to_physical(&problem, &[0.25], &q_spans, &[]);
+        validate_direct_box_bounds(&problem).unwrap();
+        let theta = direct_box_scaled_to_physical(&problem, &[4.0], &[]);
 
         assert_eq!(theta, vec![4.0]);
     }
@@ -308,14 +293,14 @@ mod tests {
             upper: vec![f64::INFINITY],
         });
 
-        assert!(direct_box_spans(&problem).is_err());
+        assert!(validate_direct_box_bounds(&problem).is_err());
     }
 
     #[test]
     fn direct_box_gradient_scales_q_and_anchor_blocks() {
-        let grad = direct_box_scaled_gradient(&[2.0, 3.0, -4.0], &[10.0], &[0.5, 2.0]);
+        let grad = direct_box_scaled_gradient(&[2.0, 3.0, -4.0], 1, &[0.5, 2.0]);
 
-        assert_eq!(grad, vec![20.0, 1.5, -8.0]);
+        assert_eq!(grad, vec![2.0, 1.5, -8.0]);
     }
 
     #[test]
@@ -335,6 +320,66 @@ mod tests {
         assert!(iterations > 0);
         assert!(loss < 1e-8);
         assert!((x[0] - 0.25).abs() < 1e-4);
+    }
+
+    #[test]
+    fn direct_box_iteration_budgets_reserve_fallback_steps() {
+        let (lbfgsb, fallback) = direct_box_iteration_budgets(500);
+
+        assert_eq!(lbfgsb, 450);
+        assert_eq!(fallback, 50);
+    }
+
+    #[test]
+    fn direct_box_projected_gradient_tolerance_uses_stricter_solver_tolerance() {
+        let mut problem = tiny_problem(Bounds {
+            lower: vec![0.1],
+            upper: vec![10.0],
+        });
+        problem.solver.absolute_tolerance = 1e-4;
+        problem.solver.relative_tolerance = 1e-7;
+
+        assert_eq!(direct_box_projected_gradient_tolerance(&problem), 1e-4);
+    }
+
+    #[test]
+    fn direct_box_projected_gradient_tolerance_has_practical_floor() {
+        let mut problem = tiny_problem(Bounds {
+            lower: vec![0.1],
+            upper: vec![10.0],
+        });
+        problem.solver.absolute_tolerance = 1e-12;
+
+        assert_eq!(direct_box_projected_gradient_tolerance(&problem), 1e-9);
+    }
+
+    #[test]
+    fn projected_gradient_fallback_reports_numerical_failure_for_bad_evaluation() {
+        let mut x = vec![0.5];
+        let lower = vec![0.0];
+        let upper = vec![1.0];
+        let mut objective = |_x: &[f64]| (f64::NAN, vec![0.0]);
+
+        let (_loss, iterations, status) =
+            projected_gradient_fallback(&mut x, &lower, &upper, 20, 1e-8, &mut objective);
+
+        assert_eq!(iterations, 0);
+        assert_eq!(status, Status::NumericalFailure);
+    }
+
+    #[test]
+    fn direct_box_termination_reason_includes_fallback_and_projected_gradient() {
+        let reason = direct_box_termination_reason(
+            Status::LineSearchFailure,
+            Status::MaxIter,
+            Some((Status::LineSearchFailure, 1)),
+            1.25e-4,
+            1e-6,
+        );
+
+        assert!(reason.contains("LineSearchFailure; projected-gradient fallback: LineSearchFailure (1 iter); final: MaxIter"));
+        assert!(reason.contains("pg_norm=1.250e-4"));
+        assert!(reason.contains("pgtol=1.000e-6"));
     }
 }
 
@@ -370,12 +415,7 @@ pub fn pack_parameters(problem: &Problem, state: &OptimizationState) -> Vec<f64>
     let n_lat = variable_supports::latent_dim(problem);
     let mut theta = Vec::with_capacity(ne + n_lat);
     for i in 0..ne {
-        theta.push(q_parameterization::inverse_single(
-            problem.solver.q_parameterization_mode,
-            state.force_densities[i],
-            problem.bounds.lower[i],
-            problem.bounds.upper[i],
-        ));
+        theta.push(state.force_densities[i]);
     }
     if n_lat > 0 {
         if state.variable_anchor_latents.len() == n_lat {
@@ -395,14 +435,7 @@ pub fn pack_parameters(problem: &Problem, state: &OptimizationState) -> Vec<f64>
 /// Unpack θ into q and latent support parameters.
 pub fn unpack_parameters(problem: &Problem, theta: &[f64]) -> (Vec<f64>, Vec<f64>) {
     let ne = problem.topology.num_edges;
-    let mut q = vec![0.0; ne];
-    q_parameterization::map_q_slice(
-        problem.solver.q_parameterization_mode,
-        &theta[..ne],
-        &problem.bounds.lower,
-        &problem.bounds.upper,
-        &mut q,
-    );
+    let q = theta[..ne].to_vec();
     let lat = theta[ne..].to_vec();
     (q, lat)
 }
@@ -437,21 +470,46 @@ fn finite_indices(v: &[f64]) -> Vec<usize> {
 }
 
 fn lbfgs_tolerances(problem: &Problem) -> (f64, f64) {
-    if problem.solver.q_parameterization_mode == QParameterizationMode::ImplicitBounded {
-        // In implicit mode L-BFGS sees the latent z-gradient
-        // grad_z = grad_q * dq/dz. Near box limits dq/dz can be small while
-        // the physical q-space objective is still improving, so default
-        // tolerances can report convergence much too early.
-        return (
-            (problem.solver.absolute_tolerance * 1e-3).max(f64::EPSILON),
-            (problem.solver.relative_tolerance * 1e-3).max(f64::EPSILON),
-        );
-    }
-
     (
         problem.solver.absolute_tolerance,
         problem.solver.relative_tolerance,
     )
+}
+
+fn direct_box_iteration_budgets(max_iterations: usize) -> (usize, usize) {
+    let max_iterations = max_iterations.max(1);
+    if max_iterations == 1 {
+        return (1, 1);
+    }
+
+    let fallback_reserved = (max_iterations / DIRECT_BOX_FALLBACK_RESERVE_FRACTION)
+        .clamp(1, DIRECT_BOX_FALLBACK_MAX_RESERVED)
+        .min(max_iterations - 1);
+    (max_iterations - fallback_reserved, fallback_reserved)
+}
+
+fn direct_box_projected_gradient_tolerance(problem: &Problem) -> f64 {
+    problem.solver.absolute_tolerance.max(1e-9)
+}
+
+fn direct_box_termination_reason(
+    initial_status: Status,
+    final_status: Status,
+    fallback: Option<(Status, usize)>,
+    pg_norm: f64,
+    pgtol: f64,
+) -> String {
+    if let Some((fallback_status, fallback_iterations)) = fallback {
+        format!(
+            "{:?}; projected-gradient fallback: {:?} ({} iter); final: {:?}; pg_norm={:.3e}; pgtol={:.3e}",
+            initial_status, fallback_status, fallback_iterations, final_status, pg_norm, pgtol
+        )
+    } else {
+        format!(
+            "{:?}; pg_norm={:.3e}; pgtol={:.3e}",
+            final_status, pg_norm, pgtol
+        )
+    }
 }
 
 fn anchor_lambda(problem: &Problem) -> f64 {
@@ -509,9 +567,8 @@ fn anchor_optimizer_scales(problem: &Problem) -> Vec<f64> {
     scales
 }
 
-fn direct_box_spans(problem: &Problem) -> Result<Vec<f64>, TheseusError> {
+fn validate_direct_box_bounds(problem: &Problem) -> Result<(), TheseusError> {
     let ne = problem.topology.num_edges;
-    let mut spans = Vec::with_capacity(ne);
     for i in 0..ne {
         let lb = problem.bounds.lower[i];
         let ub = problem.bounds.upper[i];
@@ -526,23 +583,20 @@ fn direct_box_spans(problem: &Problem) -> Result<Vec<f64>, TheseusError> {
                 "DirectBoxBounds requires increasing finite q bounds at edge {i}: [{lb}, {ub}]"
             )));
         }
-        spans.push(span);
     }
-    Ok(spans)
+    Ok(())
 }
 
 fn pack_direct_box_scaled(
     problem: &Problem,
     state: &OptimizationState,
-    q_spans: &[f64],
     anchor_scales: &[f64],
 ) -> Vec<f64> {
     let ne = problem.topology.num_edges;
     let n_lat = variable_supports::latent_dim(problem);
     let mut x = Vec::with_capacity(ne + n_lat);
-    for (i, span) in q_spans.iter().enumerate().take(ne) {
-        let u = (state.force_densities[i] - problem.bounds.lower[i]) / span;
-        x.push(u.clamp(0.0, 1.0));
+    for i in 0..ne {
+        x.push(state.force_densities[i].clamp(problem.bounds.lower[i], problem.bounds.upper[i]));
     }
 
     let latents: Vec<f64> = if state.variable_anchor_latents.len() == n_lat {
@@ -562,18 +616,12 @@ fn pack_direct_box_scaled(
     x
 }
 
-fn direct_box_scaled_to_physical(
-    problem: &Problem,
-    x: &[f64],
-    q_spans: &[f64],
-    anchor_scales: &[f64],
-) -> Vec<f64> {
+fn direct_box_scaled_to_physical(problem: &Problem, x: &[f64], anchor_scales: &[f64]) -> Vec<f64> {
     let ne = problem.topology.num_edges;
     let n_lat = variable_supports::latent_dim(problem);
     let mut theta = Vec::with_capacity(ne + n_lat);
     for i in 0..ne {
-        let u = x[i].clamp(0.0, 1.0);
-        theta.push(problem.bounds.lower[i] + q_spans[i] * u);
+        theta.push(x[i].clamp(problem.bounds.lower[i], problem.bounds.upper[i]));
     }
     for i in 0..n_lat {
         theta.push(x[ne + i] * anchor_scales[i]);
@@ -581,15 +629,10 @@ fn direct_box_scaled_to_physical(
     theta
 }
 
-fn direct_box_scaled_gradient(
-    grad_physical: &[f64],
-    q_spans: &[f64],
-    anchor_scales: &[f64],
-) -> Vec<f64> {
-    let ne = q_spans.len();
+fn direct_box_scaled_gradient(grad_physical: &[f64], ne: usize, anchor_scales: &[f64]) -> Vec<f64> {
     let mut grad = vec![0.0; grad_physical.len()];
     for i in 0..ne {
-        grad[i] = grad_physical[i] * q_spans[i];
+        grad[i] = grad_physical[i];
     }
     for i in 0..anchor_scales.len() {
         grad[ne + i] = grad_physical[ne + i] * anchor_scales[i];
@@ -599,8 +642,8 @@ fn direct_box_scaled_gradient(
 
 fn direct_box_optimizer_bounds(problem: &Problem, n_lat: usize) -> (Vec<f64>, Vec<f64>) {
     let ne = problem.topology.num_edges;
-    let mut lower = vec![0.0; ne];
-    let mut upper = vec![1.0; ne];
+    let mut lower = problem.bounds.lower[..ne].to_vec();
+    let mut upper = problem.bounds.upper[..ne].to_vec();
     lower.extend(vec![f64::NEG_INFINITY; n_lat]);
     upper.extend(vec![f64::INFINITY; n_lat]);
     (lower, upper)
@@ -685,6 +728,7 @@ where
         }
 
         let mut accepted = false;
+        let mut best_trial: Option<(Vec<f64>, f64, Vec<f64>)> = None;
         let mut step = 1.0;
         for _ in 0..DIRECT_BOX_MAX_BACKTRACK {
             let mut trial = x
@@ -703,21 +747,34 @@ where
             }
 
             let (trial_f, trial_grad) = f_and_grad(&trial);
-            if trial_f.is_finite()
-                && trial_grad.iter().all(|g| g.is_finite())
-                && trial_f <= f + 1e-4 * step * directional_derivative
-            {
-                *x = trial;
-                f = trial_f;
-                grad = trial_grad;
-                accepted = true;
-                break;
+            if trial_f.is_finite() && trial_grad.iter().all(|g| g.is_finite()) {
+                let improves = trial_f < f;
+                if improves
+                    && best_trial
+                        .as_ref()
+                        .map_or(true, |(_, best_f, _)| trial_f < *best_f)
+                {
+                    best_trial = Some((trial.clone(), trial_f, trial_grad.clone()));
+                }
+                if trial_f <= f + 1e-4 * step * directional_derivative {
+                    *x = trial;
+                    f = trial_f;
+                    grad = trial_grad;
+                    accepted = true;
+                    break;
+                }
             }
             step *= 0.5;
         }
 
         if !accepted {
-            return (f, iter - 1, Status::LineSearchFailure);
+            if let Some((trial, trial_f, trial_grad)) = best_trial {
+                *x = trial;
+                f = trial_f;
+                grad = trial_grad;
+                continue;
+            }
+            return (f, iter, Status::LineSearchFailure);
         }
     }
 
@@ -736,7 +793,7 @@ fn optimize_direct_box_bounds(
 
     let ne = problem.topology.num_edges;
     let n_lat = variable_supports::latent_dim(problem);
-    let q_spans = direct_box_spans(problem)?;
+    validate_direct_box_bounds(problem)?;
     let anchor_scales = anchor_optimizer_scales(problem);
     if anchor_scales.len() != n_lat {
         return Err(TheseusError::Shape(format!(
@@ -745,7 +802,7 @@ fn optimize_direct_box_bounds(
         )));
     }
 
-    let mut x = pack_direct_box_scaled(problem, state, &q_spans, &anchor_scales);
+    let mut x = pack_direct_box_scaled(problem, state, &anchor_scales);
     let (lower, upper) = direct_box_optimizer_bounds(problem, n_lat);
     let eval_lb = vec![f64::NEG_INFINITY; ne + n_lat];
     let eval_ub = vec![f64::INFINITY; ne + n_lat];
@@ -754,12 +811,13 @@ fn optimize_direct_box_bounds(
     let cache = Rc::new(RefCell::new(FdmCache::new(problem)?));
     let loss_trace = Rc::new(RefCell::new(Vec::new()));
     let pending_error: Rc<RefCell<Option<TheseusError>>> = Rc::new(RefCell::new(None));
+    let best_seen: Rc<RefCell<Option<(Vec<f64>, f64)>>> = Rc::new(RefCell::new(None));
 
-    let q_spans_eval = q_spans.clone();
     let anchor_scales_eval = anchor_scales.clone();
     let cache_eval = cache.clone();
     let loss_trace_eval = loss_trace.clone();
     let pending_error_eval = pending_error.clone();
+    let best_seen_eval = best_seen.clone();
     let mut f_and_grad = |x_scaled: &[f64]| -> (f64, Vec<f64>) {
         if cancel_flag.load(Ordering::Relaxed) {
             *pending_error_eval.borrow_mut() = Some(TheseusError::Cancelled);
@@ -772,8 +830,7 @@ fn optimize_direct_box_bounds(
             return (DIRECT_BOX_ERROR_COST, vec![0.0; x_scaled.len()]);
         }
 
-        let theta =
-            direct_box_scaled_to_physical(problem, x_scaled, &q_spans_eval, &anchor_scales_eval);
+        let theta = direct_box_scaled_to_physical(problem, x_scaled, &anchor_scales_eval);
         let mut grad_physical = vec![0.0; theta.len()];
         let val = {
             let mut fdm_cache = cache_eval.borrow_mut();
@@ -792,18 +849,40 @@ fn optimize_direct_box_bounds(
         match val {
             Ok(loss) if loss.is_finite() && grad_physical.iter().all(|g| g.is_finite()) => {
                 loss_trace_eval.borrow_mut().push(loss);
+                {
+                    let mut seen = best_seen_eval.borrow_mut();
+                    if seen
+                        .as_ref()
+                        .map_or(true, |(_, best_loss)| loss < *best_loss)
+                    {
+                        *seen = Some((x_scaled.to_vec(), loss));
+                    }
+                }
                 (
                     loss,
-                    direct_box_scaled_gradient(&grad_physical, &q_spans_eval, &anchor_scales_eval),
+                    direct_box_scaled_gradient(&grad_physical, ne, &anchor_scales_eval),
                 )
             }
-            Ok(_) => (DIRECT_BOX_ERROR_COST, vec![0.0; x_scaled.len()]),
-            Err(_) => (DIRECT_BOX_ERROR_COST, vec![0.0; x_scaled.len()]),
+            Ok(_) => {
+                if pending_error_eval.borrow().is_none() {
+                    *pending_error_eval.borrow_mut() = Some(TheseusError::Solver(
+                        "DirectBoxBounds value_and_gradient produced NaN or Inf".into(),
+                    ));
+                }
+                (DIRECT_BOX_ERROR_COST, vec![0.0; x_scaled.len()])
+            }
+            Err(err) => {
+                if pending_error_eval.borrow().is_none() {
+                    *pending_error_eval.borrow_mut() = Some(TheseusError::Solver(format!(
+                        "DirectBoxBounds value_and_gradient failed: {err}"
+                    )));
+                }
+                (DIRECT_BOX_ERROR_COST, vec![0.0; x_scaled.len()])
+            }
         }
     };
 
     let report_frequency = report_freq.max(1);
-    let q_spans_cb = q_spans.clone();
     let anchor_scales_cb = anchor_scales.clone();
     let cache_cb = cache.clone();
     let pending_error_cb = pending_error.clone();
@@ -820,8 +899,7 @@ fn optimize_direct_box_bounds(
             return IterationControl::Continue;
         }
 
-        let theta =
-            direct_box_scaled_to_physical(problem, x_scaled, &q_spans_cb, &anchor_scales_cb);
+        let theta = direct_box_scaled_to_physical(problem, x_scaled, &anchor_scales_cb);
         let q = theta[..ne].to_vec();
         let anchors = match variable_supports::map_latents_to_positions(problem, &theta[ne..]) {
             Ok(anchors) => anchors,
@@ -859,9 +937,12 @@ fn optimize_direct_box_bounds(
         }
     };
 
+    let (lbfgsb_max_iterations, fallback_min_iterations) =
+        direct_box_iteration_budgets(problem.solver.max_iterations);
+    let pgtol = direct_box_projected_gradient_tolerance(problem);
     let mut solver = LBFGSB::new(10)
-        .with_max_iter(problem.solver.max_iterations)
-        .with_pgtol(problem.solver.absolute_tolerance);
+        .with_max_iter(lbfgsb_max_iterations)
+        .with_pgtol(pgtol);
     let solution = solver
         .minimize_with_callback(&mut x, &lower, &upper, &mut f_and_grad, &mut callback)
         .map_err(|e| TheseusError::Solver(e.to_string()))?;
@@ -870,28 +951,39 @@ fn optimize_direct_box_bounds(
         return Err(err);
     }
 
-    let mut best_x = if solution.x.len() == ne + n_lat {
-        solution.x.clone()
-    } else {
-        x.clone()
-    };
+    let mut best_x = best_seen
+        .borrow()
+        .as_ref()
+        .map(|(x, _)| x.clone())
+        .unwrap_or_else(|| {
+            if solution.x.len() == ne + n_lat {
+                solution.x.clone()
+            } else {
+                x.clone()
+            }
+        });
     let mut iterations = solution.iterations;
     let mut status = solution.status;
-    if matches!(status, Status::LineSearchFailure | Status::NumericalFailure) {
+    let mut fallback_result = None;
+    if matches!(
+        status,
+        Status::LineSearchFailure | Status::NumericalFailure | Status::MaxIter
+    ) {
         let remaining_iterations = problem
             .solver
             .max_iterations
             .saturating_sub(iterations)
-            .max(1);
+            .max(fallback_min_iterations);
         let (_fallback_loss, fallback_iterations, fallback_status) = projected_gradient_fallback(
             &mut best_x,
             &lower,
             &upper,
             remaining_iterations,
-            problem.solver.absolute_tolerance,
+            pgtol,
             &mut f_and_grad,
         );
         iterations += fallback_iterations;
+        fallback_result = Some((fallback_status, fallback_iterations));
         if matches!(fallback_status, Status::Converged | Status::MaxIter) || fallback_iterations > 0
         {
             status = fallback_status;
@@ -902,7 +994,13 @@ fn optimize_direct_box_bounds(
         return Err(err);
     }
 
-    let theta = direct_box_scaled_to_physical(problem, &best_x, &q_spans, &anchor_scales);
+    let (_final_loss, final_grad_scaled) = f_and_grad(&best_x);
+    if let Some(err) = pending_error.borrow_mut().take() {
+        return Err(err);
+    }
+    let final_pg_norm = projected_gradient_norm(&best_x, &final_grad_scaled, &lower, &upper);
+
+    let theta = direct_box_scaled_to_physical(problem, &best_x, &anchor_scales);
     let q = theta[..ne].to_vec();
     let latents = theta[ne..].to_vec();
     let anchors = variable_supports::map_latents_to_positions(problem, &latents)?;
@@ -910,14 +1008,13 @@ fn optimize_direct_box_bounds(
     crate::fdm::solve_fdm_with_loads(&mut final_cache, &q, problem, &anchors, 1e-12)?;
 
     let converged = status == Status::Converged;
-    let termination_reason = if solution.status != status {
-        format!(
-            "{:?}; projected-gradient fallback: {:?}",
-            solution.status, status
-        )
-    } else {
-        format!("{:?}", status)
-    };
+    let termination_reason = direct_box_termination_reason(
+        solution.status,
+        status,
+        fallback_result,
+        final_pg_norm,
+        pgtol,
+    );
     let trace = loss_trace.borrow().clone();
 
     state.force_densities = q.clone();
