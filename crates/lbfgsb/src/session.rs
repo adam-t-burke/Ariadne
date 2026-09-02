@@ -741,15 +741,19 @@ fn subsm(s: &Session, xx: &[f64], w: &mut Workspace) -> bool {
     if !solve_upper(&w.wn, 2 * s.m, 0, c2, &mut w.wa[..c2], false) {
         return false;
     }
-    for i in 0..s.nfree {
-        let k = w.index[i];
-        let mut d = w.reduced_gradient[i];
-        for j in 0..s.col {
-            let p = slot(s, j);
-            d += vec_at(&w.y, s.n, p, k) * w.wa[j] / s.theta
-                + vec_at(&w.s, s.n, p, k) * w.wa[s.col + j];
+    w.direction[..s.nfree].copy_from_slice(&w.reduced_gradient[..s.nfree]);
+    for j in 0..s.col {
+        let p = slot(s, j);
+        let y = &w.y[p * s.n..(p + 1) * s.n];
+        let history_s = &w.s[p * s.n..(p + 1) * s.n];
+        for i in 0..s.nfree {
+            let k = w.index[i];
+            w.direction[i] += y[k] * w.wa[j] / s.theta
+                + history_s[k] * w.wa[s.col + j];
         }
-        w.direction[i] = d / s.theta;
+    }
+    for value in &mut w.direction[..s.nfree] {
+        *value /= s.theta;
     }
     w.row.copy_from_slice(&w.cauchy);
     let mut projected = false;
