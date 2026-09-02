@@ -349,3 +349,29 @@ fn bench_full_optimize_scaling() {
     }
     eprintln!("└──────────┴──────────┴───────────┴───────────────────────────────┘\n");
 }
+
+#[test]
+#[ignore = "manual release benchmark — run with --ignored"]
+fn bench_direct_box_bounds_48() {
+    const GRID: usize = 48;
+    let mut problem = make_grid_problem(GRID);
+    problem.bounds.upper.fill(10.0);
+    problem.solver.q_parameterization_mode = QParameterizationMode::DirectBoxBounds;
+    let ne = problem.topology.num_edges;
+    let cancel = AtomicBool::new(false);
+
+    let run = || {
+        let mut state = OptimizationState::new(vec![1.0; ne], Array2::zeros((0, 3)));
+        std::hint::black_box(
+            theseus::optimizer::optimize(&problem, &mut state, None, 1, &cancel).unwrap(),
+        );
+    };
+    run();
+    let start = Instant::now();
+    run();
+    eprintln!(
+        "DirectBoxBounds,48×48,{} edges,{:.3} ms/run",
+        ne,
+        start.elapsed().as_secs_f64() * 1.0e3,
+    );
+}
