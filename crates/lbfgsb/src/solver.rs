@@ -1,14 +1,15 @@
 //! Callback-first solver API backed by the in-repo scalar engine.
 #![allow(clippy::needless_range_loop)] // Preserve line-search arithmetic order.
 
+use crate::bounds::projected_gradient_and_active_count_unchecked;
 use crate::core::{feasible_maximum_step, DcSearch, SearchConfig, SearchResult};
 use crate::kernel::Kernel;
 use crate::session::{DirectionError, Session};
 #[cfg(feature = "benchmark-instrumentation")]
 use crate::BenchmarkTimings;
 use crate::{
-    projected_gradient_norm, Backend, Bounds, Control, Convergence, EvaluationError, Failure,
-    Iteration, Options, Report, SolveError, Stats, StopReason, Termination, Workspace,
+    Backend, Bounds, Control, Convergence, EvaluationError, Failure, Iteration, Options, Report,
+    SolveError, Stats, StopReason, Termination, Workspace,
 };
 #[cfg(feature = "benchmark-instrumentation")]
 use std::time::Instant;
@@ -213,8 +214,12 @@ impl Solver {
         {
             self.instrumentation.evaluation_nanoseconds += elapsed_nanoseconds(phase_start);
         }
-        let mut pg = projected_gradient_norm(x, &self.workspace.evaluation_gradient, bounds)
-            .map_err(SolveError::Bounds)?;
+        let (mut pg, mut active_variables) = projected_gradient_and_active_count_unchecked(
+            x,
+            &self.workspace.evaluation_gradient,
+            &self.workspace.lower,
+            &self.workspace.upper,
+        );
         if self.options.projected_gradient_tolerance() > 0.0
             && pg <= self.options.projected_gradient_tolerance()
         {
@@ -224,10 +229,10 @@ impl Solver {
                 solve_stats(
                     &session,
                     x,
-                    &self.workspace,
                     iterations,
                     evaluations,
                     line_search_probes,
+                    active_variables,
                 ),
                 Termination::Converged(Convergence::ProjectedGradient),
             );
@@ -279,14 +284,18 @@ impl Solver {
                 iterations,
             );
             let norm = dot(&self.workspace.direction, &self.workspace.direction).sqrt();
-            let boxed = self
-                .workspace
-                .lower
-                .iter()
-                .zip(&self.workspace.upper)
-                .all(|(&l, &u)| l.is_finite() && u.is_finite());
-            let initial_step = if iterations == 0 && !boxed {
-                (1.0 / norm).min(maximum_step)
+            let initial_step = if iterations == 0 {
+                let boxed = self
+                    .workspace
+                    .lower
+                    .iter()
+                    .zip(&self.workspace.upper)
+                    .all(|(&l, &u)| l.is_finite() && u.is_finite());
+                if boxed {
+                    1.0
+                } else {
+                    (1.0 / norm).min(maximum_step)
+                }
             } else {
                 1.0
             };
@@ -372,15 +381,19 @@ impl Solver {
             }
 
             iterations += 1;
-            pg = projected_gradient_norm(x, &self.workspace.evaluation_gradient, bounds)
-                .map_err(SolveError::Bounds)?;
+            (pg, active_variables) = projected_gradient_and_active_count_unchecked(
+                x,
+                &self.workspace.evaluation_gradient,
+                &self.workspace.lower,
+                &self.workspace.upper,
+            );
             let stats = solve_stats(
                 &session,
                 x,
-                &self.workspace,
                 iterations,
                 evaluations,
                 line_search_probes,
+                active_variables,
             );
             #[cfg(feature = "benchmark-instrumentation")]
             let phase_start = Instant::now();
@@ -427,10 +440,10 @@ impl Solver {
             solve_stats(
                 &session,
                 x,
-                &self.workspace,
                 iterations,
                 evaluations,
                 line_search_probes,
+                active_variables,
             ),
             termination,
         );
@@ -497,22 +510,11 @@ fn report(
 fn solve_stats(
     session: &Session,
     x: &[f64],
-    workspace: &Workspace,
     iterations: usize,
     evaluations: usize,
     line_search_probes: usize,
+    active_variables: usize,
 ) -> Stats {
-    let active_variables = x
-        .iter()
-        .zip(&workspace.evaluation_gradient)
-        .zip(&workspace.lower)
-        .zip(&workspace.upper)
-        .filter(|(((x, gradient), lower), upper)| {
-            **lower == **upper
-                || (**x <= **lower && **gradient >= 0.0)
-                || (**x >= **upper && **gradient <= 0.0)
-        })
-        .count();
     Stats {
         iterations,
         evaluations,
