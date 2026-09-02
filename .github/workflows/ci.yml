@@ -15,21 +15,158 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: cargo test --release
-        run: cargo test --release
+      - name: Verify canonical LF and shell syntax
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          paths = [Path("build.sh")]
+          paths.extend(path for path in Path("crates/lbfgsb").rglob("*") if path.is_file())
+          bad = [str(path) for path in paths if b"\r" in path.read_bytes()]
+          if bad:
+              raise SystemExit("CR bytes found in canonical-LF files:\n" + "\n".join(bad))
+          PY
+          bash -n build.sh
+
+      - name: Test standalone solver (scalar)
+        run: cargo test --locked -p ariadne-lbfgsb --no-default-features
+
+      - name: Test standalone solver (faer)
+        run: cargo test --locked -p ariadne-lbfgsb --features faer-backend
+
+      - name: Test Rust workspace
+        run: cargo test --locked --workspace --release
+
+      - name: Validate publishable package and inventory
+        shell: bash
+        run: |
+          cargo package --locked -p ariadne-lbfgsb
+          tar -tf target/package/ariadne-lbfgsb-0.1.0.crate | tee "$RUNNER_TEMP/package-files.txt"
+          grep -q 'ariadne-lbfgsb-0.1.0/UPSTREAM_LICENSE.txt' "$RUNNER_TEMP/package-files.txt"
+          grep -q 'ariadne-lbfgsb-0.1.0/THIRD_PARTY_NOTICES.md' "$RUNNER_TEMP/package-files.txt"
+          if grep -q 'src/compat.rs' "$RUNNER_TEMP/package-files.txt"; then
+            echo "Removed compatibility source leaked into package" >&2
+            exit 1
+          fi
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install exact MSRV
+        uses: dtolnay/rust-toolchain@1.80.0
+
+      - name: Test fresh scalar and all-feature resolution
+        shell: bash
+        run: |
+          cp -R crates/lbfgsb "$RUNNER_TEMP/ariadne-lbfgsb"
+          cd "$RUNNER_TEMP/ariadne-lbfgsb"
+          rm -f Cargo.lock
+          cargo test --no-default-features
+          rm -f Cargo.lock
+          cargo test --all-features
 
   dotnet:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+
+      - name: Build fresh native library
+        shell: pwsh
+        run: |
+          Remove-Item Theseus/theseus.dll -Force
+          ./build.ps1 -SkipTests
+          $bytes = [System.IO.File]::ReadAllBytes('Theseus/theseus.dll')
+          if ($bytes.Length -lt 2 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) {
+            throw 'Fresh native library is not a Windows PE file'
+          }
+          @(
+            'Ariadne-LICENSE.txt',
+            'ariadne-lbfgsb-LICENSE.txt',
+            'ariadne-lbfgsb-UPSTREAM_LICENSE.txt',
+            'ariadne-lbfgsb-THIRD_PARTY_NOTICES.md',
+            'NATIVE_ARTIFACTS.md'
+          ) | ForEach-Object {
+            if (-not (Test-Path (Join-Path 'Theseus' $_))) {
+              throw "Missing native notice: $_"
+            }
+          }
 
       - name: Build Ariadne
         run: dotnet build Ariadne.csproj -c Release
 
       - name: Build and run domain tests
         run: dotnet test Ariadne.Tests/Ariadne.Tests.csproj -c Release
+
+      - name: Verify Windows distribution bundle
+        shell: pwsh
+        run: |
+          $output = 'bin/Release/net8.0'
+          @(
+            'Ariadne.gha',
+            'theseus.dll',
+            'Ariadne-LICENSE.txt',
+            'ariadne-lbfgsb-LICENSE.txt',
+            'ariadne-lbfgsb-UPSTREAM_LICENSE.txt',
+            'ariadne-lbfgsb-THIRD_PARTY_NOTICES.md',
+            'NATIVE_ARTIFACTS.md'
+          ) | ForEach-Object {
+            if (-not (Test-Path (Join-Path $output $_))) {
+              throw "Missing Windows distribution file: $_"
+            }
+          }
+
+      - name: Upload rebuilt Windows distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: ariadne-windows
+          path: |
+            bin/Release/net8.0/Ariadne.gha
+            bin/Release/net8.0/theseus.dll
+            bin/Release/net8.0/Ariadne-LICENSE.txt
+            bin/Release/net8.0/ariadne-lbfgsb-LICENSE.txt
+            bin/Release/net8.0/ariadne-lbfgsb-UPSTREAM_LICENSE.txt
+            bin/Release/net8.0/ariadne-lbfgsb-THIRD_PARTY_NOTICES.md
+            bin/Release/net8.0/NATIVE_ARTIFACTS.md
+
+  native-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build and verify universal native library
+        shell: bash
+        run: |
+          rm -f Theseus/libtheseus.dylib
+          ./build.sh release --skip-tests
+          lipo -verify_arch arm64 x86_64 Theseus/libtheseus.dylib
+          test -s Theseus/Ariadne-LICENSE.txt
+          test -s Theseus/ariadne-lbfgsb-LICENSE.txt
+          test -s Theseus/ariadne-lbfgsb-UPSTREAM_LICENSE.txt
+          test -s Theseus/ariadne-lbfgsb-THIRD_PARTY_NOTICES.md
+          test -s Theseus/NATIVE_ARTIFACTS.md
+
+      - name: Upload rebuilt macOS native distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: ariadne-macos-native
+          path: |
+            Theseus/libtheseus.dylib
+            Theseus/Ariadne-LICENSE.txt
+            Theseus/ariadne-lbfgsb-LICENSE.txt
+            Theseus/ariadne-lbfgsb-UPSTREAM_LICENSE.txt
+            Theseus/ariadne-lbfgsb-THIRD_PARTY_NOTICES.md
+            Theseus/NATIVE_ARTIFACTS.md

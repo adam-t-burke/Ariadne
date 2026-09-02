@@ -248,6 +248,7 @@ fn fdm_fd_target_xyz() {
         weight: 1.0,
         node_indices: vec![1, 2, 3, 4, 5],
         target,
+        reduction: TargetGeometryReduction::Sse,
     })];
     let p = make_arch_problem(default_bounds(), obj);
     fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "TargetXYZ");
@@ -270,6 +271,7 @@ fn fdm_fd_target_xy() {
         weight: 1.0,
         node_indices: vec![1, 2, 3, 4, 5],
         target,
+        reduction: TargetGeometryReduction::Sse,
     })];
     let p = make_arch_problem(default_bounds(), obj);
     fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "TargetXY");
@@ -295,9 +297,48 @@ fn fdm_fd_target_plane() {
         origin: [0.0, 0.0, 0.0],
         x_axis: [1.0, 0.0, 0.0],
         y_axis: [0.0, 0.0, 1.0],
+        reduction: TargetGeometryReduction::Sse,
     })];
     let p = make_arch_problem(default_bounds(), obj);
     fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "TargetPlane");
+}
+
+#[test]
+fn fdm_fd_target_xyz_mse() {
+    let target = Array2::from_shape_vec(
+        (5, 3),
+        vec![
+            1.0, 0.0, 1.0, 2.0, 0.0, 2.0, 3.0, 0.0, 2.5, 4.0, 0.0, 2.0, 5.0, 0.0, 1.0,
+        ],
+    )
+    .unwrap();
+    let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(TargetXYZ {
+        weight: 1.0,
+        node_indices: vec![1, 2, 3, 4, 5],
+        target,
+        reduction: TargetGeometryReduction::Mse,
+    })];
+    let p = make_arch_problem(default_bounds(), obj);
+    fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "TargetXYZ-MSE");
+}
+
+#[test]
+fn fdm_fd_target_xyz_rmse() {
+    let target = Array2::from_shape_vec(
+        (5, 3),
+        vec![
+            1.0, 0.0, 1.0, 2.0, 0.0, 2.0, 3.0, 0.0, 2.5, 4.0, 0.0, 2.0, 5.0, 0.0, 1.0,
+        ],
+    )
+    .unwrap();
+    let obj: Vec<Box<dyn ObjectiveTrait>> = vec![Box::new(TargetXYZ {
+        weight: 1.0,
+        node_indices: vec![1, 2, 3, 4, 5],
+        target,
+        reduction: TargetGeometryReduction::Rmse,
+    })];
+    let p = make_arch_problem(default_bounds(), obj);
+    fd_check(&p, &default_theta(), 1e-6, 1e-4, 1e-3, "TargetXYZ-RMSE");
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -699,11 +740,13 @@ fn fdm_fd_all_objectives_combined() {
             weight: 1.0,
             node_indices: vec![1, 2, 3, 4, 5],
             target: target_xyz,
+            reduction: TargetGeometryReduction::Sse,
         }),
         Box::new(TargetXY {
             weight: 0.5,
             node_indices: vec![1, 2, 3, 4, 5],
             target: target_xy,
+            reduction: TargetGeometryReduction::Sse,
         }),
         Box::new(TargetPlane {
             weight: 0.3,
@@ -712,6 +755,7 @@ fn fdm_fd_all_objectives_combined() {
             origin: [0.0, 0.0, 0.0],
             x_axis: [1.0, 0.0, 0.0],
             y_axis: [0.0, 0.0, 1.0],
+            reduction: TargetGeometryReduction::Sse,
         }),
         Box::new(PlanarConstraintAlongDirection {
             weight: 0.2,
@@ -886,6 +930,7 @@ fn fdm_fd_weighted_objectives() {
             weight: 3.7,
             node_indices: vec![1, 2, 3, 4, 5],
             target,
+            reduction: TargetGeometryReduction::Sse,
         }),
         Box::new(SumForceLength {
             weight: 0.05,

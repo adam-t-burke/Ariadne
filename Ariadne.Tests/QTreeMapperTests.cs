@@ -109,6 +109,57 @@ public sealed class QTreeMapperTests
         Assert.Contains("cannot be empty", result.Error);
     }
 
+    [Fact]
+    public void BoundsUseSameMixedBroadcastAndPerEdgeDispatch()
+    {
+        var bounds = new EdgeValueTree(
+        [
+            new EdgeValueBranch("{0;1}", [4.0]),
+            new EdgeValueBranch("{2;3}", [5.0, 6.0]),
+        ]);
+
+        var result = QTreeMapper.Map(
+            bounds,
+            [Path(0, 1), Path(0, 1), Path(2, 3), Path(2, 3)],
+            "qMin");
+
+        Assert.True(result.Success);
+        Assert.Equal([4.0, 4.0, 5.0, 6.0], result.Values);
+    }
+
+    [Fact]
+    public void LowerAndUpperBoundsCanUseIndependentTrees()
+    {
+        var lower = QTreeMapper.Map(
+            EdgeValueTree.Broadcast(0.1),
+            [Path(0), Path(0), Path(1)],
+            "qMin");
+        var upper = QTreeMapper.Map(
+            new EdgeValueTree(
+            [
+                new EdgeValueBranch("{0}", [10.0]),
+                new EdgeValueBranch("{1}", [20.0]),
+            ]),
+            [Path(0), Path(0), Path(1)],
+            "qMax");
+
+        Assert.Equal([0.1, 0.1, 0.1], lower.Values);
+        Assert.Equal([10.0, 10.0, 20.0], upper.Values);
+    }
+
+    [Fact]
+    public void BoundsErrorsUseTheirInputLabel()
+    {
+        var result = QTreeMapper.Map(
+            new EdgeValueTree([new EdgeValueBranch("{0}", [1.0, 2.0])]),
+            [Path(0), Path(0), Path(0)],
+            "qMax");
+
+        Assert.False(result.Success);
+        Assert.Contains("qMax at {0}", result.Error);
+        Assert.Contains("has 3 edge(s)", result.Error);
+    }
+
     private static GH_Path Path(params int[] indices) => new(indices);
 
     private static GH_Structure<GH_Number> Tree(

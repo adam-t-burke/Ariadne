@@ -20,16 +20,16 @@ use argmin::core::{
 };
 use argmin::solver::linesearch::MoreThuenteLineSearch;
 use argmin::solver::quasinewton::LBFGS;
-use lbfgsb_rs_pure::{IterationControl, Status, LBFGSB};
+use ariadne_lbfgsb::{
+    Bounds as SolverBounds, Control, Convergence, Failure, Iteration, Options, SolveAdapter,
+    SolveError, Solver, StopReason, Termination,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const DIRECT_BOX_SCALE_EPS: f64 = 1e-12;
-const DIRECT_BOX_ERROR_COST: f64 = 1.0e300;
-const DIRECT_BOX_MAX_BACKTRACK: usize = 32;
-const DIRECT_BOX_FALLBACK_RESERVE_FRACTION: usize = 5;
-const DIRECT_BOX_FALLBACK_MAX_RESERVED: usize = 50;
+type EvaluationRecord = Rc<RefCell<Option<(Vec<f64>, f64, Vec<f64>)>>>;
 
 // ─────────────────────────────────────────────────────────────
 //  argmin problem wrapper
@@ -54,7 +54,7 @@ struct FdmProblem<'a> {
     lb_idx: Vec<usize>,
     ub_idx: Vec<usize>,
     /// Cached (θ, loss, gradient) from the last evaluation.
-    last_eval: Rc<RefCell<Option<(Vec<f64>, f64, Vec<f64>)>>>,
+    last_eval: EvaluationRecord,
     /// Loss value recorded at each unique evaluation.
     loss_trace: RefCell<Vec<f64>>,
     cancel_flag: &'a AtomicBool,
@@ -62,7 +62,7 @@ struct FdmProblem<'a> {
 
 impl<'a> FdmProblem<'a> {
     fn check_cancelled(&self) -> Result<(), Error> {
-        if self.cancel_flag.load(Ordering::Relaxed) {
+        if self.cancel_flag.load(Ordering::Acquire) {
             return Err(Error::msg(TheseusError::Cancelled.to_string()));
         }
         Ok(())
@@ -124,8 +124,10 @@ type LbfgsState = IterState<Vec<f64>, Vec<f64>, (), (), (), f64>;
 /// observers after `next_iter`, so this avoids More-Thuente trial states.
 struct MajorIterationProgressObserver {
     problem: *const Problem,
-    cache: Rc<RefCell<FdmCache>>,
-    last_eval: Rc<RefCell<Option<(Vec<f64>, f64, Vec<f64>)>>>,
+    cancel_flag: *const AtomicBool,
+    evaluation_cache: Rc<RefCell<FdmCache>>,
+    observer_cache: RefCell<FdmCache>,
+    last_eval: EvaluationRecord,
     callback: ProgressCallback,
     report_frequency: usize,
 }
@@ -139,6 +141,20 @@ impl MajorIterationProgressObserver {
         }
     }
 
+    fn check_cancelled(&self) -> Result<(), Error> {
+        let cancelled = unsafe {
+            self.cancel_flag
+                .as_ref()
+                .ok_or_else(|| Error::msg("progress observer cancellation pointer is null"))?
+                .load(Ordering::Acquire)
+        };
+        if cancelled {
+            Err(Error::msg(TheseusError::Cancelled.to_string()))
+        } else {
+            Ok(())
+        }
+    }
+
     fn xyz_for(&self, theta: &[f64]) -> Result<Vec<f64>, Error> {
         let problem = self.problem()?;
         let nn = problem.topology.num_nodes;
@@ -146,7 +162,7 @@ impl MajorIterationProgressObserver {
 
         if let Some((cached_theta, _, _)) = self.last_eval.borrow().as_ref() {
             if cached_theta.as_slice() == theta {
-                let cache = self.cache.borrow();
+                let cache = self.evaluation_cache.borrow();
                 return Ok(flatten_xyz(&cache, nn));
             }
         }
@@ -154,7 +170,7 @@ impl MajorIterationProgressObserver {
         let q = theta[..ne].to_vec();
         let anchors = variable_supports::map_latents_to_positions(problem, &theta[ne..])
             .map_err(|e| Error::msg(e.to_string()))?;
-        let mut cache = self.cache.borrow_mut();
+        let mut cache = self.observer_cache.borrow_mut();
         crate::fdm::solve_fdm_with_loads(&mut cache, &q, problem, &anchors, 1e-12)
             .map_err(|e| Error::msg(e.to_string()))?;
         Ok(flatten_xyz(&cache, nn))
@@ -197,8 +213,7 @@ impl Observe<LbfgsState> for MajorIterationProgressObserver {
         if should_continue == 0 {
             return Err(Error::msg(TheseusError::Cancelled.to_string()));
         }
-
-        Ok(())
+        self.check_cancelled()
     }
 }
 
@@ -219,7 +234,34 @@ mod tests {
     use super::*;
     use crate::sparse::SparseColMatOwned;
     use crate::types::{AnchorInfo, Bounds, NetworkTopology, SolverOptions};
+    use ariadne_lbfgsb::Stats;
     use ndarray::Array2;
+    use std::sync::Mutex;
+
+    static REPORTED_ITERATIONS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+    unsafe extern "C" fn record_progress(
+        iteration: usize,
+        _loss: f64,
+        _xyz: *const f64,
+        _num_nodes: usize,
+        _q: *const f64,
+        _num_edges: usize,
+    ) -> u8 {
+        REPORTED_ITERATIONS.lock().unwrap().push(iteration);
+        1
+    }
+
+    unsafe extern "C" fn cancel_progress(
+        _iteration: usize,
+        _loss: f64,
+        _xyz: *const f64,
+        _num_nodes: usize,
+        _q: *const f64,
+        _num_edges: usize,
+    ) -> u8 {
+        0
+    }
 
     fn tiny_problem(bounds: Bounds) -> Problem {
         let incidence =
@@ -275,15 +317,43 @@ mod tests {
     }
 
     #[test]
-    fn direct_box_physical_q_remains_identity() {
+    fn direct_box_q_is_physical() {
         let problem = tiny_problem(Bounds {
             lower: vec![2.0],
             upper: vec![10.0],
         });
         validate_direct_box_bounds(&problem).unwrap();
-        let theta = direct_box_scaled_to_physical(&problem, &[4.0], &[]);
+        let state = OptimizationState::new(vec![4.0], Array2::zeros((0, 3)));
+        let packed = pack_direct_box_scaled(&problem, &state, &[]);
+        let theta = direct_box_scaled_to_physical(&problem, &packed, &[]);
 
+        assert_eq!(packed, vec![4.0]);
         assert_eq!(theta, vec![4.0]);
+    }
+
+    #[test]
+    fn direct_box_pack_clamps_initial_q_to_bounds() {
+        let problem = tiny_problem(Bounds {
+            lower: vec![2.0],
+            upper: vec![10.0],
+        });
+        let state = OptimizationState::new(vec![0.0], Array2::zeros((0, 3)));
+        let packed = pack_direct_box_scaled(&problem, &state, &[]);
+
+        assert_eq!(packed, vec![2.0]);
+    }
+
+    #[test]
+    fn direct_box_optimizer_uses_physical_q_bounds() {
+        let problem = tiny_problem(Bounds {
+            lower: vec![2.0],
+            upper: vec![10.0],
+        });
+
+        let (lower, upper) = direct_box_optimizer_bounds(&problem, 0);
+
+        assert_eq!(lower, vec![2.0]);
+        assert_eq!(upper, vec![10.0]);
     }
 
     #[test]
@@ -298,88 +368,109 @@ mod tests {
 
     #[test]
     fn direct_box_gradient_scales_q_and_anchor_blocks() {
-        let grad = direct_box_scaled_gradient(&[2.0, 3.0, -4.0], 1, &[0.5, 2.0]);
+        let problem = tiny_problem(Bounds {
+            lower: vec![2.0],
+            upper: vec![10.0],
+        });
+        let grad = direct_box_scaled_gradient(&problem, &[2.0, 3.0, -4.0], &[0.5, 2.0]);
 
         assert_eq!(grad, vec![2.0, 1.5, -8.0]);
     }
 
     #[test]
-    fn projected_gradient_fallback_reduces_boxed_objective() {
-        let mut x = vec![0.95];
-        let lower = vec![0.0];
-        let upper = vec![1.0];
-        let mut objective = |x: &[f64]| {
-            let residual = x[0] - 0.25;
-            (residual * residual, vec![2.0 * residual])
+    fn legacy_observer_does_not_desynchronize_evaluation_cache() {
+        let problem = tiny_problem(Bounds {
+            lower: vec![0.1],
+            upper: vec![10.0],
+        });
+        let evaluation_cache = Rc::new(RefCell::new(FdmCache::new(&problem).unwrap()));
+        let evaluation_snapshot = evaluation_cache.borrow().nf.clone();
+        let last_eval = Rc::new(RefCell::new(Some((vec![2.0], 7.0, vec![3.0]))));
+        let cancel = AtomicBool::new(false);
+        let observer = MajorIterationProgressObserver {
+            problem: &problem,
+            cancel_flag: &cancel,
+            evaluation_cache: evaluation_cache.clone(),
+            observer_cache: RefCell::new(FdmCache::new(&problem).unwrap()),
+            last_eval: last_eval.clone(),
+            callback: record_progress,
+            report_frequency: 1,
         };
 
-        let (loss, iterations, status) =
-            projected_gradient_fallback(&mut x, &lower, &upper, 20, 1e-8, &mut objective);
+        observer.xyz_for(&[3.0]).unwrap();
 
-        assert!(matches!(status, Status::Converged | Status::MaxIter));
-        assert!(iterations > 0);
-        assert!(loss < 1e-8);
-        assert!((x[0] - 0.25).abs() < 1e-4);
+        assert_eq!(evaluation_cache.borrow().nf, evaluation_snapshot);
+        assert_eq!(last_eval.borrow().as_ref().unwrap().0, vec![2.0]);
     }
 
     #[test]
-    fn direct_box_iteration_budgets_reserve_fallback_steps() {
-        let (lbfgsb, fallback) = direct_box_iteration_budgets(500);
-
-        assert_eq!(lbfgsb, 450);
-        assert_eq!(fallback, 50);
-    }
-
-    #[test]
-    fn direct_box_projected_gradient_tolerance_uses_stricter_solver_tolerance() {
+    fn direct_box_wires_iteration_limits_above_one_thousand_exactly() {
         let mut problem = tiny_problem(Bounds {
-            lower: vec![0.1],
+            lower: vec![2.0],
             upper: vec![10.0],
         });
-        problem.solver.absolute_tolerance = 1e-4;
-        problem.solver.relative_tolerance = 1e-7;
+        problem.solver.max_iterations = 1_237;
 
-        assert_eq!(direct_box_projected_gradient_tolerance(&problem), 1e-4);
+        let options = direct_box_solver_options(&problem).unwrap();
+
+        assert_eq!(options.max_iterations(), 1_237);
     }
 
     #[test]
-    fn direct_box_projected_gradient_tolerance_has_practical_floor() {
-        let mut problem = tiny_problem(Bounds {
-            lower: vec![0.1],
+    fn adapter_reports_only_configured_accepted_iterations_in_order() {
+        REPORTED_ITERATIONS.lock().unwrap().clear();
+        let problem = tiny_problem(Bounds {
+            lower: vec![2.0],
             upper: vec![10.0],
         });
-        problem.solver.absolute_tolerance = 1e-12;
+        let cancel = AtomicBool::new(false);
+        let mut adapter =
+            FdmSolverAdapter::new(&problem, &cancel, Some(record_progress), 3, Vec::new()).unwrap();
+        let x = [2.0];
+        let mut gradient = [0.0];
+        let loss = adapter.value_and_gradient(&x, &mut gradient).unwrap();
 
-        assert_eq!(direct_box_projected_gradient_tolerance(&problem), 1e-9);
+        for iteration in 1..=7 {
+            let mut stats = Stats::default();
+            stats.iterations = iteration;
+            adapter
+                .accepted_iteration(Iteration {
+                    x: &x,
+                    value: loss,
+                    projected_gradient_norm: 0.0,
+                    stats,
+                })
+                .unwrap();
+        }
+
+        assert_eq!(*REPORTED_ITERATIONS.lock().unwrap(), vec![1, 3, 6]);
     }
 
     #[test]
-    fn projected_gradient_fallback_reports_numerical_failure_for_bad_evaluation() {
-        let mut x = vec![0.5];
-        let lower = vec![0.0];
-        let upper = vec![1.0];
-        let mut objective = |_x: &[f64]| (f64::NAN, vec![0.0]);
+    fn adapter_preserves_progress_cancellation_error() {
+        let problem = tiny_problem(Bounds {
+            lower: vec![2.0],
+            upper: vec![10.0],
+        });
+        let cancel = AtomicBool::new(false);
+        let mut adapter =
+            FdmSolverAdapter::new(&problem, &cancel, Some(cancel_progress), 1, Vec::new()).unwrap();
+        let x = [2.0];
+        let mut gradient = [0.0];
+        let loss = adapter.value_and_gradient(&x, &mut gradient).unwrap();
+        let mut stats = Stats::default();
+        stats.iterations = 1;
 
-        let (_loss, iterations, status) =
-            projected_gradient_fallback(&mut x, &lower, &upper, 20, 1e-8, &mut objective);
+        let error = adapter
+            .accepted_iteration(Iteration {
+                x: &x,
+                value: loss,
+                projected_gradient_norm: 0.0,
+                stats,
+            })
+            .unwrap_err();
 
-        assert_eq!(iterations, 0);
-        assert_eq!(status, Status::NumericalFailure);
-    }
-
-    #[test]
-    fn direct_box_termination_reason_includes_fallback_and_projected_gradient() {
-        let reason = direct_box_termination_reason(
-            Status::LineSearchFailure,
-            Status::MaxIter,
-            Some((Status::LineSearchFailure, 1)),
-            1.25e-4,
-            1e-6,
-        );
-
-        assert!(reason.contains("LineSearchFailure; projected-gradient fallback: LineSearchFailure (1 iter); final: MaxIter"));
-        assert!(reason.contains("pg_norm=1.250e-4"));
-        assert!(reason.contains("pgtol=1.000e-6"));
+        assert!(matches!(error, TheseusError::Cancelled));
     }
 }
 
@@ -476,42 +567,6 @@ fn lbfgs_tolerances(problem: &Problem) -> (f64, f64) {
     )
 }
 
-fn direct_box_iteration_budgets(max_iterations: usize) -> (usize, usize) {
-    let max_iterations = max_iterations.max(1);
-    if max_iterations == 1 {
-        return (1, 1);
-    }
-
-    let fallback_reserved = (max_iterations / DIRECT_BOX_FALLBACK_RESERVE_FRACTION)
-        .clamp(1, DIRECT_BOX_FALLBACK_MAX_RESERVED)
-        .min(max_iterations - 1);
-    (max_iterations - fallback_reserved, fallback_reserved)
-}
-
-fn direct_box_projected_gradient_tolerance(problem: &Problem) -> f64 {
-    problem.solver.absolute_tolerance.max(1e-9)
-}
-
-fn direct_box_termination_reason(
-    initial_status: Status,
-    final_status: Status,
-    fallback: Option<(Status, usize)>,
-    pg_norm: f64,
-    pgtol: f64,
-) -> String {
-    if let Some((fallback_status, fallback_iterations)) = fallback {
-        format!(
-            "{:?}; projected-gradient fallback: {:?} ({} iter); final: {:?}; pg_norm={:.3e}; pgtol={:.3e}",
-            initial_status, fallback_status, fallback_iterations, final_status, pg_norm, pgtol
-        )
-    } else {
-        format!(
-            "{:?}; pg_norm={:.3e}; pgtol={:.3e}",
-            final_status, pg_norm, pgtol
-        )
-    }
-}
-
 fn anchor_lambda(problem: &Problem) -> f64 {
     problem
         .solver
@@ -528,39 +583,30 @@ fn anchor_optimizer_scales(problem: &Problem) -> Vec<f64> {
 
     let mut scales = Vec::with_capacity(variable_supports::latent_dim(problem));
     for support in &problem.anchors.variable_supports {
+        let support_lambda = if support.saturation_lambda.is_finite()
+            && support.saturation_lambda > 0.0
+        {
+            support.saturation_lambda
+        } else {
+            lambda
+        };
         match &support.kind {
             VariableSupportKind::Sphere { radius } => {
-                let scale = lambda * radius.abs().max(DIRECT_BOX_SCALE_EPS);
+                let scale = support_lambda * radius.abs().max(DIRECT_BOX_SCALE_EPS);
                 scales.extend_from_slice(&[scale, scale, scale]);
             }
-            VariableSupportKind::Roller {
-                enabled,
-                lower,
-                upper,
-            } => {
-                for axis in 0..3 {
-                    if enabled[axis] {
-                        scales.push(
-                            lambda * (upper[axis] - lower[axis]).abs().max(DIRECT_BOX_SCALE_EPS),
-                        );
+            VariableSupportKind::Roller { enabled, .. } => {
+                for &is_enabled in enabled {
+                    if is_enabled {
+                        scales.push(1.0);
                     }
                 }
             }
-            VariableSupportKind::Rail { start, end } => {
-                let dx = end[0] - start[0];
-                let dy = end[1] - start[1];
-                let dz = end[2] - start[2];
-                let length = (dx * dx + dy * dy + dz * dz).sqrt();
-                scales.push(lambda * length.max(DIRECT_BOX_SCALE_EPS));
+            VariableSupportKind::Rail { .. } | VariableSupportKind::NurbsCurve { .. } => {
+                scales.push(1.0);
             }
-            VariableSupportKind::NurbsCurve { domain, .. } => {
-                scales.push(lambda * (domain[1] - domain[0]).abs().max(DIRECT_BOX_SCALE_EPS));
-            }
-            VariableSupportKind::NurbsSurface {
-                domain_u, domain_v, ..
-            } => {
-                scales.push(lambda * (domain_u[1] - domain_u[0]).abs().max(DIRECT_BOX_SCALE_EPS));
-                scales.push(lambda * (domain_v[1] - domain_v[0]).abs().max(DIRECT_BOX_SCALE_EPS));
+            VariableSupportKind::NurbsSurface { .. } => {
+                scales.extend_from_slice(&[1.0, 1.0]);
             }
         }
     }
@@ -573,14 +619,17 @@ fn validate_direct_box_bounds(problem: &Problem) -> Result<(), TheseusError> {
         let lb = problem.bounds.lower[i];
         let ub = problem.bounds.upper[i];
         if !lb.is_finite() || !ub.is_finite() {
-            return Err(TheseusError::Shape(
-                "DirectBoxBounds requires finite lower and upper q bounds for every edge".into(),
-            ));
+            return Err(TheseusError::Shape(format!(
+                "DirectBoxBounds model contract requires finite two-sided q bounds at edge {i}; \
+                 use DirectSoftBounds for one-sided or unbounded q (got [{lb}, {ub}])"
+            )));
         }
         let span = ub - lb;
         if !span.is_finite() || span <= DIRECT_BOX_SCALE_EPS {
             return Err(TheseusError::Shape(format!(
-                "DirectBoxBounds requires increasing finite q bounds at edge {i}: [{lb}, {ub}]"
+                "DirectBoxBounds model contract requires a non-fixed finite q interval wider than \
+                 {DIRECT_BOX_SCALE_EPS:e} at edge {i}; use DirectSoftBounds for fixed q \
+                 (got [{lb}, {ub}])"
             )));
         }
     }
@@ -596,7 +645,9 @@ fn pack_direct_box_scaled(
     let n_lat = variable_supports::latent_dim(problem);
     let mut x = Vec::with_capacity(ne + n_lat);
     for i in 0..ne {
-        x.push(state.force_densities[i].clamp(problem.bounds.lower[i], problem.bounds.upper[i]));
+        let lower = problem.bounds.lower[i];
+        let upper = problem.bounds.upper[i];
+        x.push(state.force_densities[i].clamp(lower, upper));
     }
 
     let latents: Vec<f64> = if state.variable_anchor_latents.len() == n_lat {
@@ -609,176 +660,308 @@ fn pack_direct_box_scaled(
             .take(n_lat)
             .collect()
     };
-    for i in 0..n_lat {
-        let scale = anchor_scales[i].max(DIRECT_BOX_SCALE_EPS);
+    for (i, &scale) in anchor_scales.iter().enumerate().take(n_lat) {
+        let scale = scale.max(DIRECT_BOX_SCALE_EPS);
         x.push(latents.get(i).copied().unwrap_or(0.0) / scale);
     }
     x
 }
 
+#[cfg(test)]
 fn direct_box_scaled_to_physical(problem: &Problem, x: &[f64], anchor_scales: &[f64]) -> Vec<f64> {
-    let ne = problem.topology.num_edges;
-    let n_lat = variable_supports::latent_dim(problem);
-    let mut theta = Vec::with_capacity(ne + n_lat);
-    for i in 0..ne {
-        theta.push(x[i].clamp(problem.bounds.lower[i], problem.bounds.upper[i]));
-    }
-    for i in 0..n_lat {
-        theta.push(x[ne + i] * anchor_scales[i]);
-    }
+    let mut theta = vec![0.0; x.len()];
+    fill_physical_parameters(problem, x, anchor_scales, &mut theta);
     theta
 }
 
-fn direct_box_scaled_gradient(grad_physical: &[f64], ne: usize, anchor_scales: &[f64]) -> Vec<f64> {
-    let mut grad = vec![0.0; grad_physical.len()];
-    for i in 0..ne {
-        grad[i] = grad_physical[i];
-    }
+fn fill_physical_parameters(
+    problem: &Problem,
+    x: &[f64],
+    anchor_scales: &[f64],
+    theta: &mut [f64],
+) {
+    let ne = problem.topology.num_edges;
+    theta[..ne].copy_from_slice(&x[..ne]);
     for i in 0..anchor_scales.len() {
-        grad[ne + i] = grad_physical[ne + i] * anchor_scales[i];
+        theta[ne + i] = x[ne + i] * anchor_scales[i];
     }
-    grad
+}
+
+fn fill_scaled_gradient(
+    problem: &Problem,
+    grad_physical: &[f64],
+    anchor_scales: &[f64],
+    gradient: &mut [f64],
+) {
+    let ne = problem.topology.num_edges;
+    gradient[..ne].copy_from_slice(&grad_physical[..ne]);
+    for i in 0..anchor_scales.len() {
+        gradient[ne + i] = grad_physical[ne + i] * anchor_scales[i];
+    }
+}
+
+#[cfg(test)]
+fn direct_box_scaled_gradient(
+    problem: &Problem,
+    grad_physical: &[f64],
+    anchor_scales: &[f64],
+) -> Vec<f64> {
+    let mut gradient = vec![0.0; grad_physical.len()];
+    fill_scaled_gradient(problem, grad_physical, anchor_scales, &mut gradient);
+    gradient
 }
 
 fn direct_box_optimizer_bounds(problem: &Problem, n_lat: usize) -> (Vec<f64>, Vec<f64>) {
     let ne = problem.topology.num_edges;
     let mut lower = problem.bounds.lower[..ne].to_vec();
     let mut upper = problem.bounds.upper[..ne].to_vec();
-    lower.extend(vec![f64::NEG_INFINITY; n_lat]);
-    upper.extend(vec![f64::INFINITY; n_lat]);
+    let (support_lower, support_upper) = variable_supports::direct_box_optimizer_bounds(problem);
+    debug_assert_eq!(support_lower.len(), n_lat);
+    debug_assert_eq!(support_upper.len(), n_lat);
+    lower.extend(support_lower);
+    upper.extend(support_upper);
     (lower, upper)
 }
 
-fn projected_gradient_norm(x: &[f64], grad: &[f64], lower: &[f64], upper: &[f64]) -> f64 {
-    let mut norm = 0.0_f64;
-    for i in 0..x.len() {
-        let g = if x[i] <= lower[i] + DIRECT_BOX_SCALE_EPS && grad[i] > 0.0 {
-            0.0
-        } else if x[i] >= upper[i] - DIRECT_BOX_SCALE_EPS && grad[i] < 0.0 {
-            0.0
+struct FdmSolverAdapter<'a> {
+    problem: &'a Problem,
+    cancel_flag: &'a AtomicBool,
+    progress_cb: Option<ProgressCallback>,
+    report_frequency: usize,
+    anchor_scales: Vec<f64>,
+    evaluation_lower: Vec<f64>,
+    evaluation_upper: Vec<f64>,
+    lower_indices: Vec<usize>,
+    upper_indices: Vec<usize>,
+    cache: FdmCache,
+    physical_parameters: Vec<f64>,
+    physical_gradient: Vec<f64>,
+    evaluated_x: Vec<f64>,
+    has_evaluation: bool,
+    xyz_flat: Vec<f64>,
+    loss_trace: Vec<f64>,
+}
+
+impl<'a> FdmSolverAdapter<'a> {
+    fn new(
+        problem: &'a Problem,
+        cancel_flag: &'a AtomicBool,
+        progress_cb: Option<ProgressCallback>,
+        report_frequency: usize,
+        anchor_scales: Vec<f64>,
+    ) -> Result<Self, TheseusError> {
+        let n = problem.topology.num_edges + variable_supports::latent_dim(problem);
+        Ok(Self {
+            problem,
+            cancel_flag,
+            progress_cb,
+            report_frequency: report_frequency.max(1),
+            anchor_scales,
+            evaluation_lower: vec![f64::NEG_INFINITY; n],
+            evaluation_upper: vec![f64::INFINITY; n],
+            lower_indices: Vec::new(),
+            upper_indices: Vec::new(),
+            cache: FdmCache::new(problem)?,
+            physical_parameters: vec![0.0; n],
+            physical_gradient: vec![0.0; n],
+            evaluated_x: vec![0.0; n],
+            has_evaluation: false,
+            xyz_flat: vec![0.0; problem.topology.num_nodes * 3],
+            loss_trace: Vec::new(),
+        })
+    }
+
+    fn check_cancelled(&self) -> Result<(), TheseusError> {
+        if self.cancel_flag.load(Ordering::Acquire) {
+            Err(TheseusError::Cancelled)
         } else {
-            grad[i]
+            Ok(())
+        }
+    }
+
+    fn fill_physical_parameters(&mut self, x: &[f64]) {
+        fill_physical_parameters(
+            self.problem,
+            x,
+            &self.anchor_scales,
+            &mut self.physical_parameters,
+        );
+    }
+
+    fn sync_final_cache(&mut self, x: &[f64]) -> Result<(), TheseusError> {
+        if self.has_evaluation && self.evaluated_x == x {
+            return Ok(());
+        }
+        self.fill_physical_parameters(x);
+        let ne = self.problem.topology.num_edges;
+        let anchors = variable_supports::map_latents_to_positions(
+            self.problem,
+            &self.physical_parameters[ne..],
+        )?;
+        crate::fdm::solve_fdm_with_loads(
+            &mut self.cache,
+            &self.physical_parameters[..ne],
+            self.problem,
+            &anchors,
+            1e-12,
+        )?;
+        self.evaluated_x.copy_from_slice(x);
+        self.has_evaluation = true;
+        Ok(())
+    }
+
+    fn finish(
+        mut self,
+        x: &[f64],
+        report: ariadne_lbfgsb::Report,
+        state: &mut OptimizationState,
+    ) -> Result<SolverResult, TheseusError> {
+        self.sync_final_cache(x)?;
+        self.fill_physical_parameters(x);
+        let ne = self.problem.topology.num_edges;
+        let q = self.physical_parameters[..ne].to_vec();
+        let latents = self.physical_parameters[ne..].to_vec();
+        let anchors = variable_supports::map_latents_to_positions(self.problem, &latents)?;
+        let termination_reason = direct_box_termination_text(&report);
+        let converged = report.termination.converged();
+
+        state.force_densities = q.clone();
+        state.variable_anchor_positions = anchors.clone();
+        state.variable_anchor_latents = latents;
+        state.iterations = report.stats.iterations;
+        state.loss_trace = self.loss_trace.clone();
+
+        Ok(SolverResult {
+            q,
+            anchor_positions: anchors,
+            xyz: self.cache.nf,
+            member_lengths: self.cache.member_lengths,
+            member_forces: self.cache.member_forces,
+            reactions: self.cache.reactions,
+            loss_trace: self.loss_trace,
+            iterations: report.stats.iterations,
+            converged,
+            termination_reason,
+            cross_section_areas: self.cache.cross_section_areas,
+        })
+    }
+}
+
+impl SolveAdapter for FdmSolverAdapter<'_> {
+    type Error = TheseusError;
+
+    fn value_and_gradient(&mut self, x: &[f64], gradient: &mut [f64]) -> Result<f64, Self::Error> {
+        self.check_cancelled()?;
+        if x.iter().any(|value| !value.is_finite()) {
+            return Err(TheseusError::Solver(
+                "DirectBoxBounds received non-finite solver parameters".into(),
+            ));
+        }
+
+        self.fill_physical_parameters(x);
+        let loss = value_and_gradient(
+            &mut self.cache,
+            self.problem,
+            &self.physical_parameters,
+            &mut self.physical_gradient,
+            &self.evaluation_lower,
+            &self.evaluation_upper,
+            &self.lower_indices,
+            &self.upper_indices,
+        )?;
+        fill_scaled_gradient(
+            self.problem,
+            &self.physical_gradient,
+            &self.anchor_scales,
+            gradient,
+        );
+        self.loss_trace.push(loss);
+        self.evaluated_x.copy_from_slice(x);
+        self.has_evaluation = true;
+        self.check_cancelled()?;
+        Ok(loss)
+    }
+
+    fn accepted_iteration(&mut self, iteration: Iteration<'_>) -> Result<Control, Self::Error> {
+        self.check_cancelled()?;
+        let Some(progress_callback) = self.progress_cb.filter(|_| {
+            should_report_major_iteration(iteration.stats.iterations, self.report_frequency)
+        }) else {
+            return Ok(Control::Continue);
         };
-        norm = norm.max(g.abs());
+
+        for (node, xyz) in self.xyz_flat.chunks_exact_mut(3).enumerate() {
+            xyz.copy_from_slice(&[
+                self.cache.nf[[node, 0]],
+                self.cache.nf[[node, 1]],
+                self.cache.nf[[node, 2]],
+            ]);
+        }
+        let ne = self.problem.topology.num_edges;
+        let should_continue = unsafe {
+            progress_callback(
+                iteration.stats.iterations,
+                iteration.value,
+                self.xyz_flat.as_ptr(),
+                self.problem.topology.num_nodes,
+                self.physical_parameters.as_ptr(),
+                ne,
+            )
+        };
+        if should_continue == 0 {
+            return Err(TheseusError::Cancelled);
+        }
+        self.check_cancelled()?;
+        Ok(Control::Continue)
     }
-    norm
 }
 
-fn project_to_bounds(x: &mut [f64], lower: &[f64], upper: &[f64]) {
-    for i in 0..x.len() {
-        if lower[i].is_finite() && x[i] < lower[i] {
-            x[i] = lower[i];
-        }
-        if upper[i].is_finite() && x[i] > upper[i] {
-            x[i] = upper[i];
-        }
+fn map_direct_box_solve_error(error: SolveError<TheseusError>) -> TheseusError {
+    match error {
+        SolveError::Objective(error) | SolveError::Callback(error) => error,
+        other => TheseusError::Solver(other.to_string()),
     }
 }
 
-fn projected_gradient_fallback<F>(
-    x: &mut Vec<f64>,
-    lower: &[f64],
-    upper: &[f64],
-    max_iter: usize,
-    pgtol: f64,
-    f_and_grad: &mut F,
-) -> (f64, usize, Status)
-where
-    F: FnMut(&[f64]) -> (f64, Vec<f64>),
-{
-    let (mut f, mut grad) = f_and_grad(x);
-    if !f.is_finite() || grad.iter().any(|g| !g.is_finite()) {
-        return (f, 0, Status::NumericalFailure);
-    }
-
-    for iter in 1..=max_iter {
-        let pg_norm = projected_gradient_norm(x, &grad, lower, upper);
-        if pg_norm <= pgtol {
-            return (f, iter - 1, Status::Converged);
+fn direct_box_termination_text(report: &ariadne_lbfgsb::Report) -> String {
+    let reason = match report.termination {
+        Termination::Converged(Convergence::ProjectedGradient) => {
+            "converged: projected gradient tolerance reached"
         }
-
-        let mut direction = vec![0.0; x.len()];
-        for i in 0..x.len() {
-            if x[i] <= lower[i] + DIRECT_BOX_SCALE_EPS && grad[i] > 0.0 {
-                continue;
-            }
-            if x[i] >= upper[i] - DIRECT_BOX_SCALE_EPS && grad[i] < 0.0 {
-                continue;
-            }
-            direction[i] = -grad[i];
+        Termination::Converged(Convergence::RelativeFunction) => {
+            "converged: relative objective reduction tolerance reached"
         }
-
-        let max_dir = direction.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
-        if max_dir <= DIRECT_BOX_SCALE_EPS {
-            return (f, iter - 1, Status::Converged);
+        Termination::Stopped(StopReason::MaximumIterations) => {
+            "stopped: maximum iterations reached"
         }
-        if max_dir > 1.0 {
-            for d in &mut direction {
-                *d /= max_dir;
-            }
+        Termination::Stopped(StopReason::MaximumEvaluations) => {
+            "stopped: maximum objective evaluations reached"
         }
-
-        let directional_derivative = grad
-            .iter()
-            .zip(direction.iter())
-            .map(|(g, d)| g * d)
-            .sum::<f64>();
-        if directional_derivative >= 0.0 {
-            return (f, iter - 1, Status::NumericalFailure);
+        Termination::Stopped(StopReason::MaximumLineSearchEvaluations) => {
+            "stopped: maximum line-search evaluations reached"
         }
+        Termination::Stopped(StopReason::User) => "stopped: requested by callback",
+        Termination::Failed(Failure::LineSearch) => "failed: line search could not find a step",
+        Termination::Failed(Failure::Numerical) => "failed: numerical error",
+        _ => "stopped: unrecognized solver termination",
+    };
+    format!(
+        "{reason}; iterations={}; evaluations={}; projected_gradient={:.3e}",
+        report.stats.iterations, report.stats.evaluations, report.projected_gradient_norm
+    )
+}
 
-        let mut accepted = false;
-        let mut best_trial: Option<(Vec<f64>, f64, Vec<f64>)> = None;
-        let mut step = 1.0;
-        for _ in 0..DIRECT_BOX_MAX_BACKTRACK {
-            let mut trial = x
-                .iter()
-                .zip(direction.iter())
-                .map(|(xi, di)| xi + step * di)
-                .collect::<Vec<_>>();
-            project_to_bounds(&mut trial, lower, upper);
-            if trial
-                .iter()
-                .zip(x.iter())
-                .all(|(a, b)| (a - b).abs() <= DIRECT_BOX_SCALE_EPS)
-            {
-                step *= 0.5;
-                continue;
-            }
-
-            let (trial_f, trial_grad) = f_and_grad(&trial);
-            if trial_f.is_finite() && trial_grad.iter().all(|g| g.is_finite()) {
-                let improves = trial_f < f;
-                if improves
-                    && best_trial
-                        .as_ref()
-                        .map_or(true, |(_, best_f, _)| trial_f < *best_f)
-                {
-                    best_trial = Some((trial.clone(), trial_f, trial_grad.clone()));
-                }
-                if trial_f <= f + 1e-4 * step * directional_derivative {
-                    *x = trial;
-                    f = trial_f;
-                    grad = trial_grad;
-                    accepted = true;
-                    break;
-                }
-            }
-            step *= 0.5;
-        }
-
-        if !accepted {
-            if let Some((trial, trial_f, trial_grad)) = best_trial {
-                *x = trial;
-                f = trial_f;
-                grad = trial_grad;
-                continue;
-            }
-            return (f, iter, Status::LineSearchFailure);
-        }
-    }
-
-    (f, max_iter, Status::MaxIter)
+fn direct_box_solver_options(problem: &Problem) -> Result<Options, TheseusError> {
+    Options::new()
+        .with_history_size(10)
+        .and_then(|options| options.with_max_iterations(problem.solver.max_iterations.max(1)))
+        .and_then(|options| {
+            options.with_projected_gradient_tolerance(problem.solver.absolute_tolerance.max(0.0))
+        })
+        .and_then(|options| {
+            options.with_relative_function_tolerance(problem.solver.relative_tolerance.max(0.0))
+        })
+        .map_err(|error| TheseusError::Solver(error.to_string()))
 }
 
 fn optimize_direct_box_bounds(
@@ -788,7 +971,6 @@ fn optimize_direct_box_bounds(
     report_freq: usize,
     cancel_flag: &AtomicBool,
 ) -> Result<SolverResult, TheseusError> {
-    cancel_flag.store(false, Ordering::Relaxed);
     crate::objectives::validate_objectives(&problem.objectives)?;
 
     let ne = problem.topology.num_edges;
@@ -804,238 +986,21 @@ fn optimize_direct_box_bounds(
 
     let mut x = pack_direct_box_scaled(problem, state, &anchor_scales);
     let (lower, upper) = direct_box_optimizer_bounds(problem, n_lat);
-    let eval_lb = vec![f64::NEG_INFINITY; ne + n_lat];
-    let eval_ub = vec![f64::INFINITY; ne + n_lat];
-    let lb_idx = Vec::new();
-    let ub_idx = Vec::new();
-    let cache = Rc::new(RefCell::new(FdmCache::new(problem)?));
-    let loss_trace = Rc::new(RefCell::new(Vec::new()));
-    let pending_error: Rc<RefCell<Option<TheseusError>>> = Rc::new(RefCell::new(None));
-    let best_seen: Rc<RefCell<Option<(Vec<f64>, f64)>>> = Rc::new(RefCell::new(None));
-
-    let anchor_scales_eval = anchor_scales.clone();
-    let cache_eval = cache.clone();
-    let loss_trace_eval = loss_trace.clone();
-    let pending_error_eval = pending_error.clone();
-    let best_seen_eval = best_seen.clone();
-    let mut f_and_grad = |x_scaled: &[f64]| -> (f64, Vec<f64>) {
-        if cancel_flag.load(Ordering::Relaxed) {
-            *pending_error_eval.borrow_mut() = Some(TheseusError::Cancelled);
-            return (DIRECT_BOX_ERROR_COST, vec![0.0; x_scaled.len()]);
-        }
-        if x_scaled.iter().any(|v| !v.is_finite()) {
-            *pending_error_eval.borrow_mut() = Some(TheseusError::Solver(
-                "L-BFGS-B produced NaN or Inf parameters".into(),
-            ));
-            return (DIRECT_BOX_ERROR_COST, vec![0.0; x_scaled.len()]);
-        }
-
-        let theta = direct_box_scaled_to_physical(problem, x_scaled, &anchor_scales_eval);
-        let mut grad_physical = vec![0.0; theta.len()];
-        let val = {
-            let mut fdm_cache = cache_eval.borrow_mut();
-            value_and_gradient(
-                &mut fdm_cache,
-                problem,
-                &theta,
-                &mut grad_physical,
-                &eval_lb,
-                &eval_ub,
-                &lb_idx,
-                &ub_idx,
-            )
-        };
-
-        match val {
-            Ok(loss) if loss.is_finite() && grad_physical.iter().all(|g| g.is_finite()) => {
-                loss_trace_eval.borrow_mut().push(loss);
-                {
-                    let mut seen = best_seen_eval.borrow_mut();
-                    if seen
-                        .as_ref()
-                        .map_or(true, |(_, best_loss)| loss < *best_loss)
-                    {
-                        *seen = Some((x_scaled.to_vec(), loss));
-                    }
-                }
-                (
-                    loss,
-                    direct_box_scaled_gradient(&grad_physical, ne, &anchor_scales_eval),
-                )
-            }
-            Ok(_) => {
-                if pending_error_eval.borrow().is_none() {
-                    *pending_error_eval.borrow_mut() = Some(TheseusError::Solver(
-                        "DirectBoxBounds value_and_gradient produced NaN or Inf".into(),
-                    ));
-                }
-                (DIRECT_BOX_ERROR_COST, vec![0.0; x_scaled.len()])
-            }
-            Err(err) => {
-                if pending_error_eval.borrow().is_none() {
-                    *pending_error_eval.borrow_mut() = Some(TheseusError::Solver(format!(
-                        "DirectBoxBounds value_and_gradient failed: {err}"
-                    )));
-                }
-                (DIRECT_BOX_ERROR_COST, vec![0.0; x_scaled.len()])
-            }
-        }
-    };
-
-    let report_frequency = report_freq.max(1);
-    let anchor_scales_cb = anchor_scales.clone();
-    let cache_cb = cache.clone();
-    let pending_error_cb = pending_error.clone();
-    let mut callback = |info: &lbfgsb_rs_pure::IterationInfo, x_scaled: &[f64]| {
-        if cancel_flag.load(Ordering::Relaxed) {
-            *pending_error_cb.borrow_mut() = Some(TheseusError::Cancelled);
-            return IterationControl::StopCustom;
-        }
-
-        let major_iteration = info.iteration;
-        if progress_cb.is_none()
-            || !should_report_major_iteration(major_iteration, report_frequency)
-        {
-            return IterationControl::Continue;
-        }
-
-        let theta = direct_box_scaled_to_physical(problem, x_scaled, &anchor_scales_cb);
-        let q = theta[..ne].to_vec();
-        let anchors = match variable_supports::map_latents_to_positions(problem, &theta[ne..]) {
-            Ok(anchors) => anchors,
-            Err(err) => {
-                *pending_error_cb.borrow_mut() = Some(err);
-                return IterationControl::StopCustom;
-            }
-        };
-        let xyz_flat = {
-            let mut fdm_cache = cache_cb.borrow_mut();
-            if let Err(err) =
-                crate::fdm::solve_fdm_with_loads(&mut fdm_cache, &q, problem, &anchors, 1e-12)
-            {
-                *pending_error_cb.borrow_mut() = Some(err);
-                return IterationControl::StopCustom;
-            }
-            flatten_xyz(&fdm_cache, problem.topology.num_nodes)
-        };
-
-        let should_continue = unsafe {
-            progress_cb.unwrap()(
-                major_iteration,
-                info.f,
-                xyz_flat.as_ptr(),
-                problem.topology.num_nodes,
-                q.as_ptr(),
-                ne,
-            )
-        };
-        if should_continue == 0 {
-            *pending_error_cb.borrow_mut() = Some(TheseusError::Cancelled);
-            IterationControl::StopCustom
-        } else {
-            IterationControl::Continue
-        }
-    };
-
-    let (lbfgsb_max_iterations, fallback_min_iterations) =
-        direct_box_iteration_budgets(problem.solver.max_iterations);
-    let pgtol = direct_box_projected_gradient_tolerance(problem);
-    let mut solver = LBFGSB::new(10)
-        .with_max_iter(lbfgsb_max_iterations)
-        .with_pgtol(pgtol);
-    let solution = solver
-        .minimize_with_callback(&mut x, &lower, &upper, &mut f_and_grad, &mut callback)
-        .map_err(|e| TheseusError::Solver(e.to_string()))?;
-
-    if let Some(err) = pending_error.borrow_mut().take() {
-        return Err(err);
-    }
-
-    let mut best_x = best_seen
-        .borrow()
-        .as_ref()
-        .map(|(x, _)| x.clone())
-        .unwrap_or_else(|| {
-            if solution.x.len() == ne + n_lat {
-                solution.x.clone()
-            } else {
-                x.clone()
-            }
-        });
-    let mut iterations = solution.iterations;
-    let mut status = solution.status;
-    let mut fallback_result = None;
-    if matches!(
-        status,
-        Status::LineSearchFailure | Status::NumericalFailure | Status::MaxIter
-    ) {
-        let remaining_iterations = problem
-            .solver
-            .max_iterations
-            .saturating_sub(iterations)
-            .max(fallback_min_iterations);
-        let (_fallback_loss, fallback_iterations, fallback_status) = projected_gradient_fallback(
-            &mut best_x,
-            &lower,
-            &upper,
-            remaining_iterations,
-            pgtol,
-            &mut f_and_grad,
-        );
-        iterations += fallback_iterations;
-        fallback_result = Some((fallback_status, fallback_iterations));
-        if matches!(fallback_status, Status::Converged | Status::MaxIter) || fallback_iterations > 0
-        {
-            status = fallback_status;
-        }
-    }
-
-    if let Some(err) = pending_error.borrow_mut().take() {
-        return Err(err);
-    }
-
-    let (_final_loss, final_grad_scaled) = f_and_grad(&best_x);
-    if let Some(err) = pending_error.borrow_mut().take() {
-        return Err(err);
-    }
-    let final_pg_norm = projected_gradient_norm(&best_x, &final_grad_scaled, &lower, &upper);
-
-    let theta = direct_box_scaled_to_physical(problem, &best_x, &anchor_scales);
-    let q = theta[..ne].to_vec();
-    let latents = theta[ne..].to_vec();
-    let anchors = variable_supports::map_latents_to_positions(problem, &latents)?;
-    let mut final_cache = FdmCache::new(problem)?;
-    crate::fdm::solve_fdm_with_loads(&mut final_cache, &q, problem, &anchors, 1e-12)?;
-
-    let converged = status == Status::Converged;
-    let termination_reason = direct_box_termination_reason(
-        solution.status,
-        status,
-        fallback_result,
-        final_pg_norm,
-        pgtol,
-    );
-    let trace = loss_trace.borrow().clone();
-
-    state.force_densities = q.clone();
-    state.variable_anchor_positions = anchors.clone();
-    state.variable_anchor_latents = latents.clone();
-    state.iterations = iterations;
-    state.loss_trace = trace.clone();
-
-    Ok(SolverResult {
-        q,
-        anchor_positions: anchors,
-        xyz: final_cache.nf.clone(),
-        member_lengths: final_cache.member_lengths.clone(),
-        member_forces: final_cache.member_forces.clone(),
-        reactions: final_cache.reactions.clone(),
-        loss_trace: trace,
-        iterations: state.iterations,
-        converged,
-        termination_reason,
-        cross_section_areas: final_cache.cross_section_areas.clone(),
-    })
+    let options = direct_box_solver_options(problem)?;
+    let bounds = SolverBounds::new(&lower, &upper, ne + n_lat)
+        .map_err(|error| TheseusError::Solver(error.to_string()))?;
+    let mut adapter = FdmSolverAdapter::new(
+        problem,
+        cancel_flag,
+        progress_cb,
+        report_freq,
+        anchor_scales,
+    )?;
+    let mut solver = Solver::new(options);
+    let report = solver
+        .minimize_with_adapter(&mut x, bounds, &mut adapter)
+        .map_err(map_direct_box_solve_error)?;
+    adapter.finish(&x, report, state)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1057,7 +1022,6 @@ pub fn optimize(
         return optimize_direct_box_bounds(problem, state, progress_cb, report_freq, cancel_flag);
     }
 
-    cancel_flag.store(false, Ordering::Relaxed);
     crate::objectives::validate_objectives(&problem.objectives)?;
 
     let cache = FdmCache::new(problem)?;
@@ -1103,7 +1067,9 @@ pub fn optimize(
         executor = executor.add_observer(
             MajorIterationProgressObserver {
                 problem: problem as *const Problem,
-                cache: cache.clone(),
+                cancel_flag,
+                evaluation_cache: cache.clone(),
+                observer_cache: RefCell::new(FdmCache::new(problem)?),
                 last_eval,
                 callback,
                 report_frequency,

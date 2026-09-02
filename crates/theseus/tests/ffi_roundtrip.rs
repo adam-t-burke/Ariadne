@@ -5,10 +5,36 @@
 //! but go through the raw pointer / handle-based FFI boundary.
 
 use std::ptr;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 
 // Re-export the FFI functions from the crate (cdylib symbols).
 // Because the crate also builds as `rlib`, we can link them directly.
 use theseus::ffi::*;
+
+static CALLBACK_HANDLE: AtomicUsize = AtomicUsize::new(0);
+static CALLBACK_ENTERED: AtomicBool = AtomicBool::new(false);
+static CALLBACK_RELEASE: AtomicBool = AtomicBool::new(false);
+static REENTRANT_RESULT: AtomicI32 = AtomicI32::new(i32::MIN);
+
+unsafe extern "C" fn blocking_reentrant_callback(
+    _iteration: usize,
+    _loss: f64,
+    _xyz: *const f64,
+    _num_nodes: usize,
+    _q: *const f64,
+    _num_edges: usize,
+) -> u8 {
+    let handle = CALLBACK_HANDLE.load(Ordering::Acquire) as *mut TheseusHandle;
+    let result = theseus_set_solver_options(handle, 20, 1e-6, 1e-6, 1000.0, 10.0, 1.0);
+    REENTRANT_RESULT.store(result, Ordering::Release);
+    CALLBACK_ENTERED.store(true, Ordering::Release);
+    while !CALLBACK_RELEASE.load(Ordering::Acquire) {
+        thread::yield_now();
+    }
+    1
+}
 
 // ─────────────────────────────────────────────────────────────
 //  Shared arch-network data (same 7-node / 8-edge arch)
@@ -218,6 +244,7 @@ fn ffi_optimize_target_xyz() {
             target_indices.as_ptr(),
             target_indices.len(),
             target_xyz.as_ptr(),
+            0,
         );
         assert_eq!(rc, 0, "add_target_xyz failed: {}", get_last_error());
 
@@ -285,7 +312,7 @@ fn ffi_optimize_combined() {
         ];
         assert_eq!(
             0,
-            theseus_add_target_xyz(h, 1.0, indices.as_ptr(), indices.len(), target.as_ptr())
+            theseus_add_target_xyz(h, 1.0, indices.as_ptr(), indices.len(), target.as_ptr(), 0)
         );
 
         // LengthVariation
@@ -364,7 +391,8 @@ fn ffi_register_all_objectives() {
                 1.0,
                 node_idx.as_ptr(),
                 node_idx.len(),
-                target_3x3.as_ptr()
+                target_3x3.as_ptr(),
+                0,
             )
         );
         assert_eq!(
@@ -374,7 +402,8 @@ fn ffi_register_all_objectives() {
                 1.0,
                 node_idx.as_ptr(),
                 node_idx.len(),
-                target_3x3.as_ptr()
+                target_3x3.as_ptr(),
+                0,
             )
         );
         assert_eq!(
@@ -574,4 +603,187 @@ fn ffi_error_reporting() {
     let n = unsafe { theseus_last_error(buf.as_mut_ptr(), buf.len()) };
     // n == 0 means no error recorded (or the error was cleared)
     assert!(n >= 0, "unexpected negative from theseus_last_error");
+}
+
+#[test]
+fn concurrent_cancel_is_race_free_reentrant_and_run_scoped() {
+    let d = arch_data();
+    CALLBACK_ENTERED.store(false, Ordering::Release);
+    CALLBACK_RELEASE.store(false, Ordering::Release);
+    REENTRANT_RESULT.store(i32::MIN, Ordering::Release);
+
+    unsafe {
+        let handle = create_handle(&d);
+        CALLBACK_HANDLE.store(handle as usize, Ordering::Release);
+        let target_indices = [1usize, 2, 3, 4, 5];
+        let target_xyz = [
+            1.0, 0.0, 1.0, 2.0, 0.0, 2.0, 3.0, 0.0, 2.5, 4.0, 0.0, 2.0, 5.0, 0.0, 1.0,
+        ];
+        assert_eq!(
+            theseus_add_target_xyz(
+                handle,
+                1.0,
+                target_indices.as_ptr(),
+                target_indices.len(),
+                target_xyz.as_ptr(),
+                0,
+            ),
+            0
+        );
+        assert_eq!(
+            theseus_cancel(handle),
+            0,
+            "idle cancellation should be a no-op"
+        );
+        assert_eq!(
+            theseus_set_progress_callback(handle, Some(blocking_reentrant_callback), 1),
+            0
+        );
+
+        let raw_handle = handle as usize;
+        let num_nodes = d.num_nodes;
+        let num_edges = d.num_edges;
+        let worker = thread::spawn(move || {
+            let handle = raw_handle as *mut TheseusHandle;
+            let mut xyz = vec![0.0; num_nodes * 3];
+            let mut lengths = vec![0.0; num_edges];
+            let mut forces = vec![0.0; num_edges];
+            let mut q = vec![0.0; num_edges];
+            let mut reactions = vec![0.0; num_nodes * 3];
+            let mut iterations = 0;
+            let mut converged = false;
+            let result = theseus_optimize(
+                handle,
+                xyz.as_mut_ptr(),
+                lengths.as_mut_ptr(),
+                forces.as_mut_ptr(),
+                q.as_mut_ptr(),
+                reactions.as_mut_ptr(),
+                &mut iterations,
+                &mut converged,
+            );
+            (result, get_last_error())
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !CALLBACK_ENTERED.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "optimization callback did not run"
+            );
+            thread::yield_now();
+        }
+        assert_eq!(
+            REENTRANT_RESULT.load(Ordering::Acquire),
+            -1,
+            "callback reentry should return busy instead of deadlocking"
+        );
+        assert_eq!(theseus_cancel(handle), 0);
+        CALLBACK_RELEASE.store(true, Ordering::Release);
+        let (result, error) = worker.join().unwrap();
+        assert_eq!(result, -1);
+        assert!(
+            error.contains("cancel"),
+            "unexpected cancellation error: {error}"
+        );
+
+        assert_eq!(theseus_set_progress_callback(handle, None, 1), 0);
+        let mut xyz = vec![0.0; d.num_nodes * 3];
+        let mut lengths = vec![0.0; d.num_edges];
+        let mut forces = vec![0.0; d.num_edges];
+        let mut q = vec![0.0; d.num_edges];
+        let mut reactions = vec![0.0; d.num_nodes * 3];
+        let mut iterations = 0;
+        let mut converged = false;
+        assert_eq!(
+            theseus_optimize(
+                handle,
+                xyz.as_mut_ptr(),
+                lengths.as_mut_ptr(),
+                forces.as_mut_ptr(),
+                q.as_mut_ptr(),
+                reactions.as_mut_ptr(),
+                &mut iterations,
+                &mut converged,
+            ),
+            0,
+            "a previous run's cancellation poisoned the next run: {}",
+            get_last_error()
+        );
+        theseus_free(handle);
+    }
+}
+
+#[test]
+fn concurrent_forward_cancel_is_cooperative_and_handle_scoped() {
+    let d = arch_data();
+    unsafe {
+        let handle = create_handle(&d);
+        let densities = vec![1.0; d.num_edges];
+        let gravity = [0.0, 0.0, -1.0];
+        assert_eq!(
+            theseus_set_self_weight_prescribed(
+                handle,
+                densities.as_ptr(),
+                gravity.as_ptr(),
+                100_000,
+                0.0,
+                0.5,
+            ),
+            0
+        );
+
+        let raw_handle = handle as usize;
+        let num_nodes = d.num_nodes;
+        let num_edges = d.num_edges;
+        let worker = thread::spawn(move || {
+            let handle = raw_handle as *mut TheseusHandle;
+            let mut xyz = vec![0.0; num_nodes * 3];
+            let mut lengths = vec![0.0; num_edges];
+            let mut forces = vec![0.0; num_edges];
+            let mut q = vec![0.0; num_edges];
+            let mut reactions = vec![0.0; num_nodes * 3];
+            let result = theseus_solve_forward(
+                handle,
+                xyz.as_mut_ptr(),
+                lengths.as_mut_ptr(),
+                forces.as_mut_ptr(),
+                q.as_mut_ptr(),
+                reactions.as_mut_ptr(),
+            );
+            (result, get_last_error())
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let busy = theseus_set_solver_options(handle, 20, 1e-6, 1e-6, 1000.0, 10.0, 1.0) == -1;
+            if busy {
+                break;
+            }
+            assert!(
+                !worker.is_finished(),
+                "forward solve finished before becoming observable"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "forward solve did not claim its handle"
+            );
+            thread::yield_now();
+        }
+
+        assert_eq!(theseus_cancel(handle), 0);
+        let (result, error) = worker.join().unwrap();
+        assert_eq!(result, -1);
+        assert!(
+            error.contains("cancel"),
+            "unexpected cancellation error: {error}"
+        );
+
+        assert_eq!(
+            theseus_set_solver_options(handle, 20, 1e-6, 1e-6, 1000.0, 10.0, 1.0),
+            0,
+            "cancelled forward solve did not restore handle state"
+        );
+        theseus_free(handle);
+    }
 }

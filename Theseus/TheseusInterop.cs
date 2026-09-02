@@ -72,6 +72,7 @@ internal static class TheseusInterop
         nuint num_variable_supports,
         nuint[] variable_node_indices,
         int[] support_kinds,
+        double[] support_lambdas,
         double[] sphere_radii,
         byte[] roller_enabled,
         double[] roller_lower,
@@ -89,26 +90,37 @@ internal static class TheseusInterop
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
     public static extern int theseus_cancel(IntPtr handle);
 
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_begin_cancel_scope(
+        IntPtr handle,
+        ref ulong out_scope_id);
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_cancel_scope(IntPtr handle, ulong scope_id);
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_complete_cancel_scope(IntPtr handle, ulong scope_id);
+
     // ── Objective registration ───────────────────────────────
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
     public static extern int theseus_add_target_xyz(
         IntPtr handle, double weight,
         nuint[] node_indices, nuint num_nodes,
-        double[] target_xyz);
+        double[] target_xyz, int reduction);
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
     public static extern int theseus_add_target_xy(
         IntPtr handle, double weight,
         nuint[] node_indices, nuint num_nodes,
-        double[] target_xy);
+        double[] target_xy, int reduction);
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
     public static extern int theseus_add_target_plane(
         IntPtr handle, double weight,
         nuint[] node_indices, nuint num_nodes,
         double[] target_xyz,
-        double[] origin, double[] x_axis, double[] y_axis);
+        double[] origin, double[] x_axis, double[] y_axis, int reduction);
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
     public static extern int theseus_add_planar_constraint_along_direction(
@@ -289,6 +301,14 @@ internal static class TheseusInterop
         ref nuint out_iterations, ref byte out_converged);
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_optimize_scoped(
+        IntPtr handle,
+        ulong scope_id,
+        double[] out_xyz, double[] out_lengths, double[] out_forces,
+        double[] out_q, double[] out_reactions,
+        ref nuint out_iterations, ref byte out_converged);
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
     public static extern int theseus_get_termination_reason(
         IntPtr handle,
         byte[] buffer,
@@ -308,6 +328,13 @@ internal static class TheseusInterop
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
     public static extern int theseus_solve_forward(
         IntPtr handle,
+        double[] out_xyz, double[] out_lengths, double[] out_forces,
+        double[] out_q, double[] out_reactions);
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_solve_forward_scoped(
+        IntPtr handle,
+        ulong scope_id,
         double[] out_xyz, double[] out_lengths, double[] out_forces,
         double[] out_q, double[] out_reactions);
 

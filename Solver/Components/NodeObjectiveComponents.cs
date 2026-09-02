@@ -10,14 +10,95 @@ using Ariadne.Graphs;
 namespace Ariadne.Solver.Components;
 
 /// <summary>
+/// Shared right-click residual mode (SSE / MSE / RMSE) for target-geometry
+/// components. The selected mode is shown in the component message box.
+/// </summary>
+public abstract class TargetGeometryComponent : GH_Component
+{
+    private const string ReductionKey = "TargetGeometryReduction";
+    private TargetGeometryReduction _reduction = TargetGeometryReduction.Sse;
+
+    protected TargetGeometryComponent(string name, string nickname, string description)
+        : base(name, nickname, description, "Ariadne", "Objectives")
+    {
+        UpdateMessage();
+    }
+
+    protected TargetGeometryReduction Reduction => _reduction;
+
+    protected override void AppendAdditionalComponentMenuItems(ToolStripDropDown menu)
+    {
+        base.AppendAdditionalComponentMenuItems(menu);
+        Menu_AppendSeparator(menu);
+        Menu_AppendItem(
+            menu,
+            "Sum of Squared Error (SSE)",
+            (_, _) => SetReduction(TargetGeometryReduction.Sse),
+            true,
+            _reduction == TargetGeometryReduction.Sse);
+        Menu_AppendItem(
+            menu,
+            "Mean Squared Error (MSE)",
+            (_, _) => SetReduction(TargetGeometryReduction.Mse),
+            true,
+            _reduction == TargetGeometryReduction.Mse);
+        Menu_AppendItem(
+            menu,
+            "Root Mean Squared Error (RMSE)",
+            (_, _) => SetReduction(TargetGeometryReduction.Rmse),
+            true,
+            _reduction == TargetGeometryReduction.Rmse);
+    }
+
+    private void SetReduction(TargetGeometryReduction reduction)
+    {
+        if (_reduction == reduction)
+            return;
+
+        RecordUndoEvent("Set Target Geometry Reduction");
+        _reduction = reduction;
+        UpdateMessage();
+        ExpireSolution(true);
+    }
+
+    private void UpdateMessage()
+    {
+        Message = _reduction switch
+        {
+            TargetGeometryReduction.Sse => "SSE",
+            TargetGeometryReduction.Mse => "MSE",
+            TargetGeometryReduction.Rmse => "RMSE",
+            _ => "SSE",
+        };
+    }
+
+    public override bool Write(GH_IWriter writer)
+    {
+        writer.SetInt32(ReductionKey, (int)_reduction);
+        return base.Write(writer);
+    }
+
+    public override bool Read(GH_IReader reader)
+    {
+        if (reader.ItemExists(ReductionKey))
+        {
+            int value = reader.GetInt32(ReductionKey);
+            if (Enum.IsDefined(typeof(TargetGeometryReduction), value))
+                _reduction = (TargetGeometryReduction)value;
+        }
+        UpdateMessage();
+        return base.Read(reader);
+    }
+}
+
+/// <summary>
 /// Minimize XY deviation from starting nodal positions (TNA-like behavior).
 /// </summary>
-public class TargetXYComponent : GH_Component
+public class TargetXYComponent : TargetGeometryComponent
 {
     public TargetXYComponent()
         : base("Target Geometry XY", "TargetXY",
-            "Minimize deviation from starting nodal positions in the XY plane (TNA-like).",
-            "Ariadne", "Objectives")
+            "Minimize deviation from starting nodal positions in the XY plane (TNA-like).")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)
@@ -40,7 +121,7 @@ public class TargetXYComponent : GH_Component
         DA.GetDataList(0, nodes);
         DA.GetData(1, ref weight);
 
-        var objective = new TargetXYObjective(weight, nodes.Count > 0 ? nodes : null);
+        var objective = new TargetXYObjective(weight, nodes.Count > 0 ? nodes : null, Reduction);
         DA.SetData(0, objective);
     }
 
@@ -51,12 +132,11 @@ public class TargetXYComponent : GH_Component
 /// <summary>
 /// Minimize 3D deviation from starting nodal positions.
 /// </summary>
-public class TargetXYZComponent : GH_Component
+public class TargetXYZComponent : TargetGeometryComponent
 {
     public TargetXYZComponent()
         : base("Target Geometry XYZ", "TargetXYZ",
-            "Minimize deviation from starting nodal positions in 3D.",
-            "Ariadne", "Objectives")
+            "Minimize deviation from starting nodal positions in 3D.")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)
@@ -79,7 +159,7 @@ public class TargetXYZComponent : GH_Component
         DA.GetDataList(0, nodes);
         DA.GetData(1, ref weight);
 
-        var objective = new TargetXYZObjective(weight, nodes.Count > 0 ? nodes : null);
+        var objective = new TargetXYZObjective(weight, nodes.Count > 0 ? nodes : null, Reduction);
         DA.SetData(0, objective);
     }
 
@@ -91,12 +171,11 @@ public class TargetXYZComponent : GH_Component
 /// Minimize deviation from starting nodal positions projected onto an arbitrary plane.
 /// Defaults to the world XY plane when no plane is connected.
 /// </summary>
-public class TargetPlaneComponent : GH_Component
+public class TargetPlaneComponent : TargetGeometryComponent
 {
     public TargetPlaneComponent()
         : base("Target Plane", "TargetPlane",
-            "Minimize deviation from starting positions projected onto a plane (default: World XY).",
-            "Ariadne", "Objectives")
+            "Minimize deviation from starting positions projected onto a plane (default: World XY).")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)
@@ -124,7 +203,7 @@ public class TargetPlaneComponent : GH_Component
         DA.GetData(2, ref weight);
 
         Plane? planeOpt = hasPlane ? plane : null;
-        var objective = new TargetPlaneObjective(weight, nodes.Count > 0 ? nodes : null, planeOpt);
+        var objective = new TargetPlaneObjective(weight, nodes.Count > 0 ? nodes : null, planeOpt, Reduction);
         DA.SetData(0, objective);
     }
 

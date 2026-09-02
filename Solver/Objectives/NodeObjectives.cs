@@ -8,14 +8,28 @@ using Rhino.Geometry;
 using Theseus.Interop;
 
 /// <summary>
+/// How per-node target-geometry residuals are reduced to a scalar.
+/// Residuals are per-node squared Euclidean (or in-plane) distances.
+/// </summary>
+public enum TargetGeometryReduction
+{
+    Sse = 0,
+    Mse = 1,
+    Rmse = 2,
+}
+
+/// <summary>
 /// Minimize XY deviation from initial node positions (TNA-like behavior).
 /// </summary>
 public sealed class TargetXYObjective : NodeObjective
 {
-    public TargetXYObjective(double weight, List<Node>? nodes = null)
+    public TargetGeometryReduction Reduction { get; }
+
+    public TargetXYObjective(double weight, List<Node>? nodes = null, TargetGeometryReduction reduction = TargetGeometryReduction.Sse)
     {
         Weight = weight;
         TargetNodes = nodes;
+        Reduction = reduction;
     }
 
     public override void ApplyTo(TheseusSolver solver, SolverContext context)
@@ -32,7 +46,15 @@ public sealed class TargetXYObjective : NodeObjective
             targetXy[i * 3 + 2] = pos.Z;
         }
 
-        solver.AddTargetXy(Weight, indices, targetXy);
+        solver.AddTargetXy(Weight, indices, targetXy, (int)Reduction);
+    }
+
+    public override int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(base.GetContentHashCode());
+        h.Add(Reduction);
+        return h.ToHashCode();
     }
 }
 
@@ -41,10 +63,13 @@ public sealed class TargetXYObjective : NodeObjective
 /// </summary>
 public sealed class TargetXYZObjective : NodeObjective
 {
-    public TargetXYZObjective(double weight, List<Node>? nodes = null)
+    public TargetGeometryReduction Reduction { get; }
+
+    public TargetXYZObjective(double weight, List<Node>? nodes = null, TargetGeometryReduction reduction = TargetGeometryReduction.Sse)
     {
         Weight = weight;
         TargetNodes = nodes;
+        Reduction = reduction;
     }
 
     public override void ApplyTo(TheseusSolver solver, SolverContext context)
@@ -60,7 +85,15 @@ public sealed class TargetXYZObjective : NodeObjective
             targetXyz[i * 3 + 2] = pos.Z;
         }
 
-        solver.AddTargetXyz(Weight, indices, targetXyz);
+        solver.AddTargetXyz(Weight, indices, targetXyz, (int)Reduction);
+    }
+
+    public override int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(base.GetContentHashCode());
+        h.Add(Reduction);
+        return h.ToHashCode();
     }
 }
 
@@ -72,12 +105,14 @@ public sealed class TargetPlaneObjective : NodeObjective
 {
     /// <summary>Plane to project target positions onto; null uses world XY.</summary>
     public Plane? Plane { get; }
+    public TargetGeometryReduction Reduction { get; }
 
-    public TargetPlaneObjective(double weight, List<Node>? nodes = null, Plane? plane = null)
+    public TargetPlaneObjective(double weight, List<Node>? nodes = null, Plane? plane = null, TargetGeometryReduction reduction = TargetGeometryReduction.Sse)
     {
         Weight = weight;
         TargetNodes = nodes;
         Plane = plane;
+        Reduction = reduction;
     }
 
     public override void ApplyTo(TheseusSolver solver, SolverContext context)
@@ -98,13 +133,14 @@ public sealed class TargetPlaneObjective : NodeObjective
         double[] xAxis = { plane.XAxis.X, plane.XAxis.Y, plane.XAxis.Z };
         double[] yAxis = { plane.YAxis.X, plane.YAxis.Y, plane.YAxis.Z };
 
-        solver.AddTargetPlane(Weight, indices, targetXyz, origin, xAxis, yAxis);
+        solver.AddTargetPlane(Weight, indices, targetXyz, origin, xAxis, yAxis, (int)Reduction);
     }
 
     public override int GetContentHashCode()
     {
         var h = new HashCode();
         h.Add(base.GetContentHashCode());
+        h.Add(Reduction);
         if (Plane is { } p)
         {
             h.Add(p.Origin.X); h.Add(p.Origin.Y); h.Add(p.Origin.Z);

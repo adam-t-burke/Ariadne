@@ -1,6 +1,9 @@
 using System;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
+using Ariadne.Solver;
 
 namespace Theseus.Interop;
 
@@ -77,6 +80,7 @@ public sealed class TheseusSolver : IDisposable
         double[] qInit, double[] lowerBounds, double[] upperBounds,
         int[]? variableNodeIndices = null,
         int[]? variableSupportKinds = null,
+        double[]? variableSupportLambdas = null,
         double[]? sphereRadii = null,
         byte[]? rollerEnabled = null,
         double[]? rollerLower = null,
@@ -93,6 +97,7 @@ public sealed class TheseusSolver : IDisposable
         {
             int n = variableNodeIndices.Length;
             variableSupportKinds ??= new int[n];
+            variableSupportLambdas ??= Enumerable.Repeat(1.0, n).ToArray();
             sphereRadii ??= new double[n];
             rollerEnabled ??= new byte[n * 3];
             rollerLower ??= new double[n * 3];
@@ -111,6 +116,7 @@ public sealed class TheseusSolver : IDisposable
                 (nuint)n,
                 ToNuint(variableNodeIndices),
                 variableSupportKinds,
+                variableSupportLambdas,
                 sphereRadii,
                 rollerEnabled,
                 rollerLower,
@@ -140,21 +146,21 @@ public sealed class TheseusSolver : IDisposable
 
     // ── Objectives ───────────────────────────────────────────
 
-    public void AddTargetXyz(double weight, int[] nodeIndices, double[] targetXyz)
+    public void AddTargetXyz(double weight, int[] nodeIndices, double[] targetXyz, int reduction = 0)
     {
         ThrowIfDisposed();
         Check(TheseusInterop.theseus_add_target_xyz(
-            _handle, weight, ToNuint(nodeIndices), (nuint)nodeIndices.Length, targetXyz));
+            _handle, weight, ToNuint(nodeIndices), (nuint)nodeIndices.Length, targetXyz, reduction));
     }
 
-    public void AddTargetXy(double weight, int[] nodeIndices, double[] targetXy)
+    public void AddTargetXy(double weight, int[] nodeIndices, double[] targetXy, int reduction = 0)
     {
         ThrowIfDisposed();
         Check(TheseusInterop.theseus_add_target_xy(
-            _handle, weight, ToNuint(nodeIndices), (nuint)nodeIndices.Length, targetXy));
+            _handle, weight, ToNuint(nodeIndices), (nuint)nodeIndices.Length, targetXy, reduction));
     }
 
-    public void AddTargetPlane(double weight, int[] nodeIndices, double[] targetXyz, double[] origin, double[] xAxis, double[] yAxis)
+    public void AddTargetPlane(double weight, int[] nodeIndices, double[] targetXyz, double[] origin, double[] xAxis, double[] yAxis, int reduction = 0)
     {
         ThrowIfDisposed();
         if (targetXyz.Length != nodeIndices.Length * 3)
@@ -167,7 +173,7 @@ public sealed class TheseusSolver : IDisposable
             throw new ArgumentException("yAxis must have length 3.", nameof(yAxis));
         Check(TheseusInterop.theseus_add_target_plane(
             _handle, weight, ToNuint(nodeIndices), (nuint)nodeIndices.Length,
-            targetXyz, origin, xAxis, yAxis));
+            targetXyz, origin, xAxis, yAxis, reduction));
     }
 
     public void AddPlanarConstraintAlongDirection(double weight, int[] nodeIndices, double[] origin, double[] xAxis, double[] yAxis, double[] direction)
@@ -531,11 +537,61 @@ public sealed class TheseusSolver : IDisposable
         TheseusInterop.TryCancel(_handle);
     }
 
+    private ulong BeginCancelScope()
+    {
+        ThrowIfDisposed();
+        ulong scopeId = 0;
+        Check(TheseusInterop.theseus_begin_cancel_scope(_handle, ref scopeId));
+        return scopeId;
+    }
+
+    private void RequestScopedCancel(ulong scopeId)
+    {
+        if (!_disposed && _handle != IntPtr.Zero)
+            TheseusInterop.theseus_cancel_scope(_handle, scopeId);
+    }
+
+    private void CompleteCancelScope(ulong scopeId)
+    {
+        if (!_disposed && _handle != IntPtr.Zero)
+            TheseusInterop.theseus_complete_cancel_scope(_handle, scopeId);
+    }
+
     // ── Solve ────────────────────────────────────────────────
 
     public SolverResult Optimize()
     {
+        return Optimize(CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Runs optimization with a cancellation scope reserved before the native
+    /// run token is published.
+    /// </summary>
+    public SolverResult Optimize(CancellationToken cancellationToken)
+    {
+        return OptimizeCore(cancellationToken, null);
+    }
+
+    internal SolverResult OptimizeWithScopeReadyHook(
+        CancellationToken cancellationToken,
+        Action scopeReady)
+    {
+        return OptimizeCore(cancellationToken, scopeReady);
+    }
+
+    private SolverResult OptimizeCore(
+        CancellationToken cancellationToken,
+        Action? scopeReady)
+    {
         ThrowIfDisposed();
+        ulong scopeId = BeginCancelScope();
+        using var cancellationScope = PerSolveCancellation.Begin(
+            cancellationToken,
+            () => RequestScopedCancel(scopeId),
+            () => CompleteCancelScope(scopeId));
+        cancellationToken.ThrowIfCancellationRequested();
+        scopeReady?.Invoke();
         var xyz = new double[_numNodes * 3];
         var lengths = new double[_numEdges];
         var forces = new double[_numEdges];
@@ -544,9 +600,21 @@ public sealed class TheseusSolver : IDisposable
         nuint iterations = 0;
         byte converged = 0;
 
-        Check(TheseusInterop.theseus_optimize(
-            _handle, xyz, lengths, forces, q, reactions,
-            ref iterations, ref converged));
+        try
+        {
+            Check(TheseusInterop.theseus_optimize_scoped(
+                _handle, scopeId, xyz, lengths, forces, q, reactions,
+                ref iterations, ref converged));
+        }
+        catch (TheseusException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
+        finally
+        {
+            cancellationScope.Complete();
+        }
+        cancellationToken.ThrowIfCancellationRequested();
 
         return new SolverResult
         {
@@ -586,14 +654,58 @@ public sealed class TheseusSolver : IDisposable
 
     public SolverResult SolveForward()
     {
+        return SolveForward(CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Runs a forward solve with cancellation bound to this solver handle.
+    /// Native cancellation is cooperative between nonlinear/GMRES iterations
+    /// and after each sparse factorization/solve.
+    /// </summary>
+    public SolverResult SolveForward(CancellationToken cancellationToken)
+    {
+        return SolveForwardCore(cancellationToken, null);
+    }
+
+    internal SolverResult SolveForwardWithScopeReadyHook(
+        CancellationToken cancellationToken,
+        Action scopeReady)
+    {
+        return SolveForwardCore(cancellationToken, scopeReady);
+    }
+
+    private SolverResult SolveForwardCore(
+        CancellationToken cancellationToken,
+        Action? scopeReady)
+    {
         ThrowIfDisposed();
+        ulong scopeId = BeginCancelScope();
+        using var cancellationScope = PerSolveCancellation.Begin(
+            cancellationToken,
+            () => RequestScopedCancel(scopeId),
+            () => CompleteCancelScope(scopeId));
+        cancellationToken.ThrowIfCancellationRequested();
+        scopeReady?.Invoke();
         var xyz = new double[_numNodes * 3];
         var lengths = new double[_numEdges];
         var forces = new double[_numEdges];
         var q = new double[_numEdges];
         var reactions = new double[_numNodes * 3];
 
-        Check(TheseusInterop.theseus_solve_forward(_handle, xyz, lengths, forces, q, reactions));
+        try
+        {
+            Check(TheseusInterop.theseus_solve_forward_scoped(
+                _handle, scopeId, xyz, lengths, forces, q, reactions));
+        }
+        catch (TheseusException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
+        finally
+        {
+            cancellationScope.Complete();
+        }
+        cancellationToken.ThrowIfCancellationRequested();
 
         return new SolverResult
         {

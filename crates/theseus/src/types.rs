@@ -113,11 +113,42 @@ pub trait ObjectiveTrait: Debug + Send + Sync {
 //  Built-in objective structs
 // ─────────────────────────────────────────────────────────────
 
+/// How per-node target-geometry residuals are reduced to a scalar.
+///
+/// Residuals are per-node squared Euclidean (or in-plane) distances; `n` is
+/// the number of target nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TargetGeometryReduction {
+    /// Σ_i ‖e_i‖². Historical default.
+    #[default]
+    Sse = 0,
+    /// (1/n) Σ_i ‖e_i‖²
+    Mse = 1,
+    /// sqrt((1/n) Σ_i ‖e_i‖²)
+    Rmse = 2,
+}
+
+impl TryFrom<i32> for TargetGeometryReduction {
+    type Error = TheseusError;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Sse),
+            1 => Ok(Self::Mse),
+            2 => Ok(Self::Rmse),
+            _ => Err(TheseusError::Shape(format!(
+                "invalid target geometry reduction: {value}"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TargetXYZ {
     pub weight: f64,
     pub node_indices: Vec<usize>,
     pub target: Array2<f64>, // n × 3
+    pub reduction: TargetGeometryReduction,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +156,7 @@ pub struct TargetXY {
     pub weight: f64,
     pub node_indices: Vec<usize>,
     pub target: Array2<f64>,
+    pub reduction: TargetGeometryReduction,
 }
 
 /// Target positions on an arbitrary plane. Origin and axes are in world coordinates;
@@ -137,6 +169,7 @@ pub struct TargetPlane {
     pub origin: [f64; 3],
     pub x_axis: [f64; 3],
     pub y_axis: [f64; 3],
+    pub reduction: TargetGeometryReduction,
 }
 
 /// Planar constraint: pull nodes onto a plane along a given direction. No target positions —
@@ -326,7 +359,13 @@ impl TryFrom<i32> for ReactionMagnitudeSign {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QParameterizationMode {
+    /// Optimize unconstrained direct q values with soft bound penalties.
     DirectSoftBounds,
+    /// Optimize physical q values within strict finite, two-sided edge bounds.
+    ///
+    /// This mode intentionally treats finite increasing q intervals as a
+    /// model contract. Fixed or one-sided/unbounded q values should use
+    /// [`QParameterizationMode::DirectSoftBounds`].
     DirectBoxBounds,
 }
 
@@ -452,6 +491,8 @@ pub struct VariableSupport {
     pub node_index: usize,
     /// Anchor reference position (world XYZ) used for relative constraints.
     pub reference_position: [f64; 3],
+    /// Positive dimensionless scale for this support's optimizer coordinate map.
+    pub saturation_lambda: f64,
     pub kind: VariableSupportKind,
 }
 

@@ -1,0 +1,38 @@
+[package]
+name = "ariadne-lbfgsb"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Standalone callback-first L-BFGS-B solver"
+license = "BSD-3-Clause"
+readme = "README.md"
+repository = "https://github.com/adam-t-burke/Ariadne"
+homepage = "https://github.com/adam-t-burke/Ariadne/tree/main/crates/lbfgsb"
+documentation = "https://docs.rs/ariadne-lbfgsb"
+keywords = ["optimization", "lbfgsb", "numerical", "solver"]
+categories = ["algorithms", "mathematics", "science"]
+include = [
+    "src/**/*.rs",
+    "tests/**/*.rs",
+    "tests/reference/**/*",
+    "benches/**/*.rs",
+    "examples/**/*.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+    "UPSTREAM_LICENSE.txt",
+    "THIRD_PARTY_NOTICES.md",
+    "BENCHMARKS.md",
+]
+
+[features]
+benchmark-instrumentation = []
+faer-backend = ["dep:faer-core"]
+
+[dependencies]
+faer-core = { version = "0.17", optional = true }
+
+[[bench]]
+name = "performance"
+harness = false
+

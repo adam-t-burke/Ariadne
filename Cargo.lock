@@ -40,6 +40,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ariadne-lbfgsb"
+version = "0.1.0"
+dependencies = [
+ "faer-core",
+]
+
+[[package]]
 name = "autocfg"
 version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -482,12 +489,6 @@ checksum = "e0242819d153cba4b4b05a5a8f2a7e9bbf97b6055b2a002b395c96b5ff3c0222"
 dependencies = [
  "cfg-if",
 ]
-
-[[package]]
-name = "lbfgsb-rs-pure"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30928f5ee13b22849e0370b237f672ba7b25c491f50a3d1fc8c468e465dfec84"
 
 [[package]]
 name = "libc"
@@ -955,10 +956,10 @@ version = "0.1.0"
 dependencies = [
  "argmin",
  "argmin-math",
+ "ariadne-lbfgsb",
  "dyn-stack",
  "faer-core",
  "faer-sparse",
- "lbfgsb-rs-pure",
  "ndarray",
  "nurbsbook",
  "rayon",

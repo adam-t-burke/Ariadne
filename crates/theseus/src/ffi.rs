@@ -25,15 +25,26 @@
 //!   - Opaque handles (`*mut TheseusHandle`) are created by Rust and freed
 //!     by Rust via `theseus_free`.
 //!   - No JSON — pure value types over the boundary.
+//!
+//! # Concurrency
+//!
+//! Handle mutation is serialized. During a cancellable solve, mutable problem
+//! state is owned by that call and other stateful entrypoints return a busy
+//! error rather than block. `theseus_cancel` accesses only a shared per-run
+//! atomic token under the lifecycle lock and is safe from another thread or a
+//! progress callback.
+//! `theseus_free` must not run concurrently with any use of the handle.
 
 use crate::optimizer;
 use crate::sparse::SparseColMatOwned;
 use crate::types::*;
 use ndarray::Array2;
 use std::cell::RefCell;
+use std::ops::{Deref, DerefMut};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 // ─────────────────────────────────────────────────────────────
 //  Thread-local error message  (the SQLite pattern)
@@ -68,15 +79,51 @@ where
     }
 }
 
-/// Require a non-null mutable handle pointer.
-unsafe fn require_handle(
-    handle: *mut TheseusHandle,
-) -> Result<&'static mut TheseusHandle, TheseusError> {
+/// Require a non-null handle pointer.
+unsafe fn handle_ref<'a>(handle: *const TheseusHandle) -> Result<&'a TheseusHandle, TheseusError> {
     if handle.is_null() {
         Err(TheseusError::Shape("null TheseusHandle".into()))
     } else {
-        Ok(&mut *handle)
+        Ok(&*handle)
     }
+}
+
+struct HandleStateGuard<'a>(MutexGuard<'a, HandleLifecycle>);
+
+impl Deref for HandleStateGuard<'_> {
+    type Target = TheseusHandleState;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+            .state
+            .as_ref()
+            .expect("handle state checked before guard construction")
+    }
+}
+
+impl DerefMut for HandleStateGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0
+            .state
+            .as_mut()
+            .expect("handle state checked before guard construction")
+    }
+}
+
+unsafe fn require_handle<'a>(
+    handle: *mut TheseusHandle,
+) -> Result<HandleStateGuard<'a>, TheseusError> {
+    let handle = handle_ref(handle)?;
+    let guard = handle
+        .lifecycle
+        .lock()
+        .map_err(|_| TheseusError::Solver("TheseusHandle lifecycle lock poisoned".into()))?;
+    if guard.state.is_none() {
+        return Err(TheseusError::Solver(
+            "TheseusHandle is busy running an operation".into(),
+        ));
+    }
+    Ok(HandleStateGuard(guard))
 }
 
 /// Retrieve the last error message.
@@ -127,14 +174,169 @@ pub type ProgressCallback = unsafe extern "C" fn(
     num_edges: usize,
 ) -> u8;
 
-/// Solver handle that owns the problem + state.
-pub struct TheseusHandle {
+struct TheseusHandleState {
     pub problem: Problem,
     pub state: OptimizationState,
     pub progress_callback: Option<ProgressCallback>,
     pub report_frequency: usize,
     pub last_termination_reason: String,
-    pub cancel_flag: AtomicBool,
+}
+
+struct HandleLifecycle {
+    state: Option<TheseusHandleState>,
+    active_cancel: Option<Arc<AtomicBool>>,
+    active_cancel_scope: Option<u64>,
+    pending_cancel_scope: Option<PendingCancelScope>,
+    next_cancel_scope: u64,
+}
+
+struct PendingCancelScope {
+    id: u64,
+    cancelled: bool,
+}
+
+/// Opaque solver handle.
+///
+/// Mutable solver state is moved out of `state` for the duration of an
+/// optimization. Other entrypoints then return a busy error instead of
+/// blocking, so progress callbacks may safely re-enter the API. Cancellation
+/// and state ownership share one lifecycle lock, so claiming a run and
+/// publishing its cancellation token are atomic from `theseus_cancel`'s
+/// perspective.
+pub struct TheseusHandle {
+    lifecycle: Mutex<HandleLifecycle>,
+}
+
+struct ActiveRun<'a> {
+    handle: &'a TheseusHandle,
+    state: Option<TheseusHandleState>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl ActiveRun<'_> {
+    fn state_mut(&mut self) -> &mut TheseusHandleState {
+        self.state
+            .as_mut()
+            .expect("active run owns handle state until drop")
+    }
+
+    fn finish_cancellation_window(&self) -> Result<(), TheseusError> {
+        self.finish_cancellation_window_with_hook(|| {})
+    }
+
+    fn finish_cancellation_window_with_hook<F>(&self, before_close: F) -> Result<(), TheseusError>
+    where
+        F: FnOnce(),
+    {
+        let mut lifecycle =
+            self.handle.lifecycle.lock().map_err(|_| {
+                TheseusError::Solver("TheseusHandle lifecycle lock poisoned".into())
+            })?;
+        before_close();
+        if self.cancel.load(Ordering::Acquire) {
+            return Err(TheseusError::Cancelled);
+        }
+        if lifecycle
+            .active_cancel
+            .as_ref()
+            .is_some_and(|token| Arc::ptr_eq(token, &self.cancel))
+        {
+            lifecycle.active_cancel = None;
+            lifecycle.active_cancel_scope = None;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ActiveRun<'_> {
+    fn drop(&mut self) {
+        let mut lifecycle = self
+            .handle
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lifecycle
+            .active_cancel
+            .as_ref()
+            .is_some_and(|token| Arc::ptr_eq(token, &self.cancel))
+        {
+            lifecycle.active_cancel = None;
+            lifecycle.active_cancel_scope = None;
+        }
+        if let Some(state) = self.state.take() {
+            lifecycle.state = Some(state);
+        }
+    }
+}
+
+fn begin_run(handle: &TheseusHandle) -> Result<ActiveRun<'_>, TheseusError> {
+    begin_run_internal(handle, None, || {})
+}
+
+#[cfg(test)]
+fn begin_run_with_publish_hook<F>(
+    handle: &TheseusHandle,
+    before_publish: F,
+) -> Result<ActiveRun<'_>, TheseusError>
+where
+    F: FnOnce(),
+{
+    begin_run_internal(handle, None, before_publish)
+}
+
+fn begin_scoped_run(handle: &TheseusHandle, scope_id: u64) -> Result<ActiveRun<'_>, TheseusError> {
+    begin_run_internal(handle, Some(scope_id), || {})
+}
+
+fn begin_run_internal<F>(
+    handle: &TheseusHandle,
+    scope_id: Option<u64>,
+    before_publish: F,
+) -> Result<ActiveRun<'_>, TheseusError>
+where
+    F: FnOnce(),
+{
+    let mut lifecycle = handle
+        .lifecycle
+        .lock()
+        .map_err(|_| TheseusError::Solver("TheseusHandle lifecycle lock poisoned".into()))?;
+    let initially_cancelled = match scope_id {
+        Some(scope_id) => {
+            let pending = lifecycle
+                .pending_cancel_scope
+                .take()
+                .ok_or_else(|| TheseusError::Solver("cancellation scope is not pending".into()))?;
+            if pending.id != scope_id {
+                lifecycle.pending_cancel_scope = Some(pending);
+                return Err(TheseusError::Solver(
+                    "cancellation scope does not match".into(),
+                ));
+            }
+            pending.cancelled
+        }
+        None => {
+            if lifecycle.pending_cancel_scope.is_some() {
+                return Err(TheseusError::Solver(
+                    "a scoped solve is pending on this handle".into(),
+                ));
+            }
+            false
+        }
+    };
+    let state = lifecycle.state.take().ok_or_else(|| {
+        TheseusError::Solver("TheseusHandle is already running an operation".into())
+    })?;
+    let cancel = Arc::new(AtomicBool::new(initially_cancelled));
+    before_publish();
+    lifecycle.active_cancel = Some(cancel.clone());
+    lifecycle.active_cancel_scope = scope_id;
+    drop(lifecycle);
+    let run = ActiveRun {
+        handle,
+        state: Some(state),
+        cancel,
+    };
+    Ok(run)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -237,6 +439,7 @@ pub unsafe extern "C" fn theseus_create_with_variable_supports(
     num_variable_supports: usize,
     variable_node_indices: *const usize,
     support_kinds: *const i32,
+    support_lambdas: *const f64,
     sphere_radii: *const f64,
     roller_enabled: *const u8,
     roller_lower: *const f64,
@@ -268,6 +471,7 @@ pub unsafe extern "C" fn theseus_create_with_variable_supports(
             num_variable_supports,
             variable_node_indices,
             support_kinds,
+            support_lambdas,
             sphere_radii,
             roller_enabled,
             roller_lower,
@@ -332,6 +536,7 @@ unsafe fn create_inner(
         lower_bounds,
         upper_bounds,
         0,
+        std::ptr::null(),
         std::ptr::null(),
         std::ptr::null(),
         std::ptr::null(),
@@ -486,6 +691,7 @@ unsafe fn create_inner_with_variable_supports(
     num_variable_supports: usize,
     variable_node_indices: *const usize,
     support_kinds: *const i32,
+    support_lambdas: *const f64,
     sphere_radii: *const f64,
     roller_enabled: *const u8,
     roller_lower: *const f64,
@@ -540,6 +746,11 @@ unsafe fn create_inner_with_variable_supports(
         let var_nodes =
             slice::from_raw_parts(variable_node_indices, num_variable_supports).to_vec();
         let kinds = slice::from_raw_parts(support_kinds, num_variable_supports);
+        let lambdas = if support_lambdas.is_null() {
+            None
+        } else {
+            Some(slice::from_raw_parts(support_lambdas, num_variable_supports))
+        };
         let radii = slice::from_raw_parts(sphere_radii, num_variable_supports);
         let roller_en = slice::from_raw_parts(roller_enabled, num_variable_supports * 3);
         let roller_lb = slice::from_raw_parts(roller_lower, num_variable_supports * 3);
@@ -585,6 +796,12 @@ unsafe fn create_inner_with_variable_supports(
         let mut init_positions = Array2::zeros((num_variable_supports, 3));
         for i in 0..num_variable_supports {
             let node = var_nodes[i];
+            let saturation_lambda = lambdas.map_or(1.0, |values| values[i]);
+            if !saturation_lambda.is_finite() || saturation_lambda <= 0.0 {
+                return Err(TheseusError::Shape(format!(
+                    "variable support at index {i} must have positive finite saturation lambda"
+                )));
+            }
             let fixed_row = fixed_idx.iter().position(|&n| n == node).ok_or_else(|| {
                 TheseusError::Shape(format!(
                     "variable support node index {node} not found in fixed index lookup"
@@ -654,6 +871,7 @@ unsafe fn create_inner_with_variable_supports(
             supports.push(VariableSupport {
                 node_index: node,
                 reference_position: x0,
+                saturation_lambda,
                 kind,
             });
         }
@@ -665,9 +883,10 @@ unsafe fn create_inner_with_variable_supports(
             initial_variable_positions: init_positions,
             variable_supports: supports,
         };
-        let latent_init = crate::variable_supports::initial_latents(
+        let latent_init = crate::variable_supports::initial_parameters(
             &anchors,
             SolverOptions::default().anchor_saturation_lambda,
+            QParameterizationMode::DirectSoftBounds,
         )?;
         (anchors, latent_init)
     };
@@ -698,19 +917,27 @@ unsafe fn create_inner_with_variable_supports(
     }
 
     Ok(Box::into_raw(Box::new(TheseusHandle {
-        problem,
-        state,
-        progress_callback: None,
-        report_frequency: 1,
-        last_termination_reason: "not run".to_string(),
-        cancel_flag: AtomicBool::new(false),
+        lifecycle: Mutex::new(HandleLifecycle {
+            state: Some(TheseusHandleState {
+                problem,
+                state,
+                progress_callback: None,
+                report_frequency: 1,
+                last_termination_reason: "not run".to_string(),
+            }),
+            active_cancel: None,
+            active_cancel_scope: None,
+            pending_cancel_scope: None,
+            next_cancel_scope: 1,
+        }),
     })))
 }
 
 /// Free a handle.
 ///
 /// # Safety
-/// `handle` must be a pointer returned by `theseus_create`, or null.
+/// `handle` must be a pointer returned by `theseus_create`, or null. It must
+/// not be freed concurrently with any other call using the handle.
 #[no_mangle]
 pub unsafe extern "C" fn theseus_free(handle: *mut TheseusHandle) {
     if handle.is_null() {
@@ -727,6 +954,8 @@ pub unsafe extern "C" fn theseus_free(handle: *mut TheseusHandle) {
 
 /// Add a TargetXYZ objective.  Returns 0 on success.
 ///
+/// `reduction`: 0 = SSE, 1 = MSE, 2 = RMSE (per-node Euclidean residuals).
+///
 /// # Safety
 /// Valid handle and arrays.
 #[no_mangle]
@@ -736,19 +965,22 @@ pub unsafe extern "C" fn theseus_add_target_xyz(
     node_indices: *const usize,
     num_nodes: usize,
     target_xyz: *const f64,
+    reduction: i32,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let idx = slice::from_raw_parts(node_indices, num_nodes).to_vec();
         let target = Array2::from_shape_vec(
             (num_nodes, 3),
             slice::from_raw_parts(target_xyz, num_nodes * 3).to_vec(),
         )
         .map_err(|e| TheseusError::Shape(format!("target_xyz: {e}")))?;
+        let reduction = TargetGeometryReduction::try_from(reduction)?;
         h.problem.objectives.push(Box::new(TargetXYZ {
             weight,
             node_indices: idx,
             target,
+            reduction,
         }));
         Ok(())
     }))
@@ -767,7 +999,7 @@ pub unsafe extern "C" fn theseus_add_target_length(
     targets: *const f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         let tgt = slice::from_raw_parts(targets, num_edges).to_vec();
         h.problem.objectives.push(Box::new(TargetLength {
@@ -792,7 +1024,7 @@ pub unsafe extern "C" fn theseus_add_target_force(
     targets: *const f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         let tgt = slice::from_raw_parts(targets, num_edges).to_vec();
         h.problem.objectives.push(Box::new(TargetForce {
@@ -818,7 +1050,7 @@ pub unsafe extern "C" fn theseus_add_min_length(
     sharpness: f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         let thr = slice::from_raw_parts(thresholds, num_edges).to_vec();
         h.problem.objectives.push(Box::new(MinLength {
@@ -836,6 +1068,7 @@ pub unsafe extern "C" fn theseus_add_min_length(
 /// `target_xy` must be exactly `num_nodes * 3` doubles, row-major (X,Y,Z per node).
 /// The Z component is ignored by the loss but must be present so the layout matches
 /// TargetXYZ and the FFI does not read past the buffer.
+/// `reduction`: 0 = SSE, 1 = MSE, 2 = RMSE (per-node XY residuals).
 ///
 /// # Safety
 /// Valid handle and arrays.
@@ -846,19 +1079,22 @@ pub unsafe extern "C" fn theseus_add_target_xy(
     node_indices: *const usize,
     num_nodes: usize,
     target_xy: *const f64,
+    reduction: i32,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let idx = slice::from_raw_parts(node_indices, num_nodes).to_vec();
         let target = Array2::from_shape_vec(
             (num_nodes, 3),
             slice::from_raw_parts(target_xy, num_nodes * 3).to_vec(),
         )
         .map_err(|e| TheseusError::Shape(format!("target_xy: {e}")))?;
+        let reduction = TargetGeometryReduction::try_from(reduction)?;
         h.problem.objectives.push(Box::new(TargetXY {
             weight,
             node_indices: idx,
             target,
+            reduction,
         }));
         Ok(())
     }))
@@ -869,6 +1105,7 @@ pub unsafe extern "C" fn theseus_add_target_xy(
 /// `target_xyz` is row-major `num_nodes × 3` world positions.
 /// `origin`, `x_axis`, `y_axis` are 3-element arrays in world coordinates;
 /// axes should be unit and orthogonal (e.g. Rhino plane Origin, XAxis, YAxis).
+/// `reduction`: 0 = SSE, 1 = MSE, 2 = RMSE (per-node in-plane residuals).
 ///
 /// # Safety
 /// Valid handle and arrays; origin/x_axis/y_axis must each point to 3 doubles.
@@ -882,9 +1119,10 @@ pub unsafe extern "C" fn theseus_add_target_plane(
     origin: *const f64,
     x_axis: *const f64,
     y_axis: *const f64,
+    reduction: i32,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let idx = slice::from_raw_parts(node_indices, num_nodes).to_vec();
         let target = Array2::from_shape_vec(
             (num_nodes, 3),
@@ -894,6 +1132,7 @@ pub unsafe extern "C" fn theseus_add_target_plane(
         let origin_arr: [f64; 3] = [*origin.add(0), *origin.add(1), *origin.add(2)];
         let x_axis_arr: [f64; 3] = [*x_axis.add(0), *x_axis.add(1), *x_axis.add(2)];
         let y_axis_arr: [f64; 3] = [*y_axis.add(0), *y_axis.add(1), *y_axis.add(2)];
+        let reduction = TargetGeometryReduction::try_from(reduction)?;
         h.problem.objectives.push(Box::new(TargetPlane {
             weight,
             node_indices: idx,
@@ -901,6 +1140,7 @@ pub unsafe extern "C" fn theseus_add_target_plane(
             origin: origin_arr,
             x_axis: x_axis_arr,
             y_axis: y_axis_arr,
+            reduction,
         }));
         Ok(())
     }))
@@ -926,7 +1166,7 @@ pub unsafe extern "C" fn theseus_add_planar_constraint_along_direction(
     direction: *const f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let idx = slice::from_raw_parts(node_indices, num_nodes).to_vec();
         let origin_arr: [f64; 3] = [*origin.add(0), *origin.add(1), *origin.add(2)];
         let x_axis_arr: [f64; 3] = [*x_axis.add(0), *x_axis.add(1), *x_axis.add(2)];
@@ -962,7 +1202,7 @@ pub unsafe extern "C" fn theseus_add_length_variation(
     normalization_strategy: i32,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         let normalization_strategy =
             LengthVarianceNormalizationStrategy::try_from(normalization_strategy)?;
@@ -992,7 +1232,7 @@ pub unsafe extern "C" fn theseus_add_force_variation(
     normalization_strategy: i32,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         let normalization_strategy =
             ForceVarianceNormalizationStrategy::try_from(normalization_strategy)?;
@@ -1019,7 +1259,7 @@ pub unsafe extern "C" fn theseus_add_sum_force_length(
     num_edges: usize,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         h.problem.objectives.push(Box::new(SumForceLength {
             weight,
@@ -1043,7 +1283,7 @@ pub unsafe extern "C" fn theseus_add_max_length(
     sharpness: f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         let thr = slice::from_raw_parts(thresholds, num_edges).to_vec();
         h.problem.objectives.push(Box::new(MaxLength {
@@ -1070,7 +1310,7 @@ pub unsafe extern "C" fn theseus_add_min_force(
     sharpness: f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         let thr = slice::from_raw_parts(thresholds, num_edges).to_vec();
         h.problem.objectives.push(Box::new(MinForce {
@@ -1097,7 +1337,7 @@ pub unsafe extern "C" fn theseus_add_max_force(
     sharpness: f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let idx = slice::from_raw_parts(edge_indices, num_edges).to_vec();
         let thr = slice::from_raw_parts(thresholds, num_edges).to_vec();
         h.problem.objectives.push(Box::new(MaxForce {
@@ -1126,7 +1366,7 @@ pub unsafe extern "C" fn theseus_add_rigid_set_compare(
     target_xyz: *const f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let idx = slice::from_raw_parts(node_indices, num_nodes).to_vec();
         let target = Array2::from_shape_vec(
             (num_nodes, 3),
@@ -1177,7 +1417,7 @@ pub unsafe extern "C" fn theseus_add_reaction_direction(
     target_dirs: *const f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let idx = slice::from_raw_parts(anchor_indices, num_anchors).to_vec();
         let dirs = Array2::from_shape_vec(
             (num_anchors, 3),
@@ -1211,7 +1451,7 @@ pub unsafe extern "C" fn theseus_add_reaction_direction_magnitude(
     target_mags: *const f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let idx = slice::from_raw_parts(anchor_indices, num_anchors).to_vec();
         let dirs = Array2::from_shape_vec(
             (num_anchors, 3),
@@ -1252,7 +1492,7 @@ pub unsafe extern "C" fn theseus_add_reaction_magnitude(
     sign_semantics: i32,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let behavior = ReactionMagnitudeBehavior::try_from(behavior)?;
         let sign = ReactionMagnitudeSign::try_from(sign_semantics)?;
         let idx = slice::from_raw_parts(anchor_indices, num_anchors).to_vec();
@@ -1291,7 +1531,7 @@ pub unsafe extern "C" fn theseus_add_reaction_direction_magnitude_with_options(
     sign_semantics: i32,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let behavior = ReactionMagnitudeBehavior::try_from(behavior)?;
         let sign = ReactionMagnitudeSign::try_from(sign_semantics)?;
         let idx = slice::from_raw_parts(anchor_indices, num_anchors).to_vec();
@@ -1331,7 +1571,7 @@ pub unsafe extern "C" fn theseus_set_solver_options(
     anchor_saturation_lambda: f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         h.problem.solver.max_iterations = max_iterations;
         h.problem.solver.absolute_tolerance = abs_tol;
         h.problem.solver.relative_tolerance = rel_tol;
@@ -1341,9 +1581,10 @@ pub unsafe extern "C" fn theseus_set_solver_options(
         h.problem.solver.anchor_saturation_lambda = anchor_saturation_lambda.max(1e-12);
         let latent_dim = crate::variable_supports::latent_dim(&h.problem);
         if latent_dim > 0 && !h.problem.anchors.variable_supports.is_empty() {
-            let latents = crate::variable_supports::initial_latents(
+            let latents = crate::variable_supports::initial_parameters(
                 &h.problem.anchors,
                 h.problem.solver.anchor_saturation_lambda,
+                h.problem.solver.q_parameterization_mode,
             )?;
             h.state.variable_anchor_latents = latents;
             h.state.variable_anchor_positions = crate::variable_supports::map_latents_to_positions(
@@ -1359,7 +1600,7 @@ pub unsafe extern "C" fn theseus_set_solver_options(
 ///
 /// mode:
 ///   0 = DirectSoftBounds (default; optimize q directly + soft bounds)
-///   2 = DirectBoxBounds  (optimize physical q with hard L-BFGS-B boxes)
+///   2 = DirectBoxBounds  (physical q with hard, finite, non-fixed two-sided boxes)
 ///
 /// # Safety
 /// Valid handle.
@@ -1369,8 +1610,21 @@ pub unsafe extern "C" fn theseus_set_q_parameterization_mode(
     mode: i32,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
-        h.problem.solver.q_parameterization_mode = QParameterizationMode::try_from(mode)?;
+        let mut h = require_handle(handle)?;
+        let mode = QParameterizationMode::try_from(mode)?;
+        h.problem.solver.q_parameterization_mode = mode;
+        if !h.problem.anchors.variable_supports.is_empty() {
+            let parameters = crate::variable_supports::initial_parameters(
+                &h.problem.anchors,
+                h.problem.solver.anchor_saturation_lambda,
+                mode,
+            )?;
+            h.state.variable_anchor_latents = parameters;
+            h.state.variable_anchor_positions = crate::variable_supports::map_latents_to_positions(
+                &h.problem,
+                &h.state.variable_anchor_latents,
+            )?;
+        }
         Ok(())
     }))
 }
@@ -1396,7 +1650,7 @@ pub unsafe extern "C" fn theseus_set_self_weight_prescribed(
     relaxation: f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let ne = h.problem.topology.num_edges;
         let mu = slice::from_raw_parts(linear_densities, ne).to_vec();
         let g = slice::from_raw_parts(gravity, 3);
@@ -1429,7 +1683,7 @@ pub unsafe extern "C" fn theseus_set_self_weight_sizing(
     relaxation: f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let g = slice::from_raw_parts(gravity, 3);
         h.problem.self_weight = Some(SelfWeightParams::Sizing {
             rho,
@@ -1450,7 +1704,7 @@ pub unsafe extern "C" fn theseus_set_self_weight_sizing(
 #[no_mangle]
 pub unsafe extern "C" fn theseus_clear_self_weight(handle: *mut TheseusHandle) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         h.problem.self_weight = None;
         Ok(())
     }))
@@ -1481,7 +1735,7 @@ pub unsafe extern "C" fn theseus_set_pressure(
     relaxation: f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let offsets = slice::from_raw_parts(face_offsets, num_faces + 1);
         let total_verts = offsets[num_faces];
         let verts = slice::from_raw_parts(face_vertices, total_verts);
@@ -1529,7 +1783,7 @@ pub unsafe extern "C" fn theseus_set_pressure_hydrostatic(
     relaxation: f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let offsets = slice::from_raw_parts(face_offsets, num_faces + 1);
         let total_verts = offsets[num_faces];
         let verts = slice::from_raw_parts(face_vertices, total_verts);
@@ -1577,7 +1831,7 @@ pub unsafe extern "C" fn theseus_set_pressure_directional(
     relaxation: f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         let offsets = slice::from_raw_parts(face_offsets, num_faces + 1);
         let total_verts = offsets[num_faces];
         let verts = slice::from_raw_parts(face_vertices, total_verts);
@@ -1608,7 +1862,7 @@ pub unsafe extern "C" fn theseus_set_pressure_directional(
 #[no_mangle]
 pub unsafe extern "C" fn theseus_clear_pressure(handle: *mut TheseusHandle) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         h.problem.pressure = None;
         Ok(())
     }))
@@ -1632,7 +1886,7 @@ pub unsafe extern "C" fn theseus_set_progress_callback(
     frequency: usize,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        let mut h = require_handle(handle)?;
         h.progress_callback = callback;
         h.report_frequency = if frequency == 0 { 1 } else { frequency };
         Ok(())
@@ -1652,11 +1906,19 @@ pub unsafe extern "C" fn theseus_get_termination_reason(
     buf: *mut u8,
     buf_len: usize,
 ) -> i32 {
-    if handle.is_null() {
+    let Ok(handle) = handle_ref(handle) else {
         set_last_error("null handle");
         return -1;
-    }
-    let msg = &(*handle).last_termination_reason;
+    };
+    let Ok(lifecycle) = handle.lifecycle.lock() else {
+        set_last_error("TheseusHandle lifecycle lock poisoned");
+        return -1;
+    };
+    let Some(state) = lifecycle.state.as_ref() else {
+        set_last_error("TheseusHandle is busy running an operation");
+        return -1;
+    };
+    let msg = &state.last_termination_reason;
     let bytes = msg.as_bytes();
     if buf_len < bytes.len() + 1 {
         return -1;
@@ -1671,19 +1933,153 @@ pub unsafe extern "C" fn theseus_get_termination_reason(
 //  Cancellation
 // ─────────────────────────────────────────────────────────────
 
-/// Request cancellation of an in-progress optimization.
+/// Request cancellation of an in-progress optimization or forward solve.
 ///
-/// The flag is checked after each objective evaluation. Safe to call
-/// from any thread while `theseus_optimize` is running.
+/// The flag is checked at operation-specific cooperative boundaries. Safe to
+/// call from any thread while a cancellable operation is running.
 ///
 /// # Safety
 /// `handle` must be a valid pointer returned by `theseus_create`.
 #[no_mangle]
 pub unsafe extern "C" fn theseus_cancel(handle: *mut TheseusHandle) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
-        h.cancel_flag.store(true, Ordering::Relaxed);
+        let handle = handle_ref(handle)?;
+        request_cancel_with_lock_hook(handle, || {})
+    }))
+}
+
+fn request_cancel_with_lock_hook<F>(
+    handle: &TheseusHandle,
+    before_lock: F,
+) -> Result<(), TheseusError>
+where
+    F: FnOnce(),
+{
+    before_lock();
+    let cancel = handle
+        .lifecycle
+        .lock()
+        .map_err(|_| TheseusError::Solver("TheseusHandle lifecycle lock poisoned".into()))?
+        .active_cancel
+        .clone();
+    if let Some(cancel) = cancel {
+        cancel.store(true, Ordering::Release);
+    }
+    Ok(())
+}
+
+fn reserve_cancel_scope(handle: &TheseusHandle) -> Result<u64, TheseusError> {
+    let mut lifecycle = handle
+        .lifecycle
+        .lock()
+        .map_err(|_| TheseusError::Solver("TheseusHandle lifecycle lock poisoned".into()))?;
+    if lifecycle.state.is_none() {
+        return Err(TheseusError::Solver(
+            "TheseusHandle is already running an operation".into(),
+        ));
+    }
+    if lifecycle.pending_cancel_scope.is_some() {
+        return Err(TheseusError::Solver(
+            "a cancellation scope is already pending".into(),
+        ));
+    }
+    let scope_id = lifecycle.next_cancel_scope;
+    lifecycle.next_cancel_scope = lifecycle.next_cancel_scope.wrapping_add(1);
+    if lifecycle.next_cancel_scope == 0 {
+        lifecycle.next_cancel_scope = 1;
+    }
+    lifecycle.pending_cancel_scope = Some(PendingCancelScope {
+        id: scope_id,
+        cancelled: false,
+    });
+    Ok(scope_id)
+}
+
+fn request_scoped_cancel(handle: &TheseusHandle, scope_id: u64) -> Result<(), TheseusError> {
+    request_scoped_cancel_with_lock_hook(handle, scope_id, || {})
+}
+
+fn request_scoped_cancel_with_lock_hook<F>(
+    handle: &TheseusHandle,
+    scope_id: u64,
+    before_lock: F,
+) -> Result<(), TheseusError>
+where
+    F: FnOnce(),
+{
+    before_lock();
+    let mut lifecycle = handle
+        .lifecycle
+        .lock()
+        .map_err(|_| TheseusError::Solver("TheseusHandle lifecycle lock poisoned".into()))?;
+    if lifecycle.active_cancel_scope == Some(scope_id) {
+        if let Some(cancel) = lifecycle.active_cancel.as_ref() {
+            cancel.store(true, Ordering::Release);
+        }
+    } else if let Some(pending) = lifecycle
+        .pending_cancel_scope
+        .as_mut()
+        .filter(|pending| pending.id == scope_id)
+    {
+        pending.cancelled = true;
+    }
+    Ok(())
+}
+
+fn complete_cancel_scope(handle: &TheseusHandle, scope_id: u64) -> Result<(), TheseusError> {
+    let mut lifecycle = handle
+        .lifecycle
+        .lock()
+        .map_err(|_| TheseusError::Solver("TheseusHandle lifecycle lock poisoned".into()))?;
+    if lifecycle
+        .pending_cancel_scope
+        .as_ref()
+        .is_some_and(|pending| pending.id == scope_id)
+    {
+        lifecycle.pending_cancel_scope = None;
+    }
+    Ok(())
+}
+
+/// Reserve a cancellation scope for one imminent managed solve.
+///
+/// The returned identifier is consumed only by the matching scoped solve
+/// entrypoint. This internal ABI prevents cancellation immediately before run
+/// token publication from being lost without changing `theseus_cancel`'s
+/// active-run-only semantics.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_begin_cancel_scope(
+    handle: *mut TheseusHandle,
+    out_scope_id: *mut u64,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        if out_scope_id.is_null() {
+            return Err(TheseusError::Shape("null cancellation scope output".into()));
+        }
+        let handle = handle_ref(handle)?;
+        *out_scope_id = reserve_cancel_scope(handle)?;
         Ok(())
+    }))
+}
+
+/// Cancel the active or pending run matching `scope_id`.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_cancel_scope(handle: *mut TheseusHandle, scope_id: u64) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let handle = handle_ref(handle)?;
+        request_scoped_cancel(handle, scope_id)
+    }))
+}
+
+/// Complete a managed cancellation scope and discard any unconsumed latch.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_complete_cancel_scope(
+    handle: *mut TheseusHandle,
+    scope_id: u64,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let handle = handle_ref(handle)?;
+        complete_cancel_scope(handle, scope_id)
     }))
 }
 
@@ -1710,41 +2106,97 @@ pub unsafe extern "C" fn theseus_optimize(
     out_converged: *mut bool,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        optimize_inner(
+            handle,
+            None,
+            out_xyz,
+            out_lengths,
+            out_forces,
+            out_q,
+            out_reactions,
+            out_iterations,
+            out_converged,
+        )
+    }))
+}
+
+/// Scoped optimization entrypoint used by the managed cancellation bridge.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_optimize_scoped(
+    handle: *mut TheseusHandle,
+    scope_id: u64,
+    out_xyz: *mut f64,
+    out_lengths: *mut f64,
+    out_forces: *mut f64,
+    out_q: *mut f64,
+    out_reactions: *mut f64,
+    out_iterations: *mut usize,
+    out_converged: *mut bool,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        optimize_inner(
+            handle,
+            Some(scope_id),
+            out_xyz,
+            out_lengths,
+            out_forces,
+            out_q,
+            out_reactions,
+            out_iterations,
+            out_converged,
+        )
+    }))
+}
+
+unsafe fn optimize_inner(
+    handle: *mut TheseusHandle,
+    scope_id: Option<u64>,
+    out_xyz: *mut f64,
+    out_lengths: *mut f64,
+    out_forces: *mut f64,
+    out_q: *mut f64,
+    out_reactions: *mut f64,
+    out_iterations: *mut usize,
+    out_converged: *mut bool,
+) -> Result<(), TheseusError> {
+    let handle = handle_ref(handle)?;
+    let mut run = match scope_id {
+        Some(scope_id) => begin_scoped_run(handle, scope_id)?,
+        None => begin_run(handle)?,
+    };
+    let cancel = run.cancel.clone();
+    let result = {
+        let h = run.state_mut();
         let cb = h.progress_callback;
         let freq = h.report_frequency;
-        let result = optimizer::optimize(&h.problem, &mut h.state, cb, freq, &h.cancel_flag)?;
-        h.last_termination_reason = result.termination_reason.clone();
+        optimizer::optimize(&h.problem, &mut h.state, cb, freq, &cancel)?
+    };
+    run.finish_cancellation_window()?;
+    let h = run.state_mut();
+    h.last_termination_reason = result.termination_reason.clone();
 
-        let nn = h.problem.topology.num_nodes;
-        let ne = h.problem.topology.num_edges;
+    let nn = h.problem.topology.num_nodes;
+    let ne = h.problem.topology.num_edges;
 
-        // Copy xyz
-        let xyz_out = slice::from_raw_parts_mut(out_xyz, nn * 3);
-        for i in 0..nn {
-            for d in 0..3 {
-                xyz_out[i * 3 + d] = result.xyz[[i, d]];
-            }
+    let xyz_out = slice::from_raw_parts_mut(out_xyz, nn * 3);
+    for i in 0..nn {
+        for d in 0..3 {
+            xyz_out[i * 3 + d] = result.xyz[[i, d]];
         }
+    }
+    slice::from_raw_parts_mut(out_lengths, ne).copy_from_slice(&result.member_lengths);
+    slice::from_raw_parts_mut(out_forces, ne).copy_from_slice(&result.member_forces);
+    slice::from_raw_parts_mut(out_q, ne).copy_from_slice(&result.q);
 
-        // Copy lengths, forces, q
-        slice::from_raw_parts_mut(out_lengths, ne).copy_from_slice(&result.member_lengths);
-        slice::from_raw_parts_mut(out_forces, ne).copy_from_slice(&result.member_forces);
-        slice::from_raw_parts_mut(out_q, ne).copy_from_slice(&result.q);
-
-        // Copy reactions
-        let r_out = slice::from_raw_parts_mut(out_reactions, nn * 3);
-        for i in 0..nn {
-            for d in 0..3 {
-                r_out[i * 3 + d] = result.reactions[[i, d]];
-            }
+    let r_out = slice::from_raw_parts_mut(out_reactions, nn * 3);
+    for i in 0..nn {
+        for d in 0..3 {
+            r_out[i * 3 + d] = result.reactions[[i, d]];
         }
-
-        *out_iterations = result.iterations;
-        *out_converged = result.converged;
-
-        Ok(())
-    }))
+    }
+    *out_iterations = result.iterations;
+    *out_converged = result.converged;
+    Ok(())
 }
 
 /// Return the number of loss values recorded by the last optimization.
@@ -1789,6 +2241,10 @@ pub unsafe extern "C" fn theseus_get_loss_trace(
 
 /// Single forward FDM solve — useful for previewing geometry without optimising.
 ///
+/// `theseus_cancel` cooperatively interrupts this operation between nonlinear
+/// load/GMRES iterations and after a sparse factorization/solve completes. A
+/// single sparse factorization or triangular solve is not interruptible.
+///
 /// Returns 0 on success, -1 on error, -2 on internal panic.
 ///
 /// # Safety
@@ -1803,43 +2259,98 @@ pub unsafe extern "C" fn theseus_solve_forward(
     out_reactions: *mut f64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
-        let h = require_handle(handle)?;
+        solve_forward_inner(
+            handle,
+            None,
+            out_xyz,
+            out_lengths,
+            out_forces,
+            out_q,
+            out_reactions,
+        )
+    }))
+}
+
+/// Scoped forward-solve entrypoint used by the managed cancellation bridge.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_solve_forward_scoped(
+    handle: *mut TheseusHandle,
+    scope_id: u64,
+    out_xyz: *mut f64,
+    out_lengths: *mut f64,
+    out_forces: *mut f64,
+    out_q: *mut f64,
+    out_reactions: *mut f64,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        solve_forward_inner(
+            handle,
+            Some(scope_id),
+            out_xyz,
+            out_lengths,
+            out_forces,
+            out_q,
+            out_reactions,
+        )
+    }))
+}
+
+unsafe fn solve_forward_inner(
+    handle: *mut TheseusHandle,
+    scope_id: Option<u64>,
+    out_xyz: *mut f64,
+    out_lengths: *mut f64,
+    out_forces: *mut f64,
+    out_q: *mut f64,
+    out_reactions: *mut f64,
+) -> Result<(), TheseusError> {
+    let handle = handle_ref(handle)?;
+    let mut run = match scope_id {
+        Some(scope_id) => begin_scoped_run(handle, scope_id)?,
+        None => begin_run(handle)?,
+    };
+    let cancel = run.cancel.clone();
+    let cache = {
+        let h = run.state_mut();
         let mut cache = FdmCache::new(&h.problem)?;
         let anchors = crate::variable_supports::map_latents_to_positions(
             &h.problem,
             &h.state.variable_anchor_latents,
         )?;
 
-        crate::fdm::solve_fdm_with_loads(
+        crate::fdm::solve_fdm_with_loads_cancellable(
             &mut cache,
             &h.state.force_densities,
             &h.problem,
             &anchors,
             1e-12,
+            Some(&cancel),
         )?;
+        cache
+    };
+    run.finish_cancellation_window()?;
+    let h = run.state_mut();
 
-        let nn = h.problem.topology.num_nodes;
-        let ne = h.problem.topology.num_edges;
+    let nn = h.problem.topology.num_nodes;
+    let ne = h.problem.topology.num_edges;
 
-        let xyz_out = slice::from_raw_parts_mut(out_xyz, nn * 3);
-        for i in 0..nn {
-            for d in 0..3 {
-                xyz_out[i * 3 + d] = cache.nf[[i, d]];
-            }
+    let xyz_out = slice::from_raw_parts_mut(out_xyz, nn * 3);
+    for i in 0..nn {
+        for d in 0..3 {
+            xyz_out[i * 3 + d] = cache.nf[[i, d]];
         }
-        slice::from_raw_parts_mut(out_lengths, ne).copy_from_slice(&cache.member_lengths);
-        slice::from_raw_parts_mut(out_forces, ne).copy_from_slice(&cache.member_forces);
-        slice::from_raw_parts_mut(out_q, ne).copy_from_slice(&h.state.force_densities);
+    }
+    slice::from_raw_parts_mut(out_lengths, ne).copy_from_slice(&cache.member_lengths);
+    slice::from_raw_parts_mut(out_forces, ne).copy_from_slice(&cache.member_forces);
+    slice::from_raw_parts_mut(out_q, ne).copy_from_slice(&h.state.force_densities);
 
-        let r_out = slice::from_raw_parts_mut(out_reactions, nn * 3);
-        for i in 0..nn {
-            for d in 0..3 {
-                r_out[i * 3 + d] = cache.reactions[[i, d]];
-            }
+    let r_out = slice::from_raw_parts_mut(out_reactions, nn * 3);
+    for i in 0..nn {
+        for d in 0..3 {
+            r_out[i * 3 + d] = cache.reactions[[i, d]];
         }
-
-        Ok(())
-    }))
+    }
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2011,4 +2522,183 @@ pub unsafe extern "C" fn theseus_solve_nnls(
 
         Ok(())
     }))
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::thread;
+
+    unsafe fn tiny_handle() -> *mut TheseusHandle {
+        let rows = [0usize, 0];
+        let cols = [0usize, 1];
+        let vals = [-1.0, 1.0];
+        let free = [0usize];
+        let fixed = [1usize];
+        let loads = [0.0, 0.0, -1.0];
+        let fixed_positions = [0.0, 0.0, 0.0];
+        let q = [1.0];
+        let lower = [0.1];
+        let upper = [10.0];
+        theseus_create(
+            1,
+            2,
+            1,
+            rows.as_ptr(),
+            cols.as_ptr(),
+            vals.as_ptr(),
+            2,
+            free.as_ptr(),
+            fixed.as_ptr(),
+            1,
+            loads.as_ptr(),
+            fixed_positions.as_ptr(),
+            q.as_ptr(),
+            lower.as_ptr(),
+            upper.as_ptr(),
+        )
+    }
+
+    #[test]
+    fn cancel_during_startup_publish_reaches_new_run_token() {
+        unsafe {
+            let handle = tiny_handle();
+            assert!(!handle.is_null());
+            let raw = handle as usize;
+            let (startup_tx, startup_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let (inspect_tx, inspect_rx) = mpsc::channel();
+            let (cancel_attempt_tx, cancel_attempt_rx) = mpsc::channel();
+
+            let starter = thread::spawn(move || {
+                let handle = &*(raw as *const TheseusHandle);
+                let run = begin_run_with_publish_hook(handle, || {
+                    startup_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                })
+                .unwrap();
+                inspect_rx.recv().unwrap();
+                assert!(
+                    run.cancel.load(Ordering::Acquire),
+                    "cancellation attempted during startup was lost"
+                );
+            });
+
+            startup_rx.recv().unwrap();
+            let raw = handle as usize;
+            let canceller = thread::spawn(move || {
+                let handle = &*(raw as *const TheseusHandle);
+                request_cancel_with_lock_hook(handle, || {
+                    cancel_attempt_tx.send(()).unwrap();
+                })
+                .unwrap();
+            });
+            cancel_attempt_rx.recv().unwrap();
+            release_tx.send(()).unwrap();
+            canceller.join().unwrap();
+            inspect_tx.send(()).unwrap();
+            starter.join().unwrap();
+            theseus_free(handle);
+        }
+    }
+
+    #[test]
+    fn scoped_cancel_before_publication_is_consumed_by_matching_run_only() {
+        unsafe {
+            let handle = tiny_handle();
+            assert!(!handle.is_null());
+            let handle_ref = &*handle;
+
+            let cancelled_scope = reserve_cancel_scope(handle_ref).unwrap();
+            request_scoped_cancel(handle_ref, cancelled_scope).unwrap();
+            let cancelled_run = begin_scoped_run(handle_ref, cancelled_scope).unwrap();
+            assert!(cancelled_run.cancel.load(Ordering::Acquire));
+            drop(cancelled_run);
+
+            let clean_scope = reserve_cancel_scope(handle_ref).unwrap();
+            let clean_run = begin_scoped_run(handle_ref, clean_scope).unwrap();
+            assert!(!clean_run.cancel.load(Ordering::Acquire));
+            drop(clean_run);
+
+            theseus_free(handle);
+        }
+    }
+
+    #[test]
+    fn scoped_cancel_reaches_active_matching_run() {
+        unsafe {
+            let handle = tiny_handle();
+            assert!(!handle.is_null());
+            let handle_ref = &*handle;
+
+            let scope_id = reserve_cancel_scope(handle_ref).unwrap();
+            let run = begin_scoped_run(handle_ref, scope_id).unwrap();
+            request_scoped_cancel(handle_ref, scope_id).unwrap();
+            assert!(run.cancel.load(Ordering::Acquire));
+            drop(run);
+
+            theseus_free(handle);
+        }
+    }
+
+    #[test]
+    fn scoped_cancel_racing_completion_cannot_poison_next_run() {
+        unsafe {
+            let handle = tiny_handle();
+            assert!(!handle.is_null());
+            let scope_id = reserve_cancel_scope(&*handle).unwrap();
+            let raw = handle as usize;
+            let (closing_tx, closing_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let (cancel_attempt_tx, cancel_attempt_rx) = mpsc::channel();
+
+            let finisher = thread::spawn(move || {
+                let handle = &*(raw as *const TheseusHandle);
+                let run = begin_scoped_run(handle, scope_id).unwrap();
+                run.finish_cancellation_window_with_hook(|| {
+                    closing_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                })
+                .unwrap();
+            });
+
+            closing_rx.recv().unwrap();
+            let raw = handle as usize;
+            let canceller = thread::spawn(move || {
+                let handle = &*(raw as *const TheseusHandle);
+                request_scoped_cancel_with_lock_hook(handle, scope_id, || {
+                    cancel_attempt_tx.send(()).unwrap();
+                })
+                .unwrap();
+            });
+            cancel_attempt_rx.recv().unwrap();
+            release_tx.send(()).unwrap();
+            finisher.join().unwrap();
+            canceller.join().unwrap();
+
+            let clean_run = begin_run(&*handle).unwrap();
+            assert!(!clean_run.cancel.load(Ordering::Acquire));
+            drop(clean_run);
+            theseus_free(handle);
+        }
+    }
+
+    #[test]
+    fn completing_unstarted_scope_clears_pending_latch() {
+        unsafe {
+            let handle = tiny_handle();
+            assert!(!handle.is_null());
+            let handle_ref = &*handle;
+
+            let scope_id = reserve_cancel_scope(handle_ref).unwrap();
+            request_scoped_cancel(handle_ref, scope_id).unwrap();
+            complete_cancel_scope(handle_ref, scope_id).unwrap();
+
+            let clean_run = begin_run(handle_ref).unwrap();
+            assert!(!clean_run.cancel.load(Ordering::Acquire));
+            drop(clean_run);
+            theseus_free(handle);
+        }
+    }
 }

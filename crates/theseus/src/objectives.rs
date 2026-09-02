@@ -9,8 +9,8 @@ use crate::types::{
     LengthVarianceNormalizationStrategy, LengthVariation, MaxForce, MaxLength, MinForce, MinLength,
     ObjectiveTrait, PlanarConstraintAlongDirection, Problem, ReactionDirection,
     ReactionDirectionMagnitude, ReactionMagnitude, ReactionMagnitudeBehavior,
-    ReactionMagnitudeSign, RigidSetCompare, SumForceLength, TargetForce, TargetLength, TargetPlane,
-    TargetXY, TargetXYZ, TheseusError,
+    ReactionMagnitudeSign, RigidSetCompare, SumForceLength, TargetForce, TargetGeometryReduction,
+    TargetLength, TargetPlane, TargetXY, TargetXYZ, TheseusError,
 };
 use ndarray::Array2;
 use rayon::prelude::*;
@@ -100,6 +100,48 @@ pub fn bounds_penalty_grad(
 // ─────────────────────────────────────────────────────────────
 //  Individual objective losses
 // ─────────────────────────────────────────────────────────────
+
+/// Reduce a sum of per-node squared residuals according to the selected mode.
+pub fn apply_target_geometry_reduction(
+    sse: f64,
+    count: usize,
+    reduction: TargetGeometryReduction,
+) -> f64 {
+    if count == 0 {
+        return 0.0;
+    }
+    let n = count as f64;
+    match reduction {
+        TargetGeometryReduction::Sse => sse,
+        TargetGeometryReduction::Mse => sse / n,
+        TargetGeometryReduction::Rmse => (sse / n).sqrt(),
+    }
+}
+
+/// Scale factor to apply to an SSE-form gradient (`d(w·SSE)/dx`) so that it
+/// matches `d(w·reduced)/dx`.
+pub fn target_geometry_reduction_grad_scale(
+    sse: f64,
+    count: usize,
+    reduction: TargetGeometryReduction,
+) -> f64 {
+    if count == 0 {
+        return 0.0;
+    }
+    let n = count as f64;
+    match reduction {
+        TargetGeometryReduction::Sse => 1.0,
+        TargetGeometryReduction::Mse => 1.0 / n,
+        TargetGeometryReduction::Rmse => {
+            let rmse = (sse / n).sqrt();
+            if rmse <= 0.0 {
+                0.0
+            } else {
+                0.5 / (n * rmse)
+            }
+        }
+    }
+}
 
 /// TargetXYZ:  Σ_i ‖xyz[idx_i] − target_i‖²
 fn target_xyz_loss(xyz: &Array2<f64>, node_indices: &[usize], target: &Array2<f64>) -> f64 {
@@ -493,12 +535,16 @@ fn reaction_direction_magnitude_loss(
 
 impl ObjectiveTrait for TargetXYZ {
     fn loss(&self, snap: &GeometrySnapshot) -> f64 {
-        self.weight * target_xyz_loss(snap.xyz_full, &self.node_indices, &self.target)
+        let sse = target_xyz_loss(snap.xyz_full, &self.node_indices, &self.target);
+        self.weight * apply_target_geometry_reduction(sse, self.node_indices.len(), self.reduction)
     }
     fn accumulate_gradient(&self, cache: &mut FdmCache, problem: &Problem) {
+        let sse = target_xyz_loss(&cache.nf, &self.node_indices, &self.target);
+        let scale =
+            target_geometry_reduction_grad_scale(sse, self.node_indices.len(), self.reduction);
         gradients::grad_target_xyz(
             cache,
-            self.weight,
+            self.weight * scale,
             &self.node_indices,
             &self.target,
             &problem.topology.free_node_indices,
@@ -511,12 +557,16 @@ impl ObjectiveTrait for TargetXYZ {
 
 impl ObjectiveTrait for TargetXY {
     fn loss(&self, snap: &GeometrySnapshot) -> f64 {
-        self.weight * target_xy_loss(snap.xyz_full, &self.node_indices, &self.target)
+        let sse = target_xy_loss(snap.xyz_full, &self.node_indices, &self.target);
+        self.weight * apply_target_geometry_reduction(sse, self.node_indices.len(), self.reduction)
     }
     fn accumulate_gradient(&self, cache: &mut FdmCache, problem: &Problem) {
+        let sse = target_xy_loss(&cache.nf, &self.node_indices, &self.target);
+        let scale =
+            target_geometry_reduction_grad_scale(sse, self.node_indices.len(), self.reduction);
         gradients::grad_target_xy(
             cache,
-            self.weight,
+            self.weight * scale,
             &self.node_indices,
             &self.target,
             &problem.topology.free_node_indices,
@@ -529,20 +579,30 @@ impl ObjectiveTrait for TargetXY {
 
 impl ObjectiveTrait for TargetPlane {
     fn loss(&self, snap: &GeometrySnapshot) -> f64 {
-        self.weight
-            * target_plane_loss(
-                snap.xyz_full,
-                &self.node_indices,
-                &self.target,
-                &self.origin,
-                &self.x_axis,
-                &self.y_axis,
-            )
+        let sse = target_plane_loss(
+            snap.xyz_full,
+            &self.node_indices,
+            &self.target,
+            &self.origin,
+            &self.x_axis,
+            &self.y_axis,
+        );
+        self.weight * apply_target_geometry_reduction(sse, self.node_indices.len(), self.reduction)
     }
     fn accumulate_gradient(&self, cache: &mut FdmCache, problem: &Problem) {
+        let sse = target_plane_loss(
+            &cache.nf,
+            &self.node_indices,
+            &self.target,
+            &self.origin,
+            &self.x_axis,
+            &self.y_axis,
+        );
+        let scale =
+            target_geometry_reduction_grad_scale(sse, self.node_indices.len(), self.reduction);
         gradients::grad_target_plane(
             cache,
-            self.weight,
+            self.weight * scale,
             &self.node_indices,
             &self.target,
             &self.origin,
@@ -905,4 +965,63 @@ pub fn validate_objectives(objectives: &[Box<dyn ObjectiveTrait>]) -> Result<(),
         obj.validate()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod reduction_tests {
+    use super::*;
+    use crate::types::TargetGeometryReduction;
+
+    #[test]
+    fn mse_is_sse_over_n() {
+        assert_eq!(
+            apply_target_geometry_reduction(8.0, 4, TargetGeometryReduction::Mse),
+            2.0
+        );
+    }
+
+    #[test]
+    fn rmse_is_sqrt_mse() {
+        assert_eq!(
+            apply_target_geometry_reduction(8.0, 2, TargetGeometryReduction::Rmse),
+            2.0
+        );
+    }
+
+    #[test]
+    fn sse_is_unchanged() {
+        assert_eq!(
+            apply_target_geometry_reduction(8.0, 4, TargetGeometryReduction::Sse),
+            8.0
+        );
+    }
+
+    #[test]
+    fn empty_count_is_zero() {
+        assert_eq!(
+            apply_target_geometry_reduction(8.0, 0, TargetGeometryReduction::Rmse),
+            0.0
+        );
+        assert_eq!(
+            target_geometry_reduction_grad_scale(8.0, 0, TargetGeometryReduction::Mse),
+            0.0
+        );
+    }
+
+    #[test]
+    fn rmse_gradient_scale_matches_chain_rule() {
+        let sse = 8.0;
+        let n = 2usize;
+        let rmse = (sse / n as f64).sqrt(); // 2.0
+        let scale = target_geometry_reduction_grad_scale(sse, n, TargetGeometryReduction::Rmse);
+        assert!((scale - 0.5 / (n as f64 * rmse)).abs() < 1e-15);
+    }
+
+    #[test]
+    fn rmse_zero_residual_has_zero_gradient_scale() {
+        assert_eq!(
+            target_geometry_reduction_grad_scale(0.0, 4, TargetGeometryReduction::Rmse),
+            0.0
+        );
+    }
 }
