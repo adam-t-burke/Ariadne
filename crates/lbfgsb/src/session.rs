@@ -347,7 +347,6 @@ fn cauchy(s: &Session, x: &[f64], w: &mut Workspace) -> bool {
     let mut bkmin = 0.0;
     let mut f1 = 0.0;
     let mut bounded = true;
-    w.wa[..c2].fill(0.0);
     for i in 0..s.n {
         let neg = -w.evaluation_gradient[i];
         if w.lower[i] == w.upper[i] {
@@ -370,11 +369,6 @@ fn cauchy(s: &Session, x: &[f64], w: &mut Workspace) -> bool {
         }
         w.direction[i] = neg;
         f1 -= neg * neg;
-        for j in 0..s.col {
-            let p = slot(s, j);
-            w.wa[j] += vec_at(&w.y, s.n, p, i) * neg;
-            w.wa[s.col + j] += vec_at(&w.s, s.n, p, i) * neg;
-        }
         let bp = if neg < 0.0 && w.lower[i].is_finite() {
             Some((x[i] - w.lower[i]) / -neg)
         } else if neg > 0.0 && w.upper[i].is_finite() {
@@ -399,7 +393,20 @@ fn cauchy(s: &Session, x: &[f64], w: &mut Workspace) -> bool {
         }
     }
     for j in 0..s.col {
-        w.wa[s.col + j] *= s.theta;
+        let p = slot(s, j);
+        let y = &w.y[p * s.n..(p + 1) * s.n];
+        let history_s = &w.s[p * s.n..(p + 1) * s.n];
+        let mut y_dot = 0.0;
+        let mut s_dot = 0.0;
+        for i in 0..s.n {
+            if w.status[i] == 0 || w.status[i] == -1 {
+                let direction = w.direction[i];
+                y_dot += y[i] * direction;
+                s_dot += history_s[i] * direction;
+            }
+        }
+        w.wa[j] = y_dot;
+        w.wa[s.col + j] = s.theta * s_dot;
     }
     w.cauchy.copy_from_slice(x);
     w.wa[2 * s.m..2 * s.m + c2].fill(0.0);
