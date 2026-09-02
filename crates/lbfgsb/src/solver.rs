@@ -250,6 +250,12 @@ impl Solver {
             #[cfg(feature = "benchmark-instrumentation")]
             {
                 self.instrumentation.direction_nanoseconds += elapsed_nanoseconds(phase_start);
+                let timings = session.benchmark_timings();
+                self.instrumentation.cauchy_nanoseconds = timings.cauchy_nanoseconds;
+                self.instrumentation.freev_nanoseconds = timings.freev_nanoseconds;
+                self.instrumentation.formk_nanoseconds = timings.formk_nanoseconds;
+                self.instrumentation.cmprlb_nanoseconds = timings.cmprlb_nanoseconds;
+                self.instrumentation.subsm_nanoseconds = timings.subsm_nanoseconds;
             }
             if let Err(error) = direction {
                 break Termination::Failed(match error {

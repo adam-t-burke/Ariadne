@@ -11,6 +11,8 @@ use crate::{
     kernel::{History, Kernel},
     Workspace,
 };
+#[cfg(feature = "benchmark-instrumentation")]
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FormkError {
@@ -41,6 +43,18 @@ pub(crate) struct Session {
     skipped_updates: usize,
     history_resets: usize,
     kernel: Kernel,
+    #[cfg(feature = "benchmark-instrumentation")]
+    timings: SessionTimings,
+}
+
+#[cfg(feature = "benchmark-instrumentation")]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SessionTimings {
+    pub(crate) cauchy_nanoseconds: u64,
+    pub(crate) freev_nanoseconds: u64,
+    pub(crate) formk_nanoseconds: u64,
+    pub(crate) cmprlb_nanoseconds: u64,
+    pub(crate) subsm_nanoseconds: u64,
 }
 
 impl Session {
@@ -59,6 +73,8 @@ impl Session {
             skipped_updates: 0,
             history_resets: 0,
             kernel,
+            #[cfg(feature = "benchmark-instrumentation")]
+            timings: SessionTimings::default(),
         }
     }
 
@@ -87,29 +103,79 @@ impl Session {
         self.history_resets
     }
 
+    #[cfg(feature = "benchmark-instrumentation")]
+    pub(crate) fn benchmark_timings(&self) -> SessionTimings {
+        self.timings
+    }
+
     pub(crate) fn direction(&mut self, x: &[f64], w: &mut Workspace) -> Result<(), DirectionError> {
         self.constrained = w
             .lower
             .iter()
             .zip(&w.upper)
             .any(|(&l, &u)| l.is_finite() || u.is_finite());
-        if !cauchy(self, x, w) {
+        #[cfg(feature = "benchmark-instrumentation")]
+        let phase_start = Instant::now();
+        let cauchy_ok = cauchy(self, x, w);
+        #[cfg(feature = "benchmark-instrumentation")]
+        {
+            self.timings.cauchy_nanoseconds += elapsed_nanoseconds(phase_start);
+        }
+        if !cauchy_ok {
             if self.col > 0 {
                 self.skipped_updates += 1;
             }
             self.reset_history();
-            if !cauchy(self, x, w) {
+            #[cfg(feature = "benchmark-instrumentation")]
+            let phase_start = Instant::now();
+            let cauchy_ok = cauchy(self, x, w);
+            #[cfg(feature = "benchmark-instrumentation")]
+            {
+                self.timings.cauchy_nanoseconds += elapsed_nanoseconds(phase_start);
+            }
+            if !cauchy_ok {
                 return Err(DirectionError::Factorization);
             }
         }
+        #[cfg(feature = "benchmark-instrumentation")]
+        let phase_start = Instant::now();
         let (nenter, ileave, work) = freev(self, w);
+        #[cfg(feature = "benchmark-instrumentation")]
+        {
+            self.timings.freev_nanoseconds += elapsed_nanoseconds(phase_start);
+        }
         if self.nfree != 0 && self.col != 0 {
-            if work && formk(self, nenter, ileave, w).is_err() {
+            #[cfg(feature = "benchmark-instrumentation")]
+            let phase_start = Instant::now();
+            let formk_result = if work {
+                formk(self, nenter, ileave, w)
+            } else {
+                Ok(())
+            };
+            #[cfg(feature = "benchmark-instrumentation")]
+            {
+                self.timings.formk_nanoseconds += elapsed_nanoseconds(phase_start);
+            }
+            if formk_result.is_err() {
                 self.skipped_updates += 1;
                 self.reset_history();
                 return self.direction(x, w);
             }
-            if !cmprlb(self, x, w) || !subsm(self, x, w) {
+            #[cfg(feature = "benchmark-instrumentation")]
+            let phase_start = Instant::now();
+            let cmprlb_ok = cmprlb(self, x, w);
+            #[cfg(feature = "benchmark-instrumentation")]
+            {
+                self.timings.cmprlb_nanoseconds += elapsed_nanoseconds(phase_start);
+            }
+            #[cfg(feature = "benchmark-instrumentation")]
+            let phase_start = Instant::now();
+            let subsm_ok = cmprlb_ok && subsm(self, x, w);
+            #[cfg(feature = "benchmark-instrumentation")]
+            {
+                self.timings.subsm_nanoseconds += elapsed_nanoseconds(phase_start);
+            }
+            if !cmprlb_ok || !subsm_ok {
                 self.skipped_updates += 1;
                 self.reset_history();
                 return self.direction(x, w);
@@ -863,6 +929,11 @@ fn heap_pop_min(values: &mut [f64], indices: &mut [usize], initialize: bool) -> 
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(&a, &b)| a * b).sum()
+}
+
+#[cfg(feature = "benchmark-instrumentation")]
+fn elapsed_nanoseconds(start: Instant) -> u64 {
+    start.elapsed().as_nanos().min(u64::MAX as u128) as u64
 }
 
 #[cfg(test)]
