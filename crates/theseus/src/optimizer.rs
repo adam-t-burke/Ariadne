@@ -21,8 +21,8 @@ use argmin::core::{
 use argmin::solver::linesearch::MoreThuenteLineSearch;
 use argmin::solver::quasinewton::LBFGS;
 use ariadne_lbfgsb::{
-    Bounds as SolverBounds, Control, Convergence, Failure, Iteration, Options, SolveAdapter,
-    SolveError, Solver, StopReason, Termination,
+    Backend, Bounds as SolverBounds, Control, Convergence, Failure, Iteration, Options,
+    SolveAdapter, SolveError, Solver, StopReason, Termination,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -954,6 +954,7 @@ fn direct_box_termination_text(report: &ariadne_lbfgsb::Report) -> String {
 fn direct_box_solver_options(problem: &Problem) -> Result<Options, TheseusError> {
     Options::new()
         .with_history_size(10)
+        .and_then(|options| options.with_backend(Backend::Faer))
         .and_then(|options| options.with_max_iterations(problem.solver.max_iterations.max(1)))
         .and_then(|options| {
             options.with_projected_gradient_tolerance(problem.solver.absolute_tolerance.max(0.0))

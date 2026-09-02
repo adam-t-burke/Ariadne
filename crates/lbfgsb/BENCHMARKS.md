@@ -126,6 +126,37 @@ generalized-Cauchy breakpoint traversal, tiny compact factorizations, and
 line-search/objective work. They remain scalar because they are non-contiguous
 or too small for this backend.
 
+## Large-n cache-layout improvements recorded 2026-09-02
+
+The benchmark range now extends to 8,192 variables. Two arithmetic-preserving
+loop transformations stream complete history columns in `cauchy` and `subsm`
+instead of repeatedly loading them with an `n`-element stride. Internal
+projected-gradient and active-variable bookkeeping now share one validated
+pass. Deterministic objective values, checksums, termination, iteration counts,
+and evaluation counts remained unchanged; all reference and allocation tests
+passed.
+
+Each value below is the arithmetic mean of three independent one-second
+process runs with `m=10`. Baselines were recorded from the parent commit before
+the transformations.
+
+```text
+backend        objective       n    baseline us   final us   improvement
+deterministic  rosenbrock   1000       1232.556     992.171       19.5%
+deterministic  rosenbrock   4096       5502.381    4385.175       20.3%
+deterministic  rosenbrock   8192      12618.035    9854.659       21.9%
+deterministic  mixed-bounds 4096       4382.217    3338.271       23.8%
+faer           rosenbrock   1000       1131.143     888.934       21.4%
+faer           rosenbrock   4096       5290.724    3943.184       25.5%
+faer           rosenbrock   8192      11787.944    8937.428       24.2%
+faer           mixed-bounds 4096       4108.152    3008.746       26.8%
+```
+
+An attempted extension of faer into subspace products was rejected because it
+changed the accepted trajectory from 24 to 25 iterations in the backend
+equivalence test. The retained transformations preserve scalar accumulation
+order and improve both backends.
+
 ## Theseus end-to-end context
 
 The existing ignored release benchmark was run with:
@@ -141,10 +172,14 @@ runs) and 5.54 s/run for the 32x32 grid (1,984 edges, 5 runs).
 This existing benchmark uses `DirectSoftBounds`, so it measures Theseus's
 argmin path and is not a valid scalar-versus-faer comparison for
 `ariadne-lbfgsb`. The previous backend comparison has therefore been removed.
-The standalone matrix above is the current evidence for selecting faer;
-`crates/theseus` continues to use the deterministic scalar backend until a
-dedicated `DirectBoxBounds` end-to-end benchmark demonstrates a reproducible
-application-level benefit.
+The standalone matrix above remains useful solver-level evidence, but backend
+selection in Theseus is based on a dedicated DirectBoxBounds measurement.
+
+A dedicated 48x48 DirectBoxBounds benchmark (4,512 edges) now provides that
+measurement. Three scalar process runs averaged 176.690 ms/run. Five confirming
+faer runs averaged 163.657 ms/run, a 7.4% end-to-end improvement. Theseus
+therefore compiles the existing `faer-backend` feature and explicitly selects
+faer for DirectBoxBounds; `Backend::Auto` remains deterministic.
 
 For coarse phase attribution, enable `benchmark-instrumentation` and inspect
 `Solver::benchmark_timings()`. It reports total solve time, measured callback

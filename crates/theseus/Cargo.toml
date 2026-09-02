@@ -17,4 +17,4 @@ rayon = "1.11"
 argmin = "0.10"
 argmin-math = { version = "0.4", features = ["vec"] }
 nurbsbook = { path = "../nurbsbook" }
-ariadne-lbfgsb = { path = "../lbfgsb" }
+ariadne-lbfgsb = { path = "../lbfgsb", features = ["faer-backend"] }
