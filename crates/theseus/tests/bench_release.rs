@@ -127,6 +127,7 @@ fn make_grid_problem(n: usize) -> Problem {
         weight: 1.0,
         node_indices: target_nodes,
         target,
+        reduction: TargetGeometryReduction::Sse,
     })];
 
     let bounds = Bounds {

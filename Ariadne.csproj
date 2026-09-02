@@ -21,6 +21,11 @@
   <ItemGroup>
     <None Include="Theseus\theseus.dll" Link="theseus.dll" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Theseus\libtheseus.dylib" Link="libtheseus.dylib" CopyToOutputDirectory="PreserveNewest" Condition="Exists('Theseus\libtheseus.dylib')" />
+    <None Update="LICENSE.txt" Link="Ariadne-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="crates\lbfgsb\LICENSE" Link="ariadne-lbfgsb-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="crates\lbfgsb\UPSTREAM_LICENSE.txt" Link="ariadne-lbfgsb-UPSTREAM_LICENSE.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="crates\lbfgsb\THIRD_PARTY_NOTICES.md" Link="ariadne-lbfgsb-THIRD_PARTY_NOTICES.md" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Theseus\NATIVE_ARTIFACTS.md" Link="NATIVE_ARTIFACTS.md" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   
   <ItemGroup>

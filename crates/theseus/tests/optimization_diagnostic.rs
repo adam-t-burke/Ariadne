@@ -143,6 +143,7 @@ fn make_target_xyz(free_idx: &[usize], n: usize, z_sag: f64) -> TargetXYZ {
         weight: 1.0,
         node_indices: free_idx.to_vec(),
         target: Array2::from_shape_vec((nn_free, 3), target_data).unwrap(),
+        reduction: TargetGeometryReduction::Sse,
     }
 }
 
@@ -539,6 +540,7 @@ fn diagnostic_arch_network() {
         weight: 1.0,
         node_indices: free_idx.clone(),
         target,
+        reduction: TargetGeometryReduction::Sse,
     })];
 
     let problem = Problem {

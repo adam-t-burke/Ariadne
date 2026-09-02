@@ -14,6 +14,33 @@ internal sealed record QTreeMappingResult(
     public bool Success => Error is null && Values is not null;
 }
 
+public sealed record EdgeValueBranch(string Path, IReadOnlyList<double> Values);
+
+public sealed record EdgeValueTree(IReadOnlyList<EdgeValueBranch> Branches)
+{
+    public static EdgeValueTree Broadcast(double value) =>
+        new([new EdgeValueBranch("{0}", [value])]);
+
+    public IEnumerable<double> FlattenedValues =>
+        Branches.SelectMany(branch => branch.Values);
+
+    internal static EdgeValueTree FromGh(GH_Structure<GH_Number> tree)
+    {
+        ArgumentNullException.ThrowIfNull(tree);
+        var branches = new List<EdgeValueBranch>(tree.PathCount);
+        for (int branchIndex = 0; branchIndex < tree.PathCount; branchIndex++)
+        {
+            GH_Path path = tree.Paths[branchIndex];
+            var values = tree.get_Branch(path)
+                .OfType<GH_Number>()
+                .Select(number => number.Value)
+                .ToArray();
+            branches.Add(new EdgeValueBranch(path.ToString(), values));
+        }
+        return new EdgeValueTree(branches);
+    }
+}
+
 internal static class QTreeMapper
 {
     public static QTreeMappingResult Map(
@@ -21,35 +48,29 @@ internal static class QTreeMapper
         IReadOnlyList<GH_Path> edgePaths)
     {
         ArgumentNullException.ThrowIfNull(qTree);
+        return Map(EdgeValueTree.FromGh(qTree), edgePaths, "q");
+    }
+
+    public static QTreeMappingResult Map(
+        EdgeValueTree valueTree,
+        IReadOnlyList<GH_Path> edgePaths,
+        string label)
+    {
+        ArgumentNullException.ThrowIfNull(valueTree);
         ArgumentNullException.ThrowIfNull(edgePaths);
+        ArgumentException.ThrowIfNullOrWhiteSpace(label);
 
         int edgeCount = edgePaths.Count;
         if (edgeCount == 0)
-            return Failure("The network has no edges, so force densities cannot be assigned.");
+            return Failure($"The network has no edges, so {label} cannot be assigned.");
 
-        var qBranches = new List<QBranch>(qTree.PathCount);
-        int totalQCount = 0;
-        for (int branchIndex = 0; branchIndex < qTree.PathCount; branchIndex++)
+        int totalValueCount = valueTree.Branches.Sum(branch => branch.Values.Count);
+        if (totalValueCount == 0)
+            return Failure($"{label} cannot be empty.");
+
+        if (totalValueCount == 1)
         {
-            GH_Path path = qTree.Paths[branchIndex];
-            var branch = qTree.get_Branch(path);
-            var values = new List<double>(branch.Count);
-            foreach (var item in branch)
-            {
-                if (item is GH_Number number)
-                    values.Add(number.Value);
-            }
-
-            totalQCount += values.Count;
-            qBranches.Add(new QBranch(path.ToString(), values));
-        }
-
-        if (totalQCount == 0)
-            return Failure("Initial force densities cannot be empty.");
-
-        if (totalQCount == 1)
-        {
-            double value = qBranches.SelectMany(branch => branch.Values).Single();
+            double value = valueTree.FlattenedValues.Single();
             return Success(Enumerable.Repeat(value, edgeCount).ToArray());
         }
 
@@ -65,43 +86,43 @@ internal static class QTreeMapper
             indices.Add(edgeIndex);
         }
 
-        if (qBranches.Count == 1 && totalQCount == edgeCount)
+        if (valueTree.Branches.Count == 1 && totalValueCount == edgeCount)
         {
             string? warning = edgeIndicesByPath.Count > 1
-                ? $"q has {edgeCount} values matching the total edge count; values were applied 1:1 " +
-                  "in flattened edge order, not per edge-tree branch. Graft/match q to the edge " +
+                ? $"{label} has {edgeCount} values matching the total edge count; values were applied 1:1 " +
+                  $"in flattened edge order, not per edge-tree branch. Graft/match {label} to the edge " +
                   "tree to assign per branch."
                 : null;
-            return Success(qBranches[0].Values.ToArray(), warning);
+            return Success(valueTree.Branches[0].Values.ToArray(), warning);
         }
 
-        var qByPath = new Dictionary<string, IReadOnlyList<double>>(StringComparer.Ordinal);
-        foreach (var qBranch in qBranches)
+        var valuesByPath = new Dictionary<string, IReadOnlyList<double>>(StringComparer.Ordinal);
+        foreach (var branch in valueTree.Branches)
         {
-            if (!qByPath.TryAdd(qBranch.Path, qBranch.Values))
-                return Failure($"The q tree contains duplicate path {qBranch.Path}.");
+            if (!valuesByPath.TryAdd(branch.Path, branch.Values))
+                return Failure($"The {label} tree contains duplicate path {branch.Path}.");
         }
 
         foreach (var (path, edgeIndices) in edgeIndicesByPath)
         {
-            if (!qByPath.ContainsKey(path))
+            if (!valuesByPath.ContainsKey(path))
             {
                 return Failure(
-                    $"No q values were supplied for edge branch {path}, which contains " +
-                    $"{edgeIndices.Count} edge(s). Supply q values for every edge branch.");
+                    $"No {label} values were supplied for edge branch {path}, which contains " +
+                    $"{edgeIndices.Count} edge(s). Supply {label} values for every edge branch.");
             }
         }
 
-        foreach (var (path, values) in qByPath)
+        foreach (var (path, values) in valuesByPath)
         {
             if (values.Count > 0 && !edgeIndicesByPath.ContainsKey(path))
-                return Failure($"q branch {path} does not match any edge branch.");
+                return Failure($"{label} branch {path} does not match any edge branch.");
         }
 
         var result = new double[edgeCount];
         foreach (var (path, edgeIndices) in edgeIndicesByPath)
         {
-            IReadOnlyList<double> values = qByPath[path];
+            IReadOnlyList<double> values = valuesByPath[path];
             if (values.Count == 1)
             {
                 foreach (int edgeIndex in edgeIndices)
@@ -112,7 +133,7 @@ internal static class QTreeMapper
             if (values.Count != edgeIndices.Count)
             {
                 return Failure(
-                    $"q at {path} has {values.Count} value(s), but that branch has " +
+                    $"{label} at {path} has {values.Count} value(s), but that branch has " +
                     $"{edgeIndices.Count} edge(s). Supply 1 value to broadcast or " +
                     $"{edgeIndices.Count} values to assign per edge.");
             }
@@ -131,6 +152,4 @@ internal static class QTreeMapper
 
     private static QTreeMappingResult Failure(string error) =>
         new(null, error, null);
-
-    private sealed record QBranch(string Path, IReadOnlyList<double> Values);
 }

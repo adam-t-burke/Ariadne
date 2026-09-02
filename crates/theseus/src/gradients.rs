@@ -103,7 +103,7 @@ fn dpn_sw_dx_transpose_matvec(
 
 /// Apply `(dpn_pressure/dx)^T * v` for pressure loads, accumulating into `out`.
 /// Dispatches on the pressure mode (Normal / Hydrostatic / Directional).
-fn dpn_pressure_dx_transpose_matvec(
+pub(crate) fn dpn_pressure_dx_transpose_matvec(
     cache: &FdmCache,
     pressure: &PressureParams,
     v: &Array2<f64>,
@@ -180,7 +180,9 @@ fn dpn_pressure_normal_transpose(
             }
         }
 
-        newell_skew_transpose(cache, face, scale, &v_sum, out);
+        // A cross-product matrix is skew-symmetric, so (dn/dx)^T
+        // carries the opposite sign from the forward Newell derivative.
+        newell_skew_transpose(cache, face, -scale, &v_sum, out);
     }
 }
 
@@ -230,7 +232,7 @@ fn dpn_pressure_hydrostatic_transpose(
                 }
             }
         }
-        newell_skew_transpose(cache, face, scale1, &v_sum, out);
+        newell_skew_transpose(cache, face, -scale1, &v_sum, out);
 
         // Term 2: dp_f/dv_j * n_f / nv
         // dp_f/dv_j = rho * g * (-1/nv) * up_hat  for each vertex j in face
@@ -309,14 +311,15 @@ fn dpn_pressure_directional_transpose(
                     a[0] * direction[1] - a[1] * direction[0],
                 ];
                 for d in 0..3 {
-                    out[[jf, d]] += 0.5 * scale * v_dot_dir * cross[d];
+                    out[[jf, d]] -= 0.5 * scale * v_dot_dir * cross[d];
                 }
             }
         }
     }
 }
 
-/// Shared helper: apply the Newell skew-symmetric transpose contribution.
+/// Shared helper: apply a scaled Newell skew contribution.
+/// Callers supply the transpose sign explicitly.
 /// For each vertex v_j in the face:
 ///   out[v_j] += scale * (1/2) * (v_{j-1} - v_{j+1}) × v_sum
 fn newell_skew_transpose(
@@ -380,14 +383,35 @@ fn solve_modified_adjoint(
             dpn_pressure_dx_transpose_matvec(cache, pr, &cache.lambda, &mut correction);
         }
 
-        // Check convergence: ||correction|| / ||grad_x|| < tol
-        let corr_norm_sq: f64 = correction.iter().map(|v| v * v).sum();
+        // Check the actual modified-adjoint residual:
+        //   A^T lambda - grad_x - (dpn/dx)^T lambda = 0.
+        // The correction itself generally does not approach zero at the
+        // solution, so using ||correction|| as a stop test rejects valid
+        // follower-load adjoints.
+        let mut adjoint_residual = Array2::<f64>::zeros((n, 3));
+        for col in 0..cache.a_matrix.ncols {
+            let start = cache.a_matrix.col_ptrs[col] as usize;
+            let end = cache.a_matrix.col_ptrs[col + 1] as usize;
+            for nz in start..end {
+                let row = cache.a_matrix.row_indices[nz] as usize;
+                let value = cache.a_matrix.values[nz];
+                for d in 0..3 {
+                    adjoint_residual[[row, d]] += value * cache.lambda[[col, d]];
+                }
+            }
+        }
+        for i in 0..n {
+            for d in 0..3 {
+                adjoint_residual[[i, d]] -= cache.grad_x[[i, d]] + correction[[i, d]];
+            }
+        }
+        let residual_norm_sq: f64 = adjoint_residual.iter().map(|v| v * v).sum();
         let grad_norm_sq: f64 = cache.grad_x.iter().map(|v| v * v).sum();
-        if grad_norm_sq > 0.0 && corr_norm_sq / grad_norm_sq < tolerance * tolerance {
+        if grad_norm_sq > 0.0 && residual_norm_sq / grad_norm_sq < tolerance * tolerance {
             converged = true;
             break;
         }
-        if grad_norm_sq == 0.0 && corr_norm_sq == 0.0 {
+        if grad_norm_sq == 0.0 && residual_norm_sq == 0.0 {
             converged = true;
             break;
         }

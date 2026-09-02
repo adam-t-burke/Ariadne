@@ -3,6 +3,7 @@ namespace Ariadne.Solver;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using Ariadne.FDM;
 using Ariadne.Graphs;
 using Ariadne.Utilities;
@@ -15,17 +16,6 @@ using Theseus.Interop;
 /// </summary>
 public static class TheseusSolverService
 {
-    private static readonly object ActiveSolverLock = new();
-    private static TheseusSolver? ActiveSolver;
-
-    /// <summary>
-    /// Requests cancellation of the solver currently running on a background thread.
-    /// </summary>
-    public static void RequestActiveCancel()
-    {
-        lock (ActiveSolverLock)
-            ActiveSolver?.RequestCancel();
-    }
     /// <summary>
     /// Solve an FDM network with optimization.
     /// </summary>
@@ -43,6 +33,19 @@ public static class TheseusSolverService
         SolverOptions? options = null,
         Func<int, double, double[], double[], bool>? progressCallback = null)
     {
+        return Solve(network, inputs, options, progressCallback, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Solve an FDM network with optimization and per-solve cancellation.
+    /// </summary>
+    public static SolveResult Solve(
+        FDM_Network network,
+        SolverInputs inputs,
+        SolverOptions? options,
+        Func<int, double, double[], double[], bool>? progressCallback,
+        CancellationToken cancellationToken)
+    {
         ValidateCommon(network, inputs);
         ValidateOptimizationBounds(inputs);
         options ??= new SolverOptions();
@@ -56,15 +59,12 @@ public static class TheseusSolverService
             data.FreeIndices, data.FixedIndices,
             data.Loads, data.FixedPositions,
             data.QInit, data.LowerBounds, data.UpperBounds,
-            data.VariableNodeIndices, data.VariableSupportKinds, data.SphereRadii,
+            data.VariableNodeIndices, data.VariableSupportKinds, data.VariableSupportLambdas, data.SphereRadii,
             data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd,
             data.NurbsOffsets, data.NurbsLengths, data.NurbsData);
 
-        lock (ActiveSolverLock)
-            ActiveSolver = solver;
+        cancellationToken.ThrowIfCancellationRequested();
 
-        try
-        {
         foreach (var objective in inputs.Objectives)
         {
             if (!objective.IsValid)
@@ -82,25 +82,34 @@ public static class TheseusSolverService
             relTol: options.RelTol,
             barrierWeight: options.BarrierWeight,
             barrierSharpness: options.BarrierSharpness,
-            anchorSaturationLambda: options.AnchorSaturationLambda);
+            anchorSaturationLambda: 1.0);
         solver.SetQParameterizationMode((int)ResolveQParameterizationMode(
             inputs.QParameterizationMode, data.LowerBounds, data.UpperBounds));
+
+        if (cancellationToken.CanBeCanceled)
+        {
+            var callback = progressCallback;
+            progressCallback = (iteration, loss, xyz, q) =>
+                !cancellationToken.IsCancellationRequested &&
+                (callback?.Invoke(iteration, loss, xyz, q) ?? true);
+        }
 
         if (progressCallback != null)
             solver.SetProgressCallback(progressCallback, options.ReportFrequency, options.CopyProgressState);
 
-        var result = solver.Optimize();
+        cancellationToken.ThrowIfCancellationRequested();
+        SolverResult result;
+        try
+        {
+            result = solver.Optimize(cancellationToken);
+        }
+        catch (TheseusException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
+        cancellationToken.ThrowIfCancellationRequested();
 
         return BuildResult(network, result, context);
-        }
-        finally
-        {
-            lock (ActiveSolverLock)
-            {
-                if (ActiveSolver == solver)
-                    ActiveSolver = null;
-            }
-        }
     }
 
     /// <summary>
@@ -110,7 +119,20 @@ public static class TheseusSolverService
     /// </summary>
     public static SolveResult SolveForward(FDM_Network network, SolverInputs inputs)
     {
+        return SolveForward(network, inputs, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Solve an FDM network without optimization with per-solve cancellation.
+    /// Cancellation is cooperative at native forward-solve boundaries.
+    /// </summary>
+    public static SolveResult SolveForward(
+        FDM_Network network,
+        SolverInputs inputs,
+        CancellationToken cancellationToken)
+    {
         ValidateCommon(network, inputs);
+        cancellationToken.ThrowIfCancellationRequested();
 
         var context = BuildContext(network);
         var data = BuildSolverData(network, inputs, context);
@@ -121,7 +143,7 @@ public static class TheseusSolverService
             data.FreeIndices, data.FixedIndices,
             data.Loads, data.FixedPositions,
             data.QInit, data.LowerBounds, data.UpperBounds,
-            data.VariableNodeIndices, data.VariableSupportKinds, data.SphereRadii,
+            data.VariableNodeIndices, data.VariableSupportKinds, data.VariableSupportLambdas, data.SphereRadii,
             data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd,
             data.NurbsOffsets, data.NurbsLengths, data.NurbsData);
         solver.SetQParameterizationMode((int)ResolveQParameterizationMode(
@@ -129,7 +151,8 @@ public static class TheseusSolverService
 
         ApplyLoadConfig(solver, inputs, context);
 
-        var result = solver.SolveForward();
+        cancellationToken.ThrowIfCancellationRequested();
+        var result = solver.SolveForward(cancellationToken);
 
         return BuildResult(network, result, context);
     }
@@ -162,7 +185,7 @@ public static class TheseusSolverService
             data.FreeIndices, data.FixedIndices,
             data.Loads, data.FixedPositions,
             data.QInit, data.LowerBounds, data.UpperBounds,
-            data.VariableNodeIndices, data.VariableSupportKinds, data.SphereRadii,
+            data.VariableNodeIndices, data.VariableSupportKinds, data.VariableSupportLambdas, data.SphereRadii,
             data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd,
             data.NurbsOffsets, data.NurbsLengths, data.NurbsData);
         solver.SetQParameterizationMode((int)ResolveQParameterizationMode(
@@ -197,7 +220,7 @@ public static class TheseusSolverService
             data.FreeIndices, data.FixedIndices,
             data.Loads, data.FixedPositions,
             data.QInit, data.LowerBounds, data.UpperBounds,
-            data.VariableNodeIndices, data.VariableSupportKinds, data.SphereRadii,
+            data.VariableNodeIndices, data.VariableSupportKinds, data.VariableSupportLambdas, data.SphereRadii,
             data.RollerEnabled, data.RollerLower, data.RollerUpper, data.RailStart, data.RailEnd,
             data.NurbsOffsets, data.NurbsLengths, data.NurbsData);
         solver.SetQParameterizationMode((int)ResolveQParameterizationMode(
@@ -405,6 +428,7 @@ public static class TheseusSolverService
             upperBounds,
             supportData.VariableNodeIndices,
             supportData.VariableSupportKinds,
+            supportData.VariableSupportLambdas,
             supportData.SphereRadii,
             supportData.RollerEnabled,
             supportData.RollerLower,
@@ -419,6 +443,7 @@ public static class TheseusSolverService
     private readonly record struct VariableSupportData(
         int[] VariableNodeIndices,
         int[] VariableSupportKinds,
+        double[] VariableSupportLambdas,
         double[] SphereRadii,
         byte[] RollerEnabled,
         double[] RollerLower,
@@ -447,11 +472,13 @@ public static class TheseusSolverService
                 [],
                 [],
                 [],
+                [],
                 []);
         }
 
         var nodeIndices = new List<int>();
         var kinds = new List<int>();
+        var lambdas = new List<double>();
         var sphereRadii = new List<double>();
         var rollerEnabled = new List<byte>();
         var rollerLower = new List<double>();
@@ -477,8 +504,11 @@ public static class TheseusSolverService
                     throw new ArgumentException("Variable supports can only target fixed nodes.");
                 if (!seen.Add(nodeIdx))
                     throw new ArgumentException($"Node index {nodeIdx} has multiple variable support definitions.");
+                if (!double.IsFinite(support.SaturationLambda) || support.SaturationLambda <= 0.0)
+                    throw new ArgumentException("Variable support saturation lambda must be positive and finite.");
 
                 nodeIndices.Add(nodeIdx);
+                lambdas.Add(support.SaturationLambda);
 
                 switch (support)
                 {
@@ -586,6 +616,7 @@ public static class TheseusSolverService
         return new VariableSupportData(
             [.. nodeIndices],
             [.. kinds],
+            [.. lambdas],
             [.. sphereRadii],
             [.. rollerEnabled],
             [.. rollerLower],

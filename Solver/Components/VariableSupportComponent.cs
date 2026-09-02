@@ -41,7 +41,11 @@ public class VariableSupportComponent : GH_Component
     {
         pManager.AddGenericParameter("Nodes", "Nodes", "Fixed nodes to make variable", GH_ParamAccess.list);
         pManager.AddNumberParameter("Radius", "R", "Relative radius from initial node position", GH_ParamAccess.item, 1.0);
+        pManager.AddNumberParameter("Saturation Lambda", "Lam",
+            "Positive dimensionless scale for this support's optimizer coordinate map",
+            GH_ParamAccess.item, 1.0);
         pManager[1].Optional = true;
+        pManager[2].Optional = true;
     }
 
     protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -59,27 +63,36 @@ public class VariableSupportComponent : GH_Component
             return;
         }
 
+        double saturationLambda = 1.0;
+        DA.GetData(Params.Input.Count - 1, ref saturationLambda);
+        if (!double.IsFinite(saturationLambda) || saturationLambda <= 0.0)
+        {
+            AddRuntimeMessage(GH_RuntimeMessageLevel.Error,
+                "Saturation Lambda must be a positive finite number.");
+            return;
+        }
+
         switch (_mode)
         {
             case VariableSupportMode.Sphere:
-                SolveSphere(DA, nodes);
+                SolveSphere(DA, nodes, saturationLambda);
                 break;
             case VariableSupportMode.Roller:
-                SolveRoller(DA, nodes);
+                SolveRoller(DA, nodes, saturationLambda);
                 break;
             case VariableSupportMode.Rail:
-                SolveRail(DA, nodes);
+                SolveRail(DA, nodes, saturationLambda);
                 break;
             case VariableSupportMode.NurbsCurve:
-                SolveCurve(DA, nodes);
+                SolveCurve(DA, nodes, saturationLambda);
                 break;
             case VariableSupportMode.NurbsSurface:
-                SolveSurface(DA, nodes);
+                SolveSurface(DA, nodes, saturationLambda);
                 break;
         }
     }
 
-    private void SolveSphere(IGH_DataAccess DA, List<Node> nodes)
+    private void SolveSphere(IGH_DataAccess DA, List<Node> nodes, double saturationLambda)
     {
         double radius = 1.0;
         DA.GetData(1, ref radius);
@@ -88,10 +101,15 @@ public class VariableSupportComponent : GH_Component
             AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Radius must be a positive finite number.");
             return;
         }
-        DA.SetData(0, new SphereVariableSupport { Nodes = nodes, Radius = radius });
+        DA.SetData(0, new SphereVariableSupport
+        {
+            Nodes = nodes,
+            Radius = radius,
+            SaturationLambda = saturationLambda
+        });
     }
 
-    private void SolveRoller(IGH_DataAccess DA, List<Node> nodes)
+    private void SolveRoller(IGH_DataAccess DA, List<Node> nodes, double saturationLambda)
     {
         bool freeX = true, freeY = true, freeZ = true;
         Interval dx = new(-1.0, 1.0), dy = new(-1.0, 1.0), dz = new(-1.0, 1.0);
@@ -121,11 +139,12 @@ public class VariableSupportComponent : GH_Component
             FreeZ = freeZ,
             DomainX = dx,
             DomainY = dy,
-            DomainZ = dz
+            DomainZ = dz,
+            SaturationLambda = saturationLambda
         });
     }
 
-    private void SolveRail(IGH_DataAccess DA, List<Node> nodes)
+    private void SolveRail(IGH_DataAccess DA, List<Node> nodes, double saturationLambda)
     {
         Line rail = default;
         if (!DA.GetData(1, ref rail)) return;
@@ -134,10 +153,15 @@ public class VariableSupportComponent : GH_Component
             AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "Rail must be a valid non-degenerate line segment.");
             return;
         }
-        DA.SetData(0, new RailVariableSupport { Nodes = nodes, Rail = rail });
+        DA.SetData(0, new RailVariableSupport
+        {
+            Nodes = nodes,
+            Rail = rail,
+            SaturationLambda = saturationLambda
+        });
     }
 
-    private void SolveCurve(IGH_DataAccess DA, List<Node> nodes)
+    private void SolveCurve(IGH_DataAccess DA, List<Node> nodes, double saturationLambda)
     {
         Curve? curve = null;
         Interval domain = Interval.Unset;
@@ -157,11 +181,12 @@ public class VariableSupportComponent : GH_Component
         {
             Nodes = nodes,
             Curve = curve.DuplicateCurve(),
-            Domain = hasDomain ? domain : null
+            Domain = hasDomain ? domain : null,
+            SaturationLambda = saturationLambda
         });
     }
 
-    private void SolveSurface(IGH_DataAccess DA, List<Node> nodes)
+    private void SolveSurface(IGH_DataAccess DA, List<Node> nodes, double saturationLambda)
     {
         Surface? surface = null;
         Interval domainU = Interval.Unset;
@@ -184,7 +209,8 @@ public class VariableSupportComponent : GH_Component
             Nodes = nodes,
             Surface = surface.ToNurbsSurface(),
             DomainU = hasDomainU ? domainU : null,
-            DomainV = hasDomainV ? domainV : null
+            DomainV = hasDomainV ? domainV : null,
+            SaturationLambda = saturationLambda
         });
     }
 
@@ -271,6 +297,11 @@ public class VariableSupportComponent : GH_Component
                 yield return IntervalParam("V Domain", "Dv", "Optional surface V parameter domain", true);
                 break;
         }
+        yield return NumberParam(
+            "Saturation Lambda",
+            "Lam",
+            "Positive dimensionless scale for this support's optimizer coordinate map",
+            true);
     }
 
     private static Param_Number NumberParam(string name, string nickname, string description, bool optional) => new()

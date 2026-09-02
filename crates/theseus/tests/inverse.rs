@@ -1,0 +1,305 @@
+//! Integration tests for the experimental pseudoinverse and NNLS solvers.
+
+use ndarray::Array2;
+use theseus::fdm;
+use theseus::inverse::{solve_nnls, solve_pseudoinverse_dispatch};
+use theseus::sparse::SparseColMatOwned;
+use theseus::types::{AnchorInfo, Bounds, FdmCache, NetworkTopology, Problem, SolverOptions};
+
+fn build_incidence(edges: &[(usize, usize)], num_nodes: usize) -> SparseColMatOwned {
+    let mut rows = Vec::with_capacity(edges.len() * 2);
+    let mut cols = Vec::with_capacity(edges.len() * 2);
+    let mut values = Vec::with_capacity(edges.len() * 2);
+    for (edge, &(start, end)) in edges.iter().enumerate() {
+        rows.extend([edge, edge]);
+        cols.extend([start, end]);
+        values.extend([-1.0, 1.0]);
+    }
+    SparseColMatOwned::from_coo(edges.len(), num_nodes, &rows, &cols, &values).unwrap()
+}
+
+fn make_problem(
+    edges: &[(usize, usize)],
+    num_nodes: usize,
+    free_indices: Vec<usize>,
+    fixed_indices: Vec<usize>,
+    loads: Array2<f64>,
+    fixed_positions: Array2<f64>,
+) -> Problem {
+    let incidence = build_incidence(edges, num_nodes);
+    let free_incidence = incidence.extract_columns(&free_indices);
+    let fixed_incidence = incidence.extract_columns(&fixed_indices);
+    let anchors = AnchorInfo::all_fixed(fixed_positions.clone());
+
+    Problem {
+        topology: NetworkTopology {
+            incidence,
+            free_incidence,
+            fixed_incidence,
+            num_edges: edges.len(),
+            num_nodes,
+            free_node_indices: free_indices,
+            fixed_node_indices: fixed_indices,
+        },
+        free_node_loads: loads,
+        fixed_node_positions: fixed_positions,
+        anchors,
+        objectives: Vec::new(),
+        bounds: Bounds::default_for(edges.len()),
+        solver: SolverOptions::default(),
+        self_weight: None,
+        pressure: None,
+    }
+}
+
+fn triangle_problem() -> (Problem, Vec<(usize, usize)>) {
+    let edges = vec![(0, 1), (1, 2)];
+    let problem = make_problem(
+        &edges,
+        3,
+        vec![1],
+        vec![0, 2],
+        Array2::from_shape_vec((1, 3), vec![0.0, 0.0, -1.0]).unwrap(),
+        Array2::from_shape_vec((2, 3), vec![0.0, 0.0, 0.0, 2.0, 0.0, 0.0]).unwrap(),
+    );
+    (problem, edges)
+}
+
+fn arch_problem(selective_load: bool) -> (Problem, Vec<(usize, usize)>) {
+    let edges = vec![
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 4),
+        (4, 5),
+        (5, 6),
+        (1, 5),
+        (2, 4),
+    ];
+    let mut load_values = vec![0.0; 15];
+    if selective_load {
+        load_values[2 * 3 + 2] = -2.0;
+    } else {
+        for i in 0..5 {
+            load_values[i * 3 + 2] = -1.0;
+        }
+    }
+    let problem = make_problem(
+        &edges,
+        7,
+        vec![1, 2, 3, 4, 5],
+        vec![0, 6],
+        Array2::from_shape_vec((5, 3), load_values).unwrap(),
+        Array2::from_shape_vec((2, 3), vec![0.0, 0.0, 0.0, 6.0, 0.0, 0.0]).unwrap(),
+    );
+    (problem, edges)
+}
+
+fn forward_target(problem: &Problem, q: &[f64]) -> (Array2<f64>, Vec<f64>) {
+    let mut cache = FdmCache::new(problem).unwrap();
+    fdm::solve_fdm(&mut cache, q, problem, &Array2::zeros((0, 3)), 1e-12).unwrap();
+    let target = Array2::from_shape_fn((problem.topology.free_node_indices.len(), 3), |(i, d)| {
+        cache.nf[[problem.topology.free_node_indices[i], d]]
+    });
+    (target, cache.member_lengths)
+}
+
+fn equilibrium_residual(
+    problem: &Problem,
+    edges: &[(usize, usize)],
+    target: &Array2<f64>,
+    q: &[f64],
+) -> f64 {
+    let mut positions = Array2::<f64>::zeros((problem.topology.num_nodes, 3));
+    for (i, &node) in problem.topology.free_node_indices.iter().enumerate() {
+        for d in 0..3 {
+            positions[[node, d]] = target[[i, d]];
+        }
+    }
+    for (i, &node) in problem.topology.fixed_node_indices.iter().enumerate() {
+        for d in 0..3 {
+            positions[[node, d]] = problem.fixed_node_positions[[i, d]];
+        }
+    }
+
+    let mut residual_sq = 0.0;
+    for (free_row, &node) in problem.topology.free_node_indices.iter().enumerate() {
+        for d in 0..3 {
+            let mut equilibrium = -problem.free_node_loads[[free_row, d]];
+            for (edge, &(start, end)) in edges.iter().enumerate() {
+                if node == start {
+                    equilibrium -= (positions[[end, d]] - positions[[start, d]]) * q[edge];
+                } else if node == end {
+                    equilibrium += (positions[[end, d]] - positions[[start, d]]) * q[edge];
+                }
+            }
+            residual_sq += equilibrium * equilibrium;
+        }
+    }
+    residual_sq.sqrt()
+}
+
+fn fixed_reaction_norm(
+    problem: &Problem,
+    edges: &[(usize, usize)],
+    target: &Array2<f64>,
+    q: &[f64],
+) -> f64 {
+    let mut positions = Array2::<f64>::zeros((problem.topology.num_nodes, 3));
+    for (i, &node) in problem.topology.free_node_indices.iter().enumerate() {
+        for d in 0..3 {
+            positions[[node, d]] = target[[i, d]];
+        }
+    }
+    for (i, &node) in problem.topology.fixed_node_indices.iter().enumerate() {
+        for d in 0..3 {
+            positions[[node, d]] = problem.fixed_node_positions[[i, d]];
+        }
+    }
+
+    let mut reaction_sq = 0.0;
+    for &node in &problem.topology.fixed_node_indices {
+        for d in 0..3 {
+            let mut reaction = 0.0;
+            for (edge, &(start, end)) in edges.iter().enumerate() {
+                if node == start {
+                    reaction -= (positions[[end, d]] - positions[[start, d]]) * q[edge];
+                } else if node == end {
+                    reaction += (positions[[end, d]] - positions[[start, d]]) * q[edge];
+                }
+            }
+            reaction_sq += reaction * reaction;
+        }
+    }
+    reaction_sq.sqrt()
+}
+
+fn pinv(problem: &Problem, target: &Array2<f64>, use_l2: bool, augmented: bool) -> Vec<f64> {
+    solve_pseudoinverse_dispatch(
+        problem, target, 1e-10, use_l2, 30, augmented, false, false, false, true,
+    )
+    .unwrap()
+}
+
+#[test]
+fn round_trip_recovers_positive_force_densities_with_both_solvers() {
+    let (problem, edges) = triangle_problem();
+    let expected = vec![2.0, 3.0];
+    let (target, _) = forward_target(&problem, &expected);
+
+    let pinv_q = pinv(&problem, &target, true, false);
+    let nnls = solve_nnls(&problem, &target, 2_000, 1e-10).unwrap();
+
+    for (actual, expected) in pinv_q.iter().zip(&expected) {
+        assert!((actual - expected).abs() < 1e-7, "pinv q={pinv_q:?}");
+    }
+    for (actual, expected) in nnls.q.iter().zip(&expected) {
+        assert!((actual - expected).abs() < 1e-7, "NNLS q={:?}", nnls.q);
+    }
+    assert!(nnls.converged);
+    assert!((1..=2_000).contains(&nnls.iterations));
+    assert!(equilibrium_residual(&problem, &edges, &target, &nnls.q) < 1e-8);
+}
+
+#[test]
+fn selective_node_loads_are_supported_by_both_solvers() {
+    let (problem, _) = arch_problem(true);
+    let (target, _) = forward_target(&problem, &[2.0; 8]);
+
+    let pinv_q = pinv(&problem, &target, true, false);
+    let nnls = solve_nnls(&problem, &target, 4_000, 1e-8).unwrap();
+
+    assert_eq!(pinv_q.len(), 8);
+    assert!(pinv_q.iter().all(|q| q.is_finite()));
+    assert_eq!(nnls.q.len(), 8);
+    assert!(nnls.q.iter().all(|q| q.is_finite() && *q >= 0.0));
+}
+
+#[test]
+fn pseudoinverse_normal_and_augmented_l2_agree() {
+    let (problem, _) = arch_problem(false);
+    let (target, _) = forward_target(&problem, &[1.5; 8]);
+
+    let normal = pinv(&problem, &target, true, false);
+    let augmented = pinv(&problem, &target, true, true);
+
+    for (left, right) in normal.iter().zip(&augmented) {
+        assert!((left - right).abs() < 1e-5, "{left} != {right}");
+    }
+}
+
+#[test]
+fn pseudoinverse_l1_and_solve_for_force_return_finite_values() {
+    let (problem, _) = arch_problem(false);
+    let (target, lengths) = forward_target(&problem, &[1.0; 8]);
+
+    let l1 = pinv(&problem, &target, false, false);
+    let solve_for_force = solve_pseudoinverse_dispatch(
+        &problem, &target, 1e-10, true, 20, false, false, false, false, false,
+    )
+    .unwrap();
+
+    assert!(l1.iter().all(|q| q.is_finite()));
+    assert!(solve_for_force.iter().all(|q| q.is_finite()));
+    for (q, length) in solve_for_force.iter().zip(lengths) {
+        assert!((q * length).is_finite());
+    }
+}
+
+#[test]
+fn pseudoinverse_solve_for_force_rejects_degenerate_target_edges() {
+    let (problem, _) = triangle_problem();
+    let target = Array2::from_shape_vec((1, 3), vec![0.0, 0.0, 0.0]).unwrap();
+
+    let result = solve_pseudoinverse_dispatch(
+        &problem, &target, 1e-6, true, 20, false, false, false, false, false,
+    );
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn pseudoinverse_reaction_constraints_reduce_reaction_norm() {
+    let (problem, edges) = arch_problem(false);
+    let (target, _) = forward_target(&problem, &[1.0; 8]);
+
+    let unconstrained = pinv(&problem, &target, true, false);
+    let constrained = solve_pseudoinverse_dispatch(
+        &problem, &target, 1e-8, true, 20, false, true, true, true, true,
+    )
+    .unwrap();
+
+    assert_eq!(constrained.len(), 8);
+    assert!(constrained.iter().all(|q| q.is_finite()));
+    let unconstrained_reaction = fixed_reaction_norm(&problem, &edges, &target, &unconstrained);
+    let constrained_reaction = fixed_reaction_norm(&problem, &edges, &target, &constrained);
+    assert!(
+        constrained_reaction < unconstrained_reaction,
+        "reaction rows should reduce the target-geometry reaction norm: \
+         constrained={constrained_reaction}, unconstrained={unconstrained_reaction}"
+    );
+}
+
+#[test]
+fn nnls_is_nonnegative_and_beats_clipped_pseudoinverse_residual() {
+    let (problem, edges) = arch_problem(false);
+    let target = Array2::from_shape_vec(
+        (5, 3),
+        vec![
+            1.0, 0.0, 1.0, 2.0, 0.0, 2.2, 3.0, 0.0, 1.4, 4.0, 0.0, 2.0, 5.0, 0.0, 0.8,
+        ],
+    )
+    .unwrap();
+
+    let unconstrained = pinv(&problem, &target, true, false);
+    let clipped: Vec<f64> = unconstrained.iter().map(|q| q.max(0.0)).collect();
+    let nnls = solve_nnls(&problem, &target, 10_000, 1e-8).unwrap();
+
+    assert!(nnls.q.iter().all(|q| q.is_finite() && *q >= 0.0));
+    let nnls_residual = equilibrium_residual(&problem, &edges, &target, &nnls.q);
+    let clipped_residual = equilibrium_residual(&problem, &edges, &target, &clipped);
+    assert!(
+        nnls_residual <= clipped_residual + 1e-6,
+        "NNLS residual {nnls_residual} exceeded clipped Pinv residual {clipped_residual}"
+    );
+}

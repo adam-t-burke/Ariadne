@@ -369,3 +369,9 @@ FodyWeavers.xsd
 # Rust / Cargo build artifacts
 target/
 crates/theseus/target/
+
+# Native build scripts copy the release notice bundle beside bootstrap binaries.
+Theseus/Ariadne-LICENSE.txt
+Theseus/ariadne-lbfgsb-LICENSE.txt
+Theseus/ariadne-lbfgsb-UPSTREAM_LICENSE.txt
+Theseus/ariadne-lbfgsb-THIRD_PARTY_NOTICES.md

@@ -29,6 +29,10 @@ public class NnlsComponent : GH_Component
         pManager.AddVectorParameter("Loads", "Loads", "Loads on free nodes", GH_ParamAccess.list, new Vector3d(0, 0, -1));
         pManager.AddIntegerParameter("Max Iterations", "MaxIter", "Maximum NNLS iterations", GH_ParamAccess.item, 500);
         pManager.AddNumberParameter("Tolerance", "Tol", "Convergence tolerance for projected gradient norm", GH_ParamAccess.item, 1e-6);
+        pManager.AddPointParameter("Load Nodes", "LN", "Nodes to apply loads to (optional; if empty, loads apply to all free nodes)", GH_ParamAccess.list);
+
+        // Keep LN last so existing definitions retain their MaxIter and Tol connections.
+        pManager[6].Optional = true;
     }
 
     protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -47,6 +51,7 @@ public class NnlsComponent : GH_Component
         List<Point3d> targetPoints = [];
         List<double> q = [];
         List<Vector3d> loads = [];
+        List<Point3d> loadNodes = [];
         int maxIter = 500;
         double tol = 1e-6;
 
@@ -56,6 +61,7 @@ public class NnlsComponent : GH_Component
         DA.GetDataList(3, loads);
         DA.GetData(4, ref maxIter);
         DA.GetData(5, ref tol);
+        DA.GetDataList(6, loadNodes);
 
         if (network == null || !network.Valid)
         {
@@ -80,14 +86,19 @@ public class NnlsComponent : GH_Component
             targetFreeXyz[i * 3 + 2] = targetPoints[i].Z;
         }
 
-        var inputs = new SolverInputs
-        {
-            QInit = q,
-            Loads = loads,
-        };
-
         try
         {
+            var loadNodeIndices = loadNodes.Count > 0
+                ? TheseusSolverService.ResolveLoadNodeIndices(network, loadNodes)
+                : null;
+
+            var inputs = new SolverInputs
+            {
+                QInit = q,
+                Loads = loads,
+                LoadNodeIndices = loadNodeIndices,
+            };
+
             var result = TheseusSolverService.SolveNnls(
                 network, inputs, targetFreeXyz, maxIter, tol);
 

@@ -152,6 +152,7 @@ fn make_variable_rail_arch_problem(objectives: Vec<Box<dyn ObjectiveTrait>>) -> 
         variable_supports: vec![VariableSupport {
             node_index: 6,
             reference_position: [6.0, 0.0, 0.0],
+            saturation_lambda: 1.0,
             kind: VariableSupportKind::Rail {
                 start: [5.0, -1.0, 0.0],
                 end: [7.0, 1.0, 0.0],
@@ -186,6 +187,7 @@ fn make_variable_nurbs_curve_arch_problem(objectives: Vec<Box<dyn ObjectiveTrait
         variable_supports: vec![VariableSupport {
             node_index: 6,
             reference_position: [6.0, 0.0, 0.0],
+            saturation_lambda: 1.0,
             kind: VariableSupportKind::NurbsCurve {
                 curve,
                 domain: [0.0, 1.0],
@@ -230,6 +232,7 @@ fn make_variable_nurbs_surface_arch_problem(objectives: Vec<Box<dyn ObjectiveTra
         variable_supports: vec![VariableSupport {
             node_index: 6,
             reference_position: [6.0, 0.0, 0.0],
+            saturation_lambda: 1.0,
             kind: VariableSupportKind::NurbsSurface {
                 surface,
                 domain_u: [0.0, 1.0],
@@ -414,6 +417,7 @@ fn fd_cholesky_target_xyz() {
         weight: 1.0,
         node_indices: vec![1, 2, 3, 4, 5],
         target,
+        reduction: TargetGeometryReduction::Sse,
     })];
 
     let problem = make_arch_problem(bounds, objectives);
@@ -526,6 +530,7 @@ fn fd_cholesky_combined() {
             weight: 1.0,
             node_indices: vec![1, 2, 3, 4, 5],
             target: target_xyz,
+            reduction: TargetGeometryReduction::Sse,
         }),
         Box::new(TargetLength {
             weight: 0.5,
@@ -574,6 +579,7 @@ fn fd_ldl_target_xyz() {
         weight: 1.0,
         node_indices: vec![1, 2, 3, 4, 5],
         target,
+        reduction: TargetGeometryReduction::Sse,
     })];
 
     let problem = make_arch_problem(bounds, objectives);
@@ -687,6 +693,7 @@ fn fd_ldl_combined() {
             weight: 1.0,
             node_indices: vec![1, 2, 3, 4, 5],
             target: target_xyz,
+            reduction: TargetGeometryReduction::Sse,
         }),
         Box::new(TargetLength {
             weight: 0.5,
@@ -1033,6 +1040,7 @@ fn fd_cholesky_combined_with_variation() {
             weight: 1.0,
             node_indices: vec![1, 2, 3, 4, 5],
             target: target_xyz,
+            reduction: TargetGeometryReduction::Sse,
         }),
         Box::new(LengthVariation {
             weight: 0.5,
@@ -1085,6 +1093,7 @@ fn cholesky_ldl_consistency() {
                 weight: 1.0,
                 node_indices: vec![1, 2, 3, 4, 5],
                 target: target.clone(),
+                reduction: TargetGeometryReduction::Sse,
             }),
             Box::new(TargetLength {
                 weight: 0.5,
@@ -1211,6 +1220,7 @@ fn fd_variable_rail_joint_q_anchor_combined_objectives() {
             weight: 1.0,
             node_indices: vec![1, 2, 3, 4, 5],
             target: target_xyz,
+            reduction: TargetGeometryReduction::Sse,
         }),
         Box::new(TargetLength {
             weight: 0.25,
@@ -1240,6 +1250,7 @@ fn fd_variable_nurbs_curve_anchor_target_objective() {
         weight: 1.0,
         node_indices: vec![6],
         target,
+        reduction: TargetGeometryReduction::Sse,
     })];
     let problem = make_variable_nurbs_curve_arch_problem(objectives);
     let theta: Vec<f64> = vec![1.5, 2.0, 2.5, 3.0, 1.4, 1.7, 2.2, 1.8, 0.2];
@@ -1254,6 +1265,7 @@ fn fd_variable_nurbs_surface_anchor_target_objective() {
         weight: 1.0,
         node_indices: vec![6],
         target,
+        reduction: TargetGeometryReduction::Sse,
     })];
     let problem = make_variable_nurbs_surface_arch_problem(objectives);
     let theta: Vec<f64> = vec![1.5, 2.0, 2.5, 3.0, 1.4, 1.7, 2.2, 1.8, 0.2, -0.1];

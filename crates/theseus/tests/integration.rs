@@ -5,10 +5,27 @@
 //! and actually reduces the objective value.
 
 use ndarray::Array2;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use theseus::optimizer;
 use theseus::sparse::SparseColMatOwned;
 use theseus::types::*;
+
+static DIRECT_BOX_PROGRESS_FEASIBLE: AtomicBool = AtomicBool::new(true);
+
+unsafe extern "C" fn record_direct_box_feasibility(
+    _iteration: usize,
+    _loss: f64,
+    _xyz: *const f64,
+    _num_nodes: usize,
+    q: *const f64,
+    num_edges: usize,
+) -> u8 {
+    let q = unsafe { std::slice::from_raw_parts(q, num_edges) };
+    if q.iter().any(|value| !(0.5..=5.0).contains(value)) {
+        DIRECT_BOX_PROGRESS_FEASIBLE.store(false, Ordering::Relaxed);
+    }
+    1
+}
 
 // ─────────────────────────────────────────────────────────────
 //  Helpers (shared arch construction)
@@ -123,6 +140,7 @@ fn optimize_target_xyz() {
         weight: 1.0,
         node_indices: vec![1, 2, 3, 4, 5],
         target: target.clone(),
+        reduction: TargetGeometryReduction::Sse,
     })];
 
     let problem = make_arch_problem(bounds, objectives);
@@ -197,6 +215,7 @@ fn optimize_combined_objectives() {
             weight: 1.0,
             node_indices: vec![1, 2, 3, 4, 5],
             target,
+            reduction: TargetGeometryReduction::Sse,
         }),
         Box::new(LengthVariation {
             weight: 0.5,
@@ -248,21 +267,56 @@ fn optimize_direct_box_bounds_keeps_physical_q_inside_bounds() {
         weight: 1.0,
         node_indices: vec![1, 2, 3, 4, 5],
         target,
+        reduction: TargetGeometryReduction::Sse,
     })];
 
     let mut problem = make_arch_problem(bounds, objectives);
     problem.solver.q_parameterization_mode = QParameterizationMode::DirectBoxBounds;
     problem.solver.max_iterations = 50;
-    let mut state = OptimizationState::new(vec![2.0; ne], Array2::zeros((0, 3)));
+    let mut state = OptimizationState::new(vec![0.0; ne], Array2::zeros((0, 3)));
     let cancel = AtomicBool::new(false);
-    let result = optimizer::optimize(&problem, &mut state, None, 1, &cancel).unwrap();
+    DIRECT_BOX_PROGRESS_FEASIBLE.store(true, Ordering::Relaxed);
+    let result = optimizer::optimize(
+        &problem,
+        &mut state,
+        Some(record_direct_box_feasibility),
+        1,
+        &cancel,
+    )
+    .unwrap();
 
     assert!(!result.loss_trace.is_empty());
+    assert!(DIRECT_BOX_PROGRESS_FEASIBLE.load(Ordering::Relaxed));
+    let evaluations = result
+        .termination_reason
+        .split("evaluations=")
+        .nth(1)
+        .and_then(|text| text.split(';').next())
+        .and_then(|text| text.parse::<usize>().ok())
+        .expect("termination reason should report typed evaluation statistics");
+    assert_eq!(
+        result.loss_trace.len(),
+        evaluations,
+        "each solver evaluation should produce exactly one trace entry"
+    );
     for &q in &result.q {
         assert!(
             (0.5..=5.0).contains(&q),
             "q={q} outside DirectBoxBounds range"
         );
+    }
+
+    let mut final_cache = FdmCache::new(&problem).unwrap();
+    theseus::fdm::solve_fdm(
+        &mut final_cache,
+        &result.q,
+        &problem,
+        &result.anchor_positions,
+        1e-12,
+    )
+    .unwrap();
+    for (returned, recomputed) in result.xyz.iter().zip(final_cache.nf.iter()) {
+        assert!((returned - recomputed).abs() <= 1e-12);
     }
 }
 

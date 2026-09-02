@@ -13,11 +13,11 @@ using Rhino.Geometry;
 /// </summary>
 public record class SolverTuningOptions
 {
-    /// <summary>Maximum optimization iterations.</summary>
+    /// <summary>Maximum accepted optimization iterations; positive values have no hidden upper cap.</summary>
     public int MaxIterations { get; init; } = 500;
-    /// <summary>Absolute convergence tolerance.</summary>
+    /// <summary>Projected-gradient infinity-norm tolerance in direct box mode.</summary>
     public double AbsTol { get; init; } = 1e-6;
-    /// <summary>Relative convergence tolerance.</summary>
+    /// <summary>Relative accepted-iterate function-reduction tolerance in direct box mode.</summary>
     public double RelTol { get; init; } = 1e-6;
     /// <summary>Barrier function weight for bound constraints.</summary>
     public double BarrierWeight { get; init; } = 10.0;
@@ -25,8 +25,6 @@ public record class SolverTuningOptions
     public double BarrierSharpness { get; init; } = 10.0;
     /// <summary>Invoke progress callback every N accepted L-BFGS iterations (0 = every iteration).</summary>
     public int ReportFrequency { get; init; } = 10;
-    /// <summary>Dimensionless scale for optimizer coordinates used by variable support anchor maps.</summary>
-    public double AnchorSaturationLambda { get; init; } = 1.0;
 }
 
 /// <summary>
@@ -42,7 +40,9 @@ public sealed record SolverOptions : SolverTuningOptions
 
 public enum QParameterizationMode
 {
+    /// <summary>Direct q values with soft penalties; supports fixed, one-sided, or unbounded intervals.</summary>
     DirectSoftBounds = 0,
+    /// <summary>Physical q values with hard, finite, non-fixed two-sided intervals.</summary>
     DirectBoxBounds = 2,
 }
 
@@ -55,11 +55,11 @@ public sealed record OptimizationConfig : SolverTuningOptions
     /// <summary>Objective functions to minimize (e.g. target length, force variation).</summary>
     public required IReadOnlyList<Objective> Objectives { get; init; }
     /// <summary>Lower bounds on force densities per edge.</summary>
-    public IReadOnlyList<double> LowerBounds { get; init; } = [0.1];
+    public EdgeValueTree LowerBounds { get; init; } = EdgeValueTree.Broadcast(0.1);
     /// <summary>Upper bounds on force densities per edge.</summary>
-    public IReadOnlyList<double> UpperBounds { get; init; } = [100.0];
-    /// <summary>q optimization mode: direct soft bounds (default) or direct finite box bounds.</summary>
-    public QParameterizationMode QParameterizationMode { get; init; } = QParameterizationMode.DirectSoftBounds;
+    public EdgeValueTree UpperBounds { get; init; } = EdgeValueTree.Broadcast(100.0);
+    /// <summary>q optimization mode: hard finite two-sided box bounds (L-BFGS-B default), or soft penalties.</summary>
+    public QParameterizationMode QParameterizationMode { get; init; } = QParameterizationMode.DirectBoxBounds;
     /// <summary>When true, optimization runs (e.g. from a button or toggle).</summary>
     public bool Run { get; init; } = false;
     /// <summary>When true, stream intermediate results to outputs during optimization.</summary>
@@ -76,7 +76,6 @@ public sealed record OptimizationConfig : SolverTuningOptions
         BarrierWeight = BarrierWeight,
         BarrierSharpness = BarrierSharpness,
         ReportFrequency = ReportFrequency,
-        AnchorSaturationLambda = AnchorSaturationLambda,
         CopyProgressState = StreamPreview,
     };
 }
@@ -88,11 +87,14 @@ public abstract record VariableSupportConfig
 {
     /// <summary>Fixed nodes this support definition applies to.</summary>
     public required List<Node> Nodes { get; init; }
+    /// <summary>Positive dimensionless scale for this support's optimizer coordinate map.</summary>
+    public double SaturationLambda { get; init; } = 1.0;
 
     public virtual int GetContentHashCode()
     {
         var h = new HashCode();
         h.Add(GetType());
+        h.Add(SaturationLambda);
         foreach (var node in Nodes)
             h.Add(RuntimeHelpers.GetHashCode(node));
         return h.ToHashCode();
@@ -449,6 +451,7 @@ internal sealed record SolverData(
     double[] UpperBounds,
     int[] VariableNodeIndices,
     int[] VariableSupportKinds,
+    double[] VariableSupportLambdas,
     double[] SphereRadii,
     byte[] RollerEnabled,
     double[] RollerLower,
