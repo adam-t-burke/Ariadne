@@ -97,6 +97,16 @@ pub struct BenchmarkTimings {
     pub evaluation_nanoseconds: u64,
     /// Nanoseconds spent computing search directions.
     pub direction_nanoseconds: u64,
+    /// Nanoseconds spent computing generalized Cauchy points.
+    pub cauchy_nanoseconds: u64,
+    /// Nanoseconds spent updating the free-variable partition.
+    pub freev_nanoseconds: u64,
+    /// Nanoseconds spent forming compact free-set matrices.
+    pub formk_nanoseconds: u64,
+    /// Nanoseconds spent forming the reduced gradient.
+    pub cmprlb_nanoseconds: u64,
+    /// Nanoseconds spent solving the subspace minimization problem.
+    pub subsm_nanoseconds: u64,
     /// Nanoseconds spent in accepted-iteration callbacks.
     pub observer_nanoseconds: u64,
     /// Nanoseconds spent updating curvature history.

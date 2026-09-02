@@ -3,7 +3,7 @@ use std::convert::Infallible;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-const DIMENSIONS: [usize; 6] = [25, 180, 512, 1000, 1984, 4096];
+const DIMENSIONS: [usize; 7] = [25, 180, 512, 1000, 1984, 4096, 8192];
 const HISTORIES: [usize; 3] = [5, 10, 20];
 
 #[derive(Clone, Copy, Debug)]
@@ -262,6 +262,21 @@ fn measure(objective: Objective, n: usize, m: usize, minimum: Duration, backend:
         last.projected_gradient,
         last.checksum,
     );
+    #[cfg(feature = "benchmark-instrumentation")]
+    {
+        let timings = solver.benchmark_timings();
+        eprintln!(
+            "phases,{},{},{},{},{},{},{},{}",
+            objective.name(),
+            n,
+            m,
+            timings.direction_nanoseconds,
+            timings.cauchy_nanoseconds,
+            timings.freev_nanoseconds,
+            timings.formk_nanoseconds,
+            timings.cmprlb_nanoseconds + timings.subsm_nanoseconds,
+        );
+    }
 }
 
 fn main() {
@@ -349,5 +364,6 @@ fn main() {
                 backend,
             );
         }
+        measure(Objective::Rosenbrock, 8192, 10, minimum, backend);
     }
 }
