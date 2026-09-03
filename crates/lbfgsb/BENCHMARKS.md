@@ -117,9 +117,8 @@ comparable `n=1000,m=10` case, faer reduced Rust solve time from 1258.693 us to
 `Auto` intentionally resolves to the deterministic scalar backend. This
 Rosenbrock-only sweep is insufficient evidence for a general size crossover;
 callers may explicitly select faer when representative measurements for their
-objective justify it. `crates/theseus` does not enable the feature because its
-recorded end-to-end runs are objective/gradient dominated and no material
-application-level benefit has been measured.
+objective justify it. Theseus explicitly selects faer only for its measured
+DirectBoxBounds path; `Auto` remains deterministic.
 
 Remaining solver costs are gather-heavy free-variable compact updates,
 generalized-Cauchy breakpoint traversal, tiny compact factorizations, and
@@ -156,6 +155,39 @@ An attempted extension of faer into subspace products was rejected because it
 changed the accepted trajectory from 24 to 25 iterations in the backend
 equivalence test. The retained transformations preserve scalar accumulation
 order and improve both backends.
+
+## SciPy public-interface comparison
+
+`tests/reference/benchmark_scipy.py` runs SciPy's public
+`scipy.optimize.fmin_l_bfgs_b` interface on the same extended-Rosenbrock
+objective, bounds, history sizes, `factr=1e7`, `pgtol=1e-5`, and `maxls=20`.
+It is a PEP 723 script with a SciPy dependency and is run through uv:
+
+```powershell
+uv run --script .\crates\lbfgsb\tests\reference\benchmark_scipy.py `
+  --n 1000 --m 10 --repeats 50
+```
+
+The script prints Python, NumPy, and SciPy versions as well as termination
+statistics and final numerical checks. Three independent process runs on the
+environment above used Python 3.12.11, NumPy 2.5.2, and SciPy 1.17.1:
+
+```text
+engine                  n    m     us/solve  iterations evaluations
+SciPy public wrapper    25    5     1109.512          23          28
+Rust deterministic     25    5       25.757          23          28
+Rust faer              25    5       27.678          23          28
+SciPy public wrapper  1000   10     4328.371          24          29
+Rust deterministic   1000   10      992.171          24          29
+Rust faer            1000   10      888.934          24          29
+```
+
+This is an end-to-end API comparison, not an isolated comparison of SciPy's C
+kernel. SciPy calls a Python/NumPy objective and gradient at every reverse-
+communication evaluation, while the Rust and official-Fortran drivers use
+compiled callbacks. The matching iteration and evaluation counts show that the
+same optimization path was exercised, but the timing gap includes Python
+dispatch and NumPy temporary-array costs.
 
 ## Theseus end-to-end context
 
