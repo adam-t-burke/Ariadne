@@ -1,0 +1,11 @@
+[package]
+name = "pga3"
+version = "0.1.0"
+edition = "2021"
+description = "Experimental 3D projective geometric algebra G(3,0,1) for Ariadne"
+license = "MIT"
+publish = false
+
+[lib]
+name = "pga3"
+path = "src/lib.rs"

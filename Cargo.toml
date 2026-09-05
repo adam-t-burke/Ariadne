@@ -2,6 +2,7 @@
 members = [
     "crates/lbfgsb",
     "crates/nurbsbook",
+    "crates/pga3",
     "crates/theseus",
 ]
 resolver = "2"
