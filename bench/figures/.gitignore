@@ -1,0 +1,4 @@
+.venv*/
+__pycache__/
+# regenerate with `warm_start_bench figures bench/figures/data` (see README.md)
+data/*.json

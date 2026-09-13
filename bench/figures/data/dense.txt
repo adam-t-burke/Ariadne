@@ -1,0 +1,7 @@
+ side     ne     bytes    dense_ms   sparse_ms    ratio    slope    |Δq|/|q|
+   12    264     558kB         1.5         0.7      2.1        -    1.66e-14
+   16    480     1.8MB         8.6         1.2      7.2     2.93    7.85e-14
+   23   1012     8.2MB       103.8         2.5     40.9     3.34    1.32e-13
+   32   1984    31.5MB       782.6         4.6    169.1     3.00    8.92e-14
+   45   3960   125.5MB      5844.6        10.2    570.5     2.91    1.98e-13
+# slope = log-log exponent of dense_ms vs ne between consecutive sizes (O(ne³) → 3)

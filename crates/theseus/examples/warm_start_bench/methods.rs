@@ -563,6 +563,8 @@ pub struct Run {
     pub iters: usize,
     pub ms: f64,
     pub final_err: f64,
+    /// Force densities at termination (empty for external reference rows).
+    pub q: Vec<f64>,
 }
 
 fn target_objective(net: &Net, target: &Array2<f64>) -> Box<dyn ObjectiveTrait> {
@@ -615,6 +617,7 @@ pub fn lbfgsb(
         iters: result.iterations,
         ms,
         final_err,
+        q: result.q,
     })
 }
 

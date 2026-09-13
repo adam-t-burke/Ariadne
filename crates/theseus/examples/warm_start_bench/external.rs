@@ -205,6 +205,7 @@ fn external_row(case: &Case) -> Option<Row> {
             iters,
             ms,
             final_err,
+            q: Vec::new(),
         }),
         note: run
             .get("optimizer")
