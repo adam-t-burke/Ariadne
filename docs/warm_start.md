@@ -666,7 +666,10 @@ What the table says:
    uniform seed needs 179–1000 iterations (0.35–1.4 s of solver time) on the
    compression shells and reaches 8e-7–6e-3; our own L-BFGS-B from the same
    seed needs 209–1000, so this is the seed, not the optimiser or the
-   language.
+   language. (SciPy's `ftol` is relative to `max(|f|, 1)`, so with a loss
+   heading to zero JAX FDM's public `tol = 1e-10` is an absolute stop of
+   1e-10 on the squared loss, i.e. a floor of ≈ 3e-5 L on the fit; its
+   "converged" finals sit there, not at machine precision.)
 2. **Mixed sign is where cold starts fail outright.** On Pastrana's tied
    truss both L-BFGS-B implementations stall at 0.24–0.26 L from the median
    seed (SciPy: "relative reduction of f ≤ factr·epsmch"); the ×0.1 seed
