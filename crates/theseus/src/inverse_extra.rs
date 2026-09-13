@@ -230,7 +230,7 @@ fn solve_lsqr_on(
         Ok(out)
     };
     let apply_t = |y: &[f64]| -> Result<Vec<f64>, TheseusError> {
-        let weighted = w.apply_inverse(&y[..m_rows])?;
+        let weighted = w.apply_inverse_transpose(&y[..m_rows])?;
         let mut out = m_t.matvec(&weighted);
         if damping > 0.0 {
             for (j, value) in out.iter_mut().enumerate() {
@@ -784,11 +784,10 @@ fn solve_spg_on(
         for (ri, &pi) in r.iter_mut().zip(p.iter()) {
             *ri -= pi;
         }
-        // Objective ½‖S⁻¹(Mx − p)‖² has gradient Mᵀ S⁻ᵀ S⁻¹ (Mx − p); S is
-        // symmetric, so S⁻¹ is applied twice.
+        // Objective ½‖S⁻¹(Mx − p)‖² has gradient Mᵀ S⁻ᵀ S⁻¹ (Mx − p).
         if let Some(w) = weight {
             r = w.apply_inverse(&r)?;
-            r = w.apply_inverse(&r)?;
+            r = w.apply_inverse_transpose(&r)?;
         }
         let mut g = m_t.matvec(&r);
         if lambda > 0.0 {
@@ -867,10 +866,22 @@ fn l2_norm_prefix(v: &[f64], len: usize) -> f64 {
 
 /// Left weight `S` for the geometric metric.
 ///
-/// `S = blkdiag(D, D, D, I)` over the axis-major equilibrium rows, where
-/// `D = Cnᵀ diag(q) Cn` is the FDM Laplacian. The trailing identity covers the
-/// optional zero-reaction rows, which are support constraints rather than
-/// free-node equilibrium and carry no compliance.
+/// Over the axis-major equilibrium rows
+///
+/// ```text
+/// S = [ D  0  0  0 ]      D = Cnᵀ diag(q) Cn   (FDM Laplacian)
+///     [ 0  D  0  0 ]      G = Cfᵀ diag(q) Cn   (support coupling)
+///     [ 0  0  D  0 ]
+///     [ wG_x wG_y wG_z  I ]   (one block row per enforced reaction axis)
+/// ```
+///
+/// so that `S⁻¹ r` is the negated geometric error on the free-node rows and,
+/// on the reaction rows, the *realised* support reaction `w·E_R(x(q))·q`
+/// rather than its value at the target geometry: `E_R(x(q)) q = E_R(x*) q −
+/// G (x* − x(q))`. The coupling block is the Gauss--Newton term that accounts
+/// for the reaction changing when the free nodes move, which is what makes
+/// the Stage-2 merit and the QP steps consistent with the reactions a forward
+/// solve at the returned `q` actually produces.
 ///
 /// `S` is kept assembled for the backends that embed it (Clarabel, saddle);
 /// `D` is kept factored for the backends that apply `S⁻¹` per matvec (LSQR,
@@ -879,6 +890,11 @@ struct MetricWeight {
     s: SparseColMatOwned,
     d: SparseColMatOwned,
     d_factor: Factorization,
+    /// `w·G`, present only with reaction rows.
+    coupling: Option<SparseColMatOwned>,
+    /// Axis of each reaction block row, in row order.
+    reaction_dims: Vec<usize>,
+    n_fixed: usize,
     n_free: usize,
     n_eq: usize,
     workspace: std::cell::RefCell<Vec<f64>>,
@@ -886,21 +902,48 @@ struct MetricWeight {
 }
 
 impl MetricWeight {
-    /// Assemble and factor the weight at force densities `q`.
+    /// Assemble and factor the weight at force densities `q` for the rows of
+    /// `system`, with the reaction rows scaled by `reaction_weight`.
     fn build(
         problem: &Problem,
         q: &[f64],
-        n_eq: usize,
-        n_free: usize,
+        system: &EquilibriumSystem,
+        reaction_weight: f64,
     ) -> Result<Self, TheseusError> {
+        let n_eq = system.n_eq;
+        let n_free = system.n_free;
         let cn = &problem.topology.free_incidence;
         let cn_t = cn.transpose();
         let scaled = row_scaled_copy(cn, q);
         let d =
             SparseColMatOwned::sparse_times_sparse(&cn_t, &scaled).map_err(TheseusError::Solver)?;
 
-        // S = blkdiag(D, D, D, I) in axis-major row order.
-        let mut triplets = Vec::with_capacity(3 * d.nnz() + (n_eq - 3 * n_free));
+        let n_fixed = problem.topology.fixed_node_indices.len();
+        let reaction_dims = system.reaction_dims.clone();
+        if 3 * n_free + reaction_dims.len() * n_fixed != n_eq {
+            return Err(TheseusError::Shape(format!(
+                "geometric weight: {} rows do not match 3·{n_free} free rows plus {} reaction blocks of {n_fixed}",
+                n_eq,
+                reaction_dims.len()
+            )));
+        }
+        let coupling = if reaction_dims.is_empty() {
+            None
+        } else {
+            let cf_t = problem.topology.fixed_incidence.transpose();
+            let mut g = SparseColMatOwned::sparse_times_sparse(&cf_t, &scaled)
+                .map_err(TheseusError::Solver)?;
+            for value in g.values.iter_mut() {
+                *value *= reaction_weight;
+            }
+            Some(g)
+        };
+
+        let mut triplets = Vec::with_capacity(
+            3 * d.nnz()
+                + (n_eq - 3 * n_free)
+                + coupling.as_ref().map_or(0, |g| g.nnz() * reaction_dims.len()),
+        );
         for col in 0..d.ncols {
             for nz in d.col_ptrs[col] as usize..d.col_ptrs[col + 1] as usize {
                 let row = d.row_indices[nz] as usize;
@@ -913,6 +956,21 @@ impl MetricWeight {
         }
         for row in (3 * n_free)..n_eq {
             triplets.push((row as u32, row as u32, 1.0));
+        }
+        if let Some(g) = &coupling {
+            for (block, &axis) in reaction_dims.iter().enumerate() {
+                let row_offset = 3 * n_free + block * n_fixed;
+                let col_offset = axis * n_free;
+                for col in 0..g.ncols {
+                    for nz in g.col_ptrs[col] as usize..g.col_ptrs[col + 1] as usize {
+                        triplets.push((
+                            (row_offset + g.row_indices[nz] as usize) as u32,
+                            (col_offset + col) as u32,
+                            g.values[nz],
+                        ));
+                    }
+                }
+            }
         }
         let s =
             SparseColMatOwned::from_triplets(n_eq, n_eq, &triplets).map_err(TheseusError::Shape)?;
@@ -943,6 +1001,9 @@ impl MetricWeight {
             s,
             d,
             d_factor,
+            coupling,
+            reaction_dims,
+            n_fixed,
             n_free,
             n_eq,
             workspace: std::cell::RefCell::new(vec![0.0; (n_free * 3).max(1)]),
@@ -952,9 +1013,50 @@ impl MetricWeight {
 
     /// Apply `S⁻¹` to an equilibrium-row vector.
     ///
-    /// Solves the three axis blocks in one triangular solve and passes the
-    /// reaction rows through unchanged.
+    /// Solves the three axis blocks in one triangular solve, then forms the
+    /// reaction rows as `r_R − wG·e_axis` (block forward substitution).
     fn apply_inverse(&self, r: &[f64]) -> Result<Vec<f64>, TheseusError> {
+        let mut out = self.solve_d_blocks(r)?;
+        let first = 3 * self.n_free;
+        out[first..].copy_from_slice(&r[first..]);
+        if let Some(g) = &self.coupling {
+            for (block, &axis) in self.reaction_dims.iter().enumerate() {
+                let e_axis = &out[axis * self.n_free..(axis + 1) * self.n_free];
+                let ge = g.matvec(e_axis);
+                let row_offset = first + block * self.n_fixed;
+                for (f, value) in ge.iter().enumerate() {
+                    out[row_offset + f] -= value;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Apply `S⁻ᵀ` to an equilibrium-row vector (block back substitution:
+    /// the reaction rows pass through, the free-node rows solve
+    /// `D u = v − wGᵀ v_R`). Used for the Hutchinson curvature estimate.
+    fn apply_inverse_transpose(&self, v: &[f64]) -> Result<Vec<f64>, TheseusError> {
+        let first = 3 * self.n_free;
+        let mut rhs = v.to_vec();
+        if let Some(g) = &self.coupling {
+            let g_t = g.transpose();
+            for (block, &axis) in self.reaction_dims.iter().enumerate() {
+                let row_offset = first + block * self.n_fixed;
+                let v_r = &v[row_offset..row_offset + self.n_fixed];
+                let gt_v = g_t.matvec(v_r);
+                for (i, value) in gt_v.iter().enumerate() {
+                    rhs[axis * self.n_free + i] -= value;
+                }
+            }
+        }
+        let mut out = self.solve_d_blocks(&rhs)?;
+        out[first..].copy_from_slice(&v[first..]);
+        Ok(out)
+    }
+
+    /// `D⁻¹` applied to the three axis blocks of `r`; reaction rows are left
+    /// at zero for the caller to fill in.
+    fn solve_d_blocks(&self, r: &[f64]) -> Result<Vec<f64>, TheseusError> {
         if r.len() != self.n_eq {
             return Err(TheseusError::Shape(format!(
                 "geometric weight expected {} rows, got {}",
@@ -1022,7 +1124,6 @@ impl MetricWeight {
                 }
             }
         }
-        out[3 * n_free..].copy_from_slice(&r[3 * n_free..]);
         Ok(out)
     }
 }
@@ -1030,12 +1131,13 @@ impl MetricWeight {
 /// Current geometry and error for an unknown vector under the geometric metric.
 struct GeometryProbe {
     weight: MetricWeight,
-    /// `S⁻¹ r = x* − x(q)`, the negated geometric error.
+    /// `S⁻¹ r`: `x* − x(q)` on the free-node rows, the weighted realised
+    /// reactions `w·E_R(x(q))·q` on the reaction rows.
     neg_error: Vec<f64>,
     /// `‖x(q) − x*‖` over the free-node rows only.
     error: f64,
-    /// `‖S⁻¹ r‖` over all rows: the geometric error plus the reaction
-    /// residuals (unit weight), which is the objective the Stage-2 steps
+    /// `‖S⁻¹ r‖` over all rows: the geometric error plus the weighted
+    /// realised reactions, which is the objective the Stage-2 steps
     /// minimise. Equal to `error` without reaction rows.
     merit: f64,
 }
@@ -1045,21 +1147,22 @@ struct GeometryProbe {
 /// Uses the identity `x(q) − x* = −D(q)⁻¹(E(x*)q − p)`, so no forward solve is
 /// needed. Exact for geometry-independent loads.
 ///
-/// Reaction rows, when present, are evaluated at the target geometry like the
-/// rest of the residual: `w · E_R(x*) q`. They coincide with the realised
-/// reactions once `x(q) = x*`.
+/// Reaction rows, when present, come out as the reactions of the forward
+/// solve at `q` (see [`MetricWeight`]), so the merit is what a forward solve
+/// at `q` would actually report.
 fn probe_geometry(
     problem: &Problem,
     system: &EquilibriumSystem,
     unknown: &[f64],
     solve_for_q: bool,
+    reaction_weight: f64,
 ) -> Result<GeometryProbe, TheseusError> {
     let q = if solve_for_q {
         unknown.to_vec()
     } else {
         forces_to_q(unknown, &system.lengths)
     };
-    let weight = MetricWeight::build(problem, &q, system.n_eq, system.n_free)?;
+    let weight = MetricWeight::build(problem, &q, system, reaction_weight)?;
     let mut r = system.a.matvec(unknown);
     for (ri, &pi) in r.iter_mut().zip(system.p.iter()) {
         *ri -= pi;
@@ -1095,7 +1198,7 @@ pub fn geometric_error_vector(
         false,
         false,
     )?;
-    let probe = probe_geometry(problem, &system, q, true)?;
+    let probe = probe_geometry(problem, &system, q, true, 1.0)?;
     let n_free = system.n_free;
     // probe.neg_error is x* − x(q).
     Ok(Array2::from_shape_fn((n_free, 3), |(i, d)| {
@@ -1184,19 +1287,27 @@ fn validate_reaction_constraints(
     Ok(())
 }
 
-/// `‖E_R(x*) q‖` over the reaction rows of an assembled q-form system, with
-/// the row weight divided out (zero without reaction rows).
-fn reaction_residual(system: &EquilibriumSystem, q: &[f64], weight: f64) -> f64 {
+/// `‖E_R(x(q)) q‖`: the norm of the realised reactions along the enforced
+/// axes at the forward-solved geometry, with the row weight divided out (zero
+/// without reaction rows, NaN if the Laplacian at `q` is singular).
+fn reaction_residual(
+    problem: &Problem,
+    system: &EquilibriumSystem,
+    q: &[f64],
+    weight: f64,
+) -> f64 {
     let first = 3 * system.n_free;
     if system.n_eq <= first {
         return 0.0;
     }
-    let r = system.a.matvec(q);
-    r[first..]
-        .iter()
-        .map(|v| (v / weight).powi(2))
-        .sum::<f64>()
-        .sqrt()
+    match probe_geometry(problem, system, q, true, weight) {
+        Ok(probe) => probe.neg_error[first..]
+            .iter()
+            .map(|v| (v / weight).powi(2))
+            .sum::<f64>()
+            .sqrt(),
+        Err(_) => f64::NAN,
+    }
 }
 
 /// Scale the optional reaction rows (those after the `3·n_free` free-node
@@ -1609,7 +1720,7 @@ pub fn solve_inverse_fdm(
         };
         result.diagnostics = ctx.diagnostics.clone();
         result.diagnostics.reaction_residual =
-            reaction_residual(&stage2_system, &result.q, opts.reaction_weight);
+            reaction_residual(problem, &stage2_system, &result.q, opts.reaction_weight);
         return Ok(result);
     }
 
@@ -1623,7 +1734,7 @@ pub fn solve_inverse_fdm(
         opts.enforce_zero_ry,
         opts.enforce_zero_rz,
     )
-    .and_then(|q_system| probe_geometry(problem, &q_system, &stage1_q, true))
+    .and_then(|q_system| probe_geometry(problem, &q_system, &stage1_q, true, opts.reaction_weight))
     .map(|probe| probe.error)
     .unwrap_or(f64::NAN);
     Ok(InverseFdmResult {
@@ -1736,7 +1847,7 @@ impl<'a> Stage2Context<'a> {
     /// Stage-2 merit of `q` (geometric error plus reaction residuals), or +∞
     /// when the Laplacian is singular.
     fn probe_error(&self, q: &[f64]) -> f64 {
-        probe_geometry(self.problem, self.system, q, true)
+        probe_geometry(self.problem, self.system, q, true, self.opts.reaction_weight)
             .map(|probe| probe.merit)
             .unwrap_or(f64::INFINITY)
     }
@@ -1854,7 +1965,7 @@ impl<'a> Stage2Context<'a> {
                 state ^= state << 17;
                 *value = if state & 1 == 0 { 1.0 } else { -1.0 };
             }
-            let Ok(w) = weight.apply_inverse(&z) else { break };
+            let Ok(w) = weight.apply_inverse_transpose(&z) else { break };
             probes_used += 1;
             for col in 0..ne {
                 let mut dot = 0.0;
@@ -2101,10 +2212,11 @@ impl<'a> Stage2Context<'a> {
                     _ => {}
                 }
             }
-            // A handful of late toggles is round-off chatter on a warm start;
-            // clamping them is well within what the outer probe can resolve.
-            let negligible = pass >= 2 && changes <= (ne / 200).max(2);
-            if changes == 0 || negligible {
+            // Only an unchanged set is optimal: clamping a few late toggles
+            // instead can leave the step far from the QP optimum when the
+            // problem is nearly degenerate (self-stressed nets), so the
+            // sweep runs until it is quiet.
+            if changes == 0 {
                 for i in 0..ne {
                     step[i] = step[i].clamp(step_bounds.lower[i], step_bounds.upper[i]);
                 }
@@ -2120,11 +2232,12 @@ impl<'a> Stage2Context<'a> {
 /// Stage-2 outer loop for the geometric metrics, always in q coordinates.
 ///
 /// Each iteration rebuilds the compliance at the current q, measures the exact
-/// geometric error, solves one weighted least-squares step and accepts it only
-/// if the measured error decreases. With `lm_damping > 0` the step direction is
-/// damped Levenberg--Marquardt style: a rejected step multiplies the damping
-/// by ten and re-solves; an accepted step divides it by ten. With
-/// `lm_damping == 0` the historical step-halving backtracking is used.
+/// merit (geometric error plus weighted realised reactions), solves one
+/// weighted least-squares step and accepts it only if the merit decreases.
+/// With `lm_damping == 0` (default) the full step is halved until it does.
+/// With `lm_damping > 0` the step direction is damped Levenberg--Marquardt
+/// style instead: a rejected step multiplies the damping by ten, a hundred,
+/// a thousand and re-solves; an accepted step divides it by ten.
 fn solve_geometric_outer(
     ctx: &mut Stage2Context<'_>,
     metric: InverseMetric,
@@ -2149,7 +2262,7 @@ fn solve_geometric_outer(
         ctx.seed_active_set(&x);
     }
 
-    let mut probe = probe_geometry(problem, system, &x, true)?;
+    let mut probe = probe_geometry(problem, system, &x, true, opts.reaction_weight)?;
     let mut best_x = x.clone();
     let mut best_merit = probe.merit;
     let mut best_error = probe.error;
@@ -2199,7 +2312,11 @@ fn solve_geometric_outer(
         let jacobian = jacobian.as_ref().unwrap_or(&system.a);
         let neg_r: Vec<f64> = r.iter().map(|v| -v).collect();
         let step_bounds = shift_box(bounds, &x);
-        let scale = ctx.lm_scale(jacobian, &probe.weight);
+        let scale = if ctx.lm > 0.0 {
+            ctx.lm_scale(jacobian, &probe.weight)
+        } else {
+            vec![0.0; ne]
+        };
 
         let mut accepted = false;
         let mut growth = 10.0;
@@ -2227,7 +2344,7 @@ fn solve_geometric_outer(
                     .collect();
                 clip_to_box(&mut candidate, bounds);
                 total_probes += 1;
-                match probe_geometry(problem, system, &candidate, true) {
+                match probe_geometry(problem, system, &candidate, true, opts.reaction_weight) {
                     Ok(next) if next.merit < probe.merit => {
                         let improvement =
                             (probe.merit - next.merit) / probe.merit.max(f64::MIN_POSITIVE);

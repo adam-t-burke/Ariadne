@@ -637,6 +637,7 @@ fn make_fixture(name: &str) -> Fixture {
                     n_edges: 4,
                     free_positions: Array2::zeros((0, 3)),
                     n_free: 0,
+                    reaction_dims: Vec::new(),
                 },
             }
         }

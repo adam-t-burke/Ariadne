@@ -28,10 +28,11 @@
 //!    this is Gauss--Newton on the geometric error with the Jacobian taken at
 //!    the target geometry; it cannot overshoot the way the current-geometry
 //!    Jacobian can.
-//! 5. **Damped Gauss--Newton step(s)** (`max_outer`, `lm_damping`): the same
-//!    weighted least squares with the Jacobian re-assembled at `x(q_k)` and a
-//!    Levenberg--Marquardt diagonal that grows on rejected steps and shrinks on
-//!    accepted ones. Steps are accepted only if the measured error decreases.
+//! 5. **Gauss--Newton step(s)** (`max_outer`): the same weighted least
+//!    squares with the Jacobian re-assembled at `x(q_k)`. Steps are accepted
+//!    only if the exact merit decreases, with step halving; an optional
+//!    Levenberg--Marquardt diagonal (`lm_damping`) that grows on rejected
+//!    steps is available but off by default.
 //!
 //! Bounds inside Stage 2 are handled by an exact active-set bounded-variable
 //! least squares on the sparse weighted saddle system (`Stage2Method`), warm
@@ -191,9 +192,16 @@ pub struct InverseFdmOptions {
     pub cwls_damping: f64,
     /// Bound handling for the Stage-2 steps under `LinearAlgebra::Direct`.
     pub stage2_method: Stage2Method,
-    /// Initial Levenberg--Marquardt damping for the Stage-2 steps, relative to
-    /// the scale of `JᵀJ`. Grows ×10 on a rejected step and shrinks ÷10 on an
-    /// accepted one. `0` restores plain step-halving backtracking.
+    /// Levenberg--Marquardt damping floor for the Stage-2 steps, relative to
+    /// the curvature diagonal `diag(Jᵀ S⁻² J)`. `0` (default) takes the
+    /// undamped Gauss--Newton direction and halves the step length on the
+    /// exact merit until it decreases. A positive value damps the direction
+    /// instead: rejected steps multiply the damping by 10, 100, 1000, …, and
+    /// an accepted step divides it by ten, never below this floor. Marquardt
+    /// scaling penalises the long moves along the nearly flat self-stress
+    /// directions of mixed-sign nets, which is why the default is off: on the
+    /// benchmark suite `0` is within 2 % of the best warm start on every case,
+    /// `1e-4` loses on cable domes and near-exact tied arches.
     pub lm_damping: f64,
     /// Stage-1 collapse guard. After Stage 1, a scaled uniform sign seed is
     /// scored on the same geometric error. When Stage 1 is worse by more than
@@ -279,8 +287,8 @@ impl InverseFdmOptions {
     }
 }
 
-/// Default initial Levenberg--Marquardt damping for the Stage-2 steps.
-pub const DEFAULT_LM_DAMPING: f64 = 1e-4;
+/// Default Levenberg--Marquardt damping floor for the Stage-2 steps (off).
+pub const DEFAULT_LM_DAMPING: f64 = 0.0;
 /// Default Stage-1 collapse guard margin.
 pub const DEFAULT_SEED_GUARD_MARGIN: f64 = 3.0;
 
@@ -325,9 +333,10 @@ pub struct InverseDiagnostics {
     pub stage2_factorizations: usize,
     /// Number of Stage-2 steps that fell back from the active set to Clarabel.
     pub clarabel_fallbacks: usize,
-    /// `‖E_R(x*) q‖`: the support reactions along the enforced axes,
-    /// evaluated at the target geometry for the returned q (load units, weight
-    /// divided out). Zero when no reaction rows are enforced.
+    /// `‖E_R(x(q)) q‖`: the support reactions along the enforced axes that a
+    /// forward solve at the returned q realises (load units, weight divided
+    /// out). Zero when no reaction rows are enforced; NaN if the Laplacian at
+    /// the returned q is singular.
     pub reaction_residual: f64,
 }
 
