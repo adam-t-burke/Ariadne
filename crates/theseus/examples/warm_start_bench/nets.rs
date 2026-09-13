@@ -14,6 +14,10 @@ use theseus::types::{
     AnchorInfo, Bounds, FdmCache, NetworkTopology, ObjectiveTrait, Problem, SolverOptions,
 };
 
+/// Minimum `max|q| / min|q|` of a sign group in the snug box (see
+/// [`Net::box_from_true`]).
+const MIN_BOX_RATIO: f64 = 1.5625;
+
 /// Deterministic LCG in `[0, 1)`.
 pub fn lcg(state: &mut u64) -> f64 {
     *state = state
@@ -179,10 +183,16 @@ impl Net {
                 .filter(|&&q| (q > 0.0) == sign)
                 .map(|q| q.abs())
                 .collect();
-            let (mn, mx) = (
+            let (mut mn, mut mx) = (
                 v.iter().cloned().fold(f64::INFINITY, f64::min),
                 v.iter().cloned().fold(0.0, f64::max),
             );
+            // A group with (near-)uniform |q| would give a zero-width snug box,
+            // which the DirectBoxBounds optimiser rejects; open it to ±25 %.
+            if mx.is_finite() && mx < MIN_BOX_RATIO * mn {
+                mn /= MIN_BOX_RATIO.sqrt();
+                mx *= MIN_BOX_RATIO.sqrt();
+            }
             if f_lo < 1.0 {
                 // "active" box: inset each end by (1 - f_lo) of the group's log-range
                 let span = (mx / mn).max(1.0 + 1e-9).ln();

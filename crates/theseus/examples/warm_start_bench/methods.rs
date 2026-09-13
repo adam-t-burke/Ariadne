@@ -119,6 +119,35 @@ pub fn base_options(lo: &[f64], hi: &[f64]) -> InverseFdmOptions {
     }
 }
 
+fn env_f64(var: &str) -> Option<f64> {
+    std::env::var(var).ok().and_then(|s| s.trim().parse().ok())
+}
+
+/// Ablation overrides for `pipeline` (only), read from the environment:
+/// `BENCH_LM` (lm_damping), `BENCH_GUARD` (seed_guard_margin, 0 disables),
+/// `BENCH_S2=clarabel|activeset`, `BENCH_NONDIM=0|1`, `BENCH_CWLS` (cwls_damping).
+fn apply_pipeline_overrides(mut opts: InverseFdmOptions) -> InverseFdmOptions {
+    if let Some(v) = env_f64("BENCH_LM") {
+        opts.lm_damping = v;
+    }
+    if let Some(v) = env_f64("BENCH_GUARD") {
+        opts.seed_guard_margin = v;
+    }
+    if let Some(v) = env_f64("BENCH_CWLS") {
+        opts.cwls_damping = v;
+    }
+    if let Ok(s) = std::env::var("BENCH_S2") {
+        opts.stage2_method = match s.trim() {
+            "clarabel" => Stage2Method::Clarabel,
+            _ => Stage2Method::ActiveSet,
+        };
+    }
+    if let Ok(s) = std::env::var("BENCH_NONDIM") {
+        opts.nondimensionalize = s.trim() != "0";
+    }
+    opts
+}
+
 /// Library options for a method, or `None` for methods that do not call the library.
 pub fn library_options(
     method: Method,
@@ -143,12 +172,12 @@ pub fn library_options(
             max_outer: 1,
             ..base
         },
-        Method::Pipeline => InverseFdmOptions {
+        Method::Pipeline => apply_pipeline_overrides(InverseFdmOptions {
             metric: InverseMetric::GeometryNewton,
             max_frozen_outer: 1,
             max_outer: 2,
             ..base
-        },
+        }),
         Method::Legacy => InverseFdmOptions {
             metric: InverseMetric::GeometryNewton,
             max_frozen_outer: 1,

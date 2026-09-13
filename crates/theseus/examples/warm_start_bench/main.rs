@@ -620,6 +620,7 @@ fn usage() {
         "usage: warm_start_bench <nets|suite [max_iters]|alt [max_iters]|scale|dense|reactions>"
     );
     eprintln!("  env: BENCH_NETS=name1,name2  BENCH_METHODS=uniform,s1,...  BENCH_SIDES=23,46");
+    eprintln!("  pipeline ablations: BENCH_LM=1e-4  BENCH_GUARD=3  BENCH_S2=clarabel|activeset  BENCH_NONDIM=0|1  BENCH_CWLS=1e-6");
 }
 
 fn main() {
