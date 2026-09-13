@@ -1413,6 +1413,7 @@ pub fn solve_inverse_fdm(
         iterations,
         converged,
         geometric_error,
+        diagnostics: InverseDiagnostics::default(),
     })
 }
 
@@ -1474,6 +1475,7 @@ where
             iterations,
             converged: true,
             geometric_error: best_error,
+            diagnostics: InverseDiagnostics::default(),
         });
     }
 
@@ -1596,6 +1598,7 @@ where
         iterations,
         converged,
         geometric_error: best_error,
+        diagnostics: InverseDiagnostics::default(),
     })
 }
 
@@ -1637,6 +1640,10 @@ pub fn solve_spg_box(
             max_frozen_outer: 0,
             max_outer: DEFAULT_MAX_OUTER,
             cwls_damping: 1e-6,
+            stage2_method: Stage2Method::ActiveSet,
+            lm_damping: DEFAULT_LM_DAMPING,
+            seed_guard_margin: DEFAULT_SEED_GUARD_MARGIN,
+            nondimensionalize: true,
         },
     )?;
     Ok(SpgBoxResult {

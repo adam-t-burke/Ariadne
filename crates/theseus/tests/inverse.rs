@@ -4,6 +4,7 @@ use ndarray::Array2;
 use std::time::Instant;
 use theseus::fdm;
 use theseus::inverse::{
+    Stage2Method, DEFAULT_LM_DAMPING, DEFAULT_SEED_GUARD_MARGIN,
     compose_box, geometric_error_vector, solve_inverse_fdm, solve_pseudoinverse_dispatch,
     solve_spg_box, InverseFdmOptions, InverseMetric, LinearAlgebra, ParticularMethod,
     DEFAULT_MAX_OUTER,
@@ -243,6 +244,10 @@ fn inverse_opts(
         max_frozen_outer: 0,
         max_outer: DEFAULT_MAX_OUTER,
         cwls_damping: 1e-6,
+        stage2_method: Stage2Method::ActiveSet,
+        lm_damping: DEFAULT_LM_DAMPING,
+        seed_guard_margin: DEFAULT_SEED_GUARD_MARGIN,
+        nondimensionalize: true,
     }
 }
 

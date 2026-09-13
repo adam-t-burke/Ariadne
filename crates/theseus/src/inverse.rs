@@ -147,6 +147,45 @@ pub struct InverseFdmOptions {
     pub max_outer: usize,
     /// Stage-2 damping in force-density coordinates.
     pub cwls_damping: f64,
+    /// Bound handling for the Stage-2 steps under `LinearAlgebra::Direct`.
+    pub stage2_method: Stage2Method,
+    /// Initial Levenberg--Marquardt damping for the Stage-2 steps, relative to
+    /// the scale of `JᵀJ`. Grows ×10 on a rejected step and shrinks ÷10 on an
+    /// accepted one. `0` restores plain step-halving backtracking.
+    pub lm_damping: f64,
+    /// Stage-1 collapse guard. After Stage 1, a scaled uniform sign seed is
+    /// scored on the same geometric error; when Stage 1 is worse by more than
+    /// this factor the uniform seed initialises Stage 2 instead. `0` disables.
+    pub seed_guard_margin: f64,
+    /// Scale positions by the target extent and loads by their magnitude
+    /// before assembling, so that Stage 2 is solved in dimensionless form.
+    pub nondimensionalize: bool,
+}
+
+/// Bound handling for the Stage-2 compliance-weighted steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Stage2Method {
+    /// Bounded-variable least squares by an add/release active set on the
+    /// sparse weighted saddle system. Exact and warm-started across steps;
+    /// falls back to Clarabel if the active set cycles.
+    #[default]
+    ActiveSet = 0,
+    /// Clarabel interior-point QP (the previous default).
+    Clarabel = 1,
+}
+
+impl TryFrom<i32> for Stage2Method {
+    type Error = TheseusError;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::ActiveSet),
+            1 => Ok(Self::Clarabel),
+            other => Err(TheseusError::Solver(format!(
+                "unknown InvFDM stage-2 method {other} (expected 0=ActiveSet, 1=Clarabel)"
+            ))),
+        }
+    }
 }
 
 impl InverseFdmOptions {
@@ -180,9 +219,18 @@ impl InverseFdmOptions {
             max_frozen_outer: 0,
             max_outer: DEFAULT_MAX_OUTER,
             cwls_damping: 1e-6,
+            stage2_method: Stage2Method::ActiveSet,
+            lm_damping: DEFAULT_LM_DAMPING,
+            seed_guard_margin: DEFAULT_SEED_GUARD_MARGIN,
+            nondimensionalize: true,
         }
     }
 }
+
+/// Default initial Levenberg--Marquardt damping for the Stage-2 steps.
+pub const DEFAULT_LM_DAMPING: f64 = 1e-4;
+/// Default Stage-1 collapse guard margin.
+pub const DEFAULT_SEED_GUARD_MARGIN: f64 = 3.0;
 
 /// Default Gauss--Newton CWLS iteration budget.
 pub const DEFAULT_MAX_OUTER: usize = 3;
@@ -200,6 +248,29 @@ pub struct InverseFdmResult {
     /// geometric one on the same scale. NaN when the Laplacian at the returned
     /// q is singular and the error could not be evaluated.
     pub geometric_error: f64,
+    /// Stage-2 warm-start diagnostics.
+    pub diagnostics: InverseDiagnostics,
+}
+
+/// Diagnostics recorded by the Stage-2 warm start.
+#[derive(Debug, Clone, Default)]
+pub struct InverseDiagnostics {
+    /// Geometric error of the Stage-1 particular (after clipping to the box).
+    pub stage1_error: f64,
+    /// Geometric error of the scaled uniform sign seed scored by the guard.
+    /// NaN when the guard was disabled.
+    pub uniform_seed_error: f64,
+    /// True when the guard replaced the Stage-1 seed by the uniform seed.
+    pub used_uniform_seed: bool,
+    /// Frozen-Jacobian steps accepted.
+    pub frozen_steps: usize,
+    /// Gauss--Newton steps accepted.
+    pub newton_steps: usize,
+    /// Stage-2 linear solves (factorisations) performed, including active-set
+    /// passes and rejected damping trials.
+    pub stage2_factorizations: usize,
+    /// Number of Stage-2 steps that fell back from the active set to Clarabel.
+    pub clarabel_fallbacks: usize,
 }
 
 /// Result from the box-constrained spectral projected-gradient solver.
