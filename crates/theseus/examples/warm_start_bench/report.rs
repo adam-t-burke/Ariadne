@@ -47,8 +47,11 @@ fn evals_to(run: &Run, reference: f64, factor: f64) -> Option<usize> {
 }
 
 pub fn print_case(net: &Net, case: &str, rows: &[Row], l: f64) {
+    // Reference rows (the oracle started at q_ref, an external tool's run)
+    // are excluded from the "best" the eval-count columns are measured against.
     let best = rows
         .iter()
+        .filter(|r| !r.label.starts_with("oracle") && !r.label.starts_with("ext:"))
         .filter_map(|r| r.run.as_ref().map(|run| run.final_err))
         .filter(|v| v.is_finite())
         .fold(f64::INFINITY, f64::min);

@@ -25,7 +25,12 @@
 //! - `reactions`          tied arch and cable truss with and without the
 //!                        zero-horizontal-reaction rows, plus the inconsistent
 //!                        zero-vertical-reaction request.
+//! - `external <path..>`  case studies exported from JAX FDM / compas_cem
+//!                        (`bench/external/cases/*.json`, see `external.rs`).
+//!                        `BENCH_ITERS` sets the L-BFGS-B cap, `BENCH_RESULTS`
+//!                        a directory for per-case JSON results.
 
+mod external;
 mod methods;
 mod nets;
 mod report;
@@ -617,7 +622,7 @@ fn cmd_reactions() {
 
 fn usage() {
     eprintln!(
-        "usage: warm_start_bench <nets|suite [max_iters]|alt [max_iters]|scale|dense|reactions>"
+        "usage: warm_start_bench <nets|suite [max_iters]|alt [max_iters]|scale|dense|reactions|external <file|dir>..>"
     );
     eprintln!("  env: BENCH_NETS=name1,name2  BENCH_METHODS=uniform,s1,...  BENCH_SIDES=23,46");
     eprintln!("  pipeline ablations: BENCH_LM=1e-4  BENCH_GUARD=3  BENCH_S2=clarabel|activeset  BENCH_NONDIM=0|1  BENCH_CWLS=1e-6");
@@ -640,6 +645,16 @@ fn main() {
         Some("scale") => cmd_scale(),
         Some("dense") => cmd_dense(),
         Some("reactions") => cmd_reactions(),
+        Some("external") => {
+            let iters = std::env::var("BENCH_ITERS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(DEFAULT_MAX_ITERS);
+            let results = std::env::var("BENCH_RESULTS")
+                .ok()
+                .map(std::path::PathBuf::from);
+            external::cmd_external(&args[2..], iters, results.as_deref());
+        }
         _ => usage(),
     }
 }

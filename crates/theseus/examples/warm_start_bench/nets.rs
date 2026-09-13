@@ -105,6 +105,12 @@ pub struct Net {
     /// Edges whose force density the `reactions` subcommand reports
     /// (tie / bottom chord). Empty for most nets.
     pub tie_edges: Vec<usize>,
+    /// Full 3-D load vector per free node (index-aligned with `free`); when
+    /// present it overrides the vertical `loads`. Used by the external cases.
+    pub load_xyz: Option<Vec<[f64; 3]>>,
+    /// Magnitude of the uniform seed (`sign_seed`); 1 for the synthetic nets,
+    /// median |q_ref| for the external cases.
+    pub seed_magnitude: f64,
 }
 
 impl Net {
@@ -134,7 +140,14 @@ impl Net {
         let fixed_incidence = incidence.extract_columns(&self.fixed);
         let mut loads = Array2::zeros((self.free.len(), 3));
         for i in 0..self.free.len() {
-            loads[[i, 2]] = -self.loads[i];
+            match &self.load_xyz {
+                Some(v) => {
+                    for d in 0..3 {
+                        loads[[i, d]] = v[i][d];
+                    }
+                }
+                None => loads[[i, 2]] = -self.loads[i],
+            }
         }
         Problem {
             topology: NetworkTopology {
@@ -286,9 +299,12 @@ impl Net {
         self
     }
 
-    /// Uniform magnitude with the true sign pattern.
+    /// Uniform magnitude (`seed_magnitude`) with the true sign pattern.
     pub fn sign_seed(&self) -> Vec<f64> {
-        self.q_true.iter().map(|q| q.signum()).collect()
+        self.q_true
+            .iter()
+            .map(|q| q.signum() * self.seed_magnitude)
+            .collect()
     }
 
     /// Full positions (all nodes) from free-node positions and the anchors.
@@ -438,6 +454,8 @@ impl Grid {
             q_true,
             extent,
             tie_edges: Vec::new(),
+            load_xyz: None,
+            seed_magnitude: 1.0,
         }
     }
 }
@@ -544,6 +562,8 @@ pub fn diamond(n: usize) -> Net {
         q_true: assign_q(ne, 0.75, 0x5eed, 1.0),
         extent: m as f64,
         tie_edges: Vec::new(),
+        load_xyz: None,
+        seed_magnitude: 1.0,
     }
 }
 
@@ -595,6 +615,8 @@ pub fn radial(rings: usize, spokes: usize, all_outer_fixed: bool) -> Net {
         q_true: assign_q(ne, 0.75, 0x5eed, 1.0),
         extent: 2.0 * rings as f64,
         tie_edges: Vec::new(),
+        load_xyz: None,
+        seed_magnitude: 1.0,
     }
 }
 
@@ -626,6 +648,8 @@ pub fn oculus(side: usize, hole: usize) -> Net {
         q_true: assign_q(ne, 0.75, 0x5eed, 1.0),
         extent,
         tie_edges: Vec::new(),
+        load_xyz: None,
+        seed_magnitude: 1.0,
     }
 }
 
@@ -812,6 +836,8 @@ pub fn cable_dome(rings: usize, spokes: usize) -> Net {
         q_true: q,
         extent: 2.0 * r_out,
         tie_edges: Vec::new(),
+        load_xyz: None,
+        seed_magnitude: 1.0,
     }
 }
 
@@ -869,6 +895,8 @@ pub fn cable_truss(n: usize) -> Net {
         q_true: q,
         extent: span,
         tie_edges,
+        load_xyz: None,
+        seed_magnitude: 1.0,
     }
 }
 
@@ -926,6 +954,8 @@ pub fn barrel_vault(n: usize, m: usize) -> Net {
         q_true: q,
         extent: (n - 1) as f64,
         tie_edges,
+        load_xyz: None,
+        seed_magnitude: 1.0,
     }
 }
 
@@ -984,6 +1014,8 @@ pub fn wheel(spokes: usize, anchor_every: usize) -> Net {
         q_true: q,
         extent: 2.0 * r_out,
         tie_edges: Vec::new(),
+        load_xyz: None,
+        seed_magnitude: 1.0,
     }
 }
 
@@ -1050,6 +1082,8 @@ pub fn tied_arch_straight(bays: usize) -> Net {
         q_true: q,
         extent: span,
         tie_edges,
+        load_xyz: None,
+        seed_magnitude: 1.0,
     }
 }
 
@@ -1101,6 +1135,8 @@ pub fn tied_arch(bays: usize) -> Net {
         q_true: q,
         extent: span,
         tie_edges,
+        load_xyz: None,
+        seed_magnitude: 1.0,
     }
 }
 
