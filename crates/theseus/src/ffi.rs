@@ -3075,6 +3075,7 @@ pub unsafe extern "C" fn theseus_solve_inverse_fdm_metric_phases(
                 lm_damping: crate::inverse::DEFAULT_LM_DAMPING,
                 seed_guard_margin: crate::inverse::DEFAULT_SEED_GUARD_MARGIN,
                 nondimensionalize: true,
+                reaction_weight: 1.0,
             },
         )?;
         let q = result.q;

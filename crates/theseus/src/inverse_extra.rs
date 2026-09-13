@@ -1034,12 +1034,20 @@ struct GeometryProbe {
     neg_error: Vec<f64>,
     /// `‖x(q) − x*‖` over the free-node rows only.
     error: f64,
+    /// `‖S⁻¹ r‖` over all rows: the geometric error plus the reaction
+    /// residuals (unit weight), which is the objective the Stage-2 steps
+    /// minimise. Equal to `error` without reaction rows.
+    merit: f64,
 }
 
 /// Evaluate the exact geometric error at an unknown vector.
 ///
 /// Uses the identity `x(q) − x* = −D(q)⁻¹(E(x*)q − p)`, so no forward solve is
 /// needed. Exact for geometry-independent loads.
+///
+/// Reaction rows, when present, are evaluated at the target geometry like the
+/// rest of the residual: `w · E_R(x*) q`. They coincide with the realised
+/// reactions once `x(q) = x*`.
 fn probe_geometry(
     problem: &Problem,
     system: &EquilibriumSystem,
@@ -1058,10 +1066,12 @@ fn probe_geometry(
     }
     let neg_error = weight.apply_inverse(&r)?;
     let error = l2_norm_prefix(&neg_error, 3 * system.n_free);
+    let merit = l2_norm_prefix(&neg_error, neg_error.len());
     Ok(GeometryProbe {
         weight,
         neg_error,
         error,
+        merit,
     })
 }
 
@@ -1172,6 +1182,37 @@ fn validate_reaction_constraints(
         }
     }
     Ok(())
+}
+
+/// `‖E_R(x*) q‖` over the reaction rows of an assembled q-form system, with
+/// the row weight divided out (zero without reaction rows).
+fn reaction_residual(system: &EquilibriumSystem, q: &[f64], weight: f64) -> f64 {
+    let first = 3 * system.n_free;
+    if system.n_eq <= first {
+        return 0.0;
+    }
+    let r = system.a.matvec(q);
+    r[first..]
+        .iter()
+        .map(|v| (v / weight).powi(2))
+        .sum::<f64>()
+        .sqrt()
+}
+
+/// Scale the optional reaction rows (those after the `3·n_free` free-node
+/// rows) of an assembled system by `weight`.
+fn weight_reaction_rows(system: &mut EquilibriumSystem, weight: f64) {
+    let first = 3 * system.n_free;
+    if weight == 1.0 || system.n_eq <= first {
+        return;
+    }
+    let scales: Vec<f64> = (0..system.n_eq)
+        .map(|row| if row >= first { weight } else { 1.0 })
+        .collect();
+    system.a = row_scaled_copy(&system.a, &scales);
+    for value in system.p.iter_mut().skip(first) {
+        *value *= weight;
+    }
 }
 
 /// Dimensional scales used to non-dimensionalise the inverse problem.
@@ -1299,12 +1340,18 @@ pub fn solve_inverse_fdm(
             result.geometric_error *= scales.length;
             result.diagnostics.stage1_error *= scales.length;
             result.diagnostics.uniform_seed_error *= scales.length;
+            result.diagnostics.reaction_residual *= scales.force;
             return Ok(result);
         }
     }
 
+    if !opts.reaction_weight.is_finite() || opts.reaction_weight <= 0.0 {
+        return Err(TheseusError::Solver(
+            "reaction_weight must be finite and positive".into(),
+        ));
+    }
     let ne = problem.topology.num_edges;
-    let stage1_system = EquilibriumSystem::assemble(
+    let mut stage1_system = EquilibriumSystem::assemble(
         problem,
         target_free_xyz,
         if opts.solve_for_q {
@@ -1316,6 +1363,7 @@ pub fn solve_inverse_fdm(
         opts.enforce_zero_ry,
         opts.enforce_zero_rz,
     )?;
+    weight_reaction_rows(&mut stage1_system, opts.reaction_weight);
     let q_bounds = compose_box(ne, &opts.signs, &opts.lower, &opts.upper)?;
     let stage1_bounds = if opts.solve_for_q {
         q_bounds.clone()
@@ -1464,7 +1512,7 @@ pub fn solve_inverse_fdm(
 
     if opts.metric.is_geometric() {
         validate_geometric_options(problem, &opts)?;
-        let stage2_system = EquilibriumSystem::assemble(
+        let mut stage2_system = EquilibriumSystem::assemble(
             problem,
             target_free_xyz,
             EquilibriumUnknown::ForceDensity,
@@ -1472,6 +1520,7 @@ pub fn solve_inverse_fdm(
             opts.enforce_zero_ry,
             opts.enforce_zero_rz,
         )?;
+        weight_reaction_rows(&mut stage2_system, opts.reaction_weight);
         let (frozen_budget, newton_budget) = match opts.metric {
             InverseMetric::Force => unreachable!("force metric is not geometric"),
             // Legacy native Geometry callers use max_outer as their frozen budget.
@@ -1532,7 +1581,7 @@ pub fn solve_inverse_fdm(
                     &uniform,
                     frozen_budget,
                 )?;
-                if alternative.geometric_error < frozen.geometric_error {
+                if ctx.probe_error(&alternative.q) < ctx.probe_error(&frozen.q) {
                     frozen = alternative;
                     ctx.diagnostics.used_uniform_seed = true;
                 } else {
@@ -1556,6 +1605,8 @@ pub fn solve_inverse_fdm(
             None => solve_geometric_outer(&mut ctx, InverseMetric::Geometry, &seed, 0)?,
         };
         result.diagnostics = ctx.diagnostics.clone();
+        result.diagnostics.reaction_residual =
+            reaction_residual(&stage2_system, &result.q, opts.reaction_weight);
         return Ok(result);
     }
 
@@ -1679,10 +1730,11 @@ impl<'a> Stage2Context<'a> {
         }
     }
 
-    /// Geometric error of `q`, or +∞ when the Laplacian is singular.
+    /// Stage-2 merit of `q` (geometric error plus reaction residuals), or +∞
+    /// when the Laplacian is singular.
     fn probe_error(&self, q: &[f64]) -> f64 {
         probe_geometry(self.problem, self.system, q, true)
-            .map(|probe| probe.error)
+            .map(|probe| probe.merit)
             .unwrap_or(f64::INFINITY)
     }
 
@@ -2096,11 +2148,12 @@ fn solve_geometric_outer(
 
     let mut probe = probe_geometry(problem, system, &x, true)?;
     let mut best_x = x.clone();
+    let mut best_merit = probe.merit;
     let mut best_error = probe.error;
     let mut iterations = 0;
     let mut converged = false;
     let tolerance = opts.tol.max(1e-12);
-    if best_error <= tolerance {
+    if best_merit <= tolerance {
         return Ok(InverseFdmResult {
             q: best_x,
             iterations,
@@ -2128,7 +2181,7 @@ fn solve_geometric_outer(
                 let current = Array2::from_shape_fn((n_free, 3), |(i, d)| {
                     system.free_positions[[i, d]] - probe.neg_error[d * n_free + i]
                 });
-                let at_current = EquilibriumSystem::assemble(
+                let mut at_current = EquilibriumSystem::assemble(
                     problem,
                     &current,
                     EquilibriumUnknown::ForceDensity,
@@ -2136,6 +2189,7 @@ fn solve_geometric_outer(
                     opts.enforce_zero_ry,
                     opts.enforce_zero_rz,
                 )?;
+                weight_reaction_rows(&mut at_current, opts.reaction_weight);
                 Some(at_current.a)
             }
         };
@@ -2171,9 +2225,9 @@ fn solve_geometric_outer(
                 clip_to_box(&mut candidate, bounds);
                 total_probes += 1;
                 match probe_geometry(problem, system, &candidate, true) {
-                    Ok(next) if next.error < probe.error => {
+                    Ok(next) if next.merit < probe.merit => {
                         let improvement =
-                            (probe.error - next.error) / probe.error.max(f64::MIN_POSITIVE);
+                            (probe.merit - next.merit) / probe.merit.max(f64::MIN_POSITIVE);
                         let step_norm = candidate
                             .iter()
                             .zip(&x)
@@ -2185,11 +2239,12 @@ fn solve_geometric_outer(
                         x = candidate;
                         probe = next;
                         accepted = true;
-                        if probe.error < best_error {
+                        if probe.merit < best_merit {
+                            best_merit = probe.merit;
                             best_error = probe.error;
                             best_x = x.clone();
                         }
-                        converged = probe.error <= tolerance
+                        converged = probe.merit <= tolerance
                             || (improvement <= tolerance && relative_step <= tolerance);
                         break 'tries;
                     }
@@ -2290,6 +2345,7 @@ pub fn solve_spg_box(
             lm_damping: DEFAULT_LM_DAMPING,
             seed_guard_margin: DEFAULT_SEED_GUARD_MARGIN,
             nondimensionalize: true,
+            reaction_weight: 1.0,
         },
     )?;
     Ok(SpgBoxResult {

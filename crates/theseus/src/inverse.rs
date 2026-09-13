@@ -204,6 +204,13 @@ pub struct InverseFdmOptions {
     /// Scale positions by the target extent and loads by their magnitude
     /// before assembling, so that Stage 2 is solved in dimensionless form.
     pub nondimensionalize: bool,
+    /// Weight of the `enforce_zero_r*` reaction rows relative to the
+    /// equilibrium rows (Stage 1) and to the geometric rows (Stage 2). The
+    /// rows are least-squares penalties, not hard constraints: `1` treats a
+    /// reaction of one load unit like a geometric error of one target extent
+    /// (with `nondimensionalize`); larger values push harder towards zero
+    /// reaction at the expense of geometric fit.
+    pub reaction_weight: f64,
 }
 
 /// Bound handling for the Stage-2 compliance-weighted steps.
@@ -267,6 +274,7 @@ impl InverseFdmOptions {
             lm_damping: DEFAULT_LM_DAMPING,
             seed_guard_margin: DEFAULT_SEED_GUARD_MARGIN,
             nondimensionalize: true,
+            reaction_weight: 1.0,
         }
     }
 }
@@ -299,10 +307,12 @@ pub struct InverseFdmResult {
 /// Diagnostics recorded by the Stage-2 warm start.
 #[derive(Debug, Clone, Default)]
 pub struct InverseDiagnostics {
-    /// Geometric error of the Stage-1 particular (after clipping to the box).
+    /// Stage-2 merit of the Stage-1 particular after clipping to the box:
+    /// the geometric error plus the reaction residuals when reaction rows are
+    /// enforced (identical to the geometric error otherwise).
     pub stage1_error: f64,
-    /// Geometric error of the scaled uniform sign seed scored by the guard.
-    /// NaN when the guard was disabled.
+    /// Stage-2 merit of the scaled uniform sign seed scored by the guard. NaN
+    /// when the guard was disabled.
     pub uniform_seed_error: f64,
     /// True when the guard replaced the Stage-1 seed by the uniform seed.
     pub used_uniform_seed: bool,
@@ -315,6 +325,10 @@ pub struct InverseDiagnostics {
     pub stage2_factorizations: usize,
     /// Number of Stage-2 steps that fell back from the active set to Clarabel.
     pub clarabel_fallbacks: usize,
+    /// `‖E_R(x*) q‖`: the support reactions along the enforced axes,
+    /// evaluated at the target geometry for the returned q (load units, weight
+    /// divided out). Zero when no reaction rows are enforced.
+    pub reaction_residual: f64,
 }
 
 /// Result from the box-constrained spectral projected-gradient solver.

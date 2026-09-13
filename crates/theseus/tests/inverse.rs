@@ -248,6 +248,7 @@ fn inverse_opts(
         lm_damping: DEFAULT_LM_DAMPING,
         seed_guard_margin: DEFAULT_SEED_GUARD_MARGIN,
         nondimensionalize: true,
+        reaction_weight: 1.0,
     }
 }
 
