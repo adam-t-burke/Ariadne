@@ -546,7 +546,7 @@ the augmented system, not of `EᵀS⁻ᵀS⁻¹E` (which would be dense).
 
 ### 5.2 Warm-start cost against size (`warm_start_bench scale`)
 
-Corner-anchored quads with jittered targets and the loose box; L-BFGS-B
+Corner-anchored quads with jittered targets and the snug box; L-BFGS-B
 (200 iterations) is run up to 16 k edges. `fac` is the number of numeric
 factorisations of the Stage-2 saddle, `cap` the Stage-2 steps on which the
 active set reached its pass limit.
@@ -563,28 +563,41 @@ L-BFGS-B iterations / fac`.
 | gram_sparse | 0.00 s / 22.8 / 0.124 | 0.01 s / 57 / 0.278 | 0.05 s / 90.3 / 0.485 | 0.32 s / 191 / – |
 | gram_dense | 0.11 s / 22.8 / 0.131 | 6.64 s / 57 / 0.271 | skipped (> 6 000 edges) | skipped |
 | length_ratio | 0.00 s / 0.257 / 0.0726 | 0.01 s / 1.61 / 0.154 | 0.04 s / 2.97 / 0.337 | 0.15 s / 9.13 / – |
-| frozen | 0.14 s / 0.104 / 0.0726 / 17 | 0.97 s / 0.418 / 0.150 / 26 | 3.29 s / 2.31 / 0.349 / 14 | 21.3 s / 6.63 / – / 15 |
-| **pipeline** | 0.26 s / 0.0753 / 0.0626 / 37 | 2.15 s / 0.313 / 0.134 / 63 | 9.92 s / 1.31 / 0.292 / 51 | 73.6 s / 4.28 / – / 60 (cap 1) |
+| frozen | 0.14 s / 0.104 / 0.0726 / 17 | 0.95 s / 0.418 / 0.150 / 26 | 6.30 s / 2.31 / 0.350 / 32 | 33.3 s / 6.63 / – / 27 |
+| **pipeline** | 0.36 s / 0.0753 / 0.0626 / 53 | 3.15 s / 0.301 / 0.135 / 96 | 18.8 s / 1.31 / 0.292 / 105 | 134 s / 4.28 / – / 118 (cap 1) |
 | legacy (Clarabel Stage 2) | 0.32 s / 0.0753 / 0.0626 / 3 | 3.22 s / 0.282 / 0.134 / 3 | 55.8 s / 2.31 / 0.283 / 3 | 536 s / 18.6 / – / 3 |
 | pipeline_noguard | 0.20 s / 0.0753 / 0.0626 / 29 | 1.48 s / 0.301 / 0.135 / 44 | 10.2 s / 3.38 / 0.296 / 54 | skipped (time budget) |
+
+The `frozen` and `pipeline` rows are from the re-run after the seed guard was
+changed to race both seeds through the whole of Stage 2 (Section 3.3); the
+guard fires on these quads from 4 k edges up (`guard→u`), so those two rows
+carry roughly twice the factorisations of the earlier single-branch run
+(`pipeline_noguard`, measured before that change, shows the single-branch
+cost). The other rows are unchanged within run-to-run noise.
+
+![warm-start cost and start quality against size](figures/scale.png)
 
 What the trend says:
 
 * **Per-factorisation cost is near-linear.** The pipeline's time per numeric
-  factorisation is 7 ms at 1 k edges, 34 ms at 4 k, 190 ms at 16 k and
-  1.2 s at 65 k: a log–log slope of 1.1–1.3, as expected for a fill-reducing
+  factorisation is 7 ms at 1 k edges, 33 ms at 4 k, 180 ms at 16 k and
+  1.1 s at 65 k: a log–log slope of 1.1–1.3, as expected for a fill-reducing
   LDL of a 2-D mesh (`O(n^1.5)` worst case, closer to linear at these sizes). Stage 1 (interior point, `t`-form) scales the same way
-  (0.02 → 2.5 s) and is 3 % of the total at 65 k.
-* **The interior-point Stage 2 does not scale.** `legacy` is 1.2× the
-  pipeline at 1 k edges, 5.6× at 16 k and 7.3× at 65 k (nine minutes for
-  three steps), and without the seed guard it returns a *worse* warm start
-  than the uniform seed at 65 k (18.6 vs 9.1) because Stage 1 has collapsed
-  (`s1e = 1.8e4`). Extrapolated to 150 k edges the pipeline is 3–4 minutes,
-  the previous branch about half an hour.
+  (0.02 → 2.4 s) and is 2 % of the total at 65 k.
+* **The interior-point Stage 2 does not scale.** `legacy` costs the same as
+  the pipeline at 1–4 k edges (three interior-point solves against ~100
+  active-set factorisations, two seeds raced), 2.7× at 16 k and 3.9× at 65 k
+  (nine minutes for three steps), and without the seed guard it returns a
+  *worse* warm start than the uniform seed at 65 k (18.6 vs 9.1) because
+  Stage 1 has collapsed (`s1e = 1.8e4`). Extrapolated to 150 k edges the
+  pipeline is 5–6 minutes with the race, about half that with
+  `seed_guard_margin = ∞` when the seed is trusted; the previous branch
+  about half an hour.
 * **The warm start pays for itself at every size that could be measured.**
-  At 16 k edges the pipeline's 9.9 s equals ~1000 L-BFGS-B evaluations; the
-  start it hands over is 2.3× closer than the uniform seed and L-BFGS-B ends
-  25 % lower after 200 iterations (0.292 vs 0.390). The naive seeds are
+  At 16 k edges the pipeline's 18.8 s equals ~2000 L-BFGS-B evaluations
+  (the frozen step alone, 6.3 s, ~700); the start it hands over is 2.3×
+  closer than the uniform seed and L-BFGS-B ends 25 % lower after 200
+  iterations (0.292 vs 0.389). The naive seeds are
   worse than uniform at this size and beyond (`s1` 39.8, sparse Gram 90 vs
   3.07), and the sparse Gram clips nearly every edge to the box at 4 k edges
   and up.
@@ -594,7 +607,7 @@ What the trend says:
   partial step rather than the KKT point. In a run where that step was
   instead solved exactly by the interior point (180 s for the single step)
   the warm start was 1.70 instead of 4.28. This is open item 1 in Section 7.
-  The frozen step alone (21 s, 6.63) is still 1.4× better than the uniform
+  The frozen step alone (33 s, 6.63) is still 1.4× better than the uniform
   seed and 15× better than Stage 1.
 * **Memory** is `O(nnz)` throughout: the saddle at 65 k edges has 2·98 k +
   65 k rows and about 2 M non-zeros before fill; the dense Gram that some
@@ -611,7 +624,7 @@ What the trend says:
 | Least-squares force residual on `E(x*)` (Schek's inverse, Block & Lachauer 2014 "best-fit TNA" in force-density form, Linkwitz) | `min ‖E(x*)q − p‖²` | with an interior point (our Stage 1) or unboxed + clip (Gram) | finds the self-stress pattern but not its magnitude | 1 sparse LS solve; ruinous when `EᵀE` is formed densely | 30–130× the optimum start; L-BFGS-B needs 600–900 evaluations to recover, cable dome never |
 | Geometric least squares by Gauss–Newton / L-BFGS on `‖x(q) − x*‖²` (Van Mele & Block 2014 algebraic graph statics for the 2-D case; JAX FDM, Pastrana et al. 2023, for the general differentiable case) | the right objective | box via projection or `L-BFGS-B` | yes, given a start | 1 forward solve + adjoint per evaluation | this is the downstream optimiser; from a cold start it needs 100s–1000s of evaluations |
 | Length-ratio update `q ← q·ℓ(q)/ℓ*` (practitioner heuristic, iterative TNA horizontal equilibrium) | a fixed-point form of the geometric problem | clip | no (diverges with compression) | 1 forward solve | 5× the optimum on shallow tension nets; diverges on the barrel, the tied arch, the dome |
-| **Compliance-weighted LS + active set (this work)** | the geometric objective, linearised with its own metric | exact, active set on the sparse saddle | yes | 3–5 numeric LDLs per step (one symbolic) | within 2 % of the optimum on 64/64 before L-BFGS-B; 9.9 s at 16 k edges vs 56 s for the interior-point variant |
+| **Compliance-weighted LS + active set (this work)** | the geometric objective, linearised with its own metric | exact, active set on the sparse saddle | yes | 3–5 numeric LDLs per step (one symbolic) | within 2 % of the optimum on 64/64 before L-BFGS-B; 19 s at 16 k edges (two seeds raced) vs 52 s for the interior-point variant |
 
 Two remarks for the paper:
 

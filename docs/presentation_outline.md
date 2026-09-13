@@ -177,10 +177,15 @@ one unweighted seed ends 8–80× off; the pipeline is at 1.0 everywhere.
 
 **Show.** ![scale](figures/scale.png)
 
-Corner-anchored quads 1 k → 65 k edges. Per-factorisation cost grows
-near-linearly; the interior-point Stage 2 (`legacy`) is 1.2× the pipeline at
-1 k edges and 4–7× at 16 k–65 k. The pipeline's start is 2.3× closer than
-uniform at 16 k and 200 iterations from it end 25 % lower.
+Corner-anchored quads 1 k → 65 k edges (snug box, jittered target).
+Per-factorisation cost grows near-linearly (7 ms → 1.1 s per sparse LDLᵀ
+from 1 k to 65 k edges); the interior-point Stage 2 (`legacy`) costs the same
+as the pipeline at 1–4 k edges and 2.7–3.9× at 16 k–65 k (526 s for three
+steps at 65 k), and its start there is worse than uniform (18.6 vs 9.1)
+because it trusts a collapsed Stage 1. The pipeline's start is 2.3× closer
+than uniform at 16 k and 200 iterations from it end 25 % lower. The guard
+racing both seeds accounts for about half the pipeline's cost at 4 k edges
+and up.
 
 **Backup.** ![convergence grid](figures/convergence_grid.png)
 

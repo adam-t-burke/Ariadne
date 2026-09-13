@@ -509,7 +509,7 @@ def fig_scale(data: Path, out: Path):
     ax.set_ylabel("clipped warm-start error / L")
     ax.set_title("Quality of the handed-over start (jit2%d, snug box)")
     ax.grid(True, which="both", alpha=0.25)
-    ax.legend(frameon=False, fontsize=8)
+    ax.legend(frameon=False, fontsize=8, loc="upper left")
     fig.savefig(out / "scale.png")
     plt.close(fig)
 
