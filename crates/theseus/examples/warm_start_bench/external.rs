@@ -17,10 +17,11 @@ use ndarray::Array2;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
+/// Per-edge bounds; `null` entries mean "unbounded" on that side.
 #[derive(Deserialize)]
 struct BoundsJson {
-    lo: Vec<f64>,
-    hi: Vec<f64>,
+    lo: Vec<Option<f64>>,
+    hi: Vec<Option<f64>>,
 }
 
 #[derive(Deserialize)]
@@ -142,11 +143,28 @@ impl Case {
     /// The case's own box, else the same loose box the synthetic suite uses:
     /// per sign group `[min|q|/100, 100·max|q|]` (so `q_ref` is always inside).
     fn box_(&self, net: &Net) -> (Vec<f64>, Vec<f64>, &'static str) {
+        let (loose_lo, loose_hi) = net.box_from_true(DEFAULT_BOX_FACTOR, DEFAULT_BOX_FACTOR);
         if let Some(b) = &self.bounds {
-            return (b.lo.clone(), b.hi.clone(), "case");
+            // Unbounded sides take the loose box's value: L-BFGS-B's direct
+            // box parameterisation needs a finite interval.
+            let lo: Vec<f64> =
+                b.lo.iter()
+                    .zip(&loose_lo)
+                    .map(|(v, l)| v.unwrap_or(*l))
+                    .collect();
+            let hi: Vec<f64> =
+                b.hi.iter()
+                    .zip(&loose_hi)
+                    .map(|(v, h)| v.unwrap_or(*h))
+                    .collect();
+            let name = if b.lo.iter().chain(b.hi.iter()).any(|v| v.is_none()) {
+                "case+loose"
+            } else {
+                "case"
+            };
+            return (lo, hi, name);
         }
-        let (lo, hi) = net.box_from_true(DEFAULT_BOX_FACTOR, DEFAULT_BOX_FACTOR);
-        (lo, hi, "loose")
+        (loose_lo, loose_hi, "loose")
     }
 
     fn free_target(&self, net: &Net, full: &[[f64; 3]]) -> Array2<f64> {
