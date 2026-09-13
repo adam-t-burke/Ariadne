@@ -331,8 +331,12 @@ pub struct InverseDiagnostics {
     /// Stage-2 linear solves (factorisations) performed, including active-set
     /// passes and rejected damping trials.
     pub stage2_factorizations: usize,
-    /// Number of Stage-2 steps that fell back from the active set to Clarabel.
+    /// Number of Stage-2 steps that fell back from the active set to Clarabel
+    /// (only after a numerical failure of the sparse saddle solve).
     pub clarabel_fallbacks: usize,
+    /// Number of Stage-2 steps on which the active set reached its pass limit
+    /// and returned the best feasible iterate seen instead of a settled set.
+    pub active_set_capped: usize,
     /// `‖E_R(x(q)) q‖`: the support reactions along the enforced axes that a
     /// forward solve at the returned q realises (load units, weight divided
     /// out). Zero when no reaction rows are enforced; NaN if the Laplacian at
