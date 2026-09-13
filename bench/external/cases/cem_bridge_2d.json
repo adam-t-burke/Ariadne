@@ -1,0 +1,288 @@
+{
+ "name": "cem_bridge_2d",
+ "source": "compas_cem",
+ "source_ref": "examples/03_bridge_2d.py + 03_bridge_2d.json (compas_cem commit 0964b764783a)",
+ "description": "Suspended bridge in 2D loaded from the repo JSON: two tension trails (cables) rising from the loaded deck nodes 2 and 6 to the supports 1 and 5, cross-linked by two tension ties and one compression strut (deviation edges); unit downward loads at nodes 2 and 6. Optimisation: PointGoal on the two support nodes (1, 5), parameters = all trail-edge lengths (bounds -15/+5) and all deviation-edge forces (+-10), nlopt SLSQP, 100 evals, eps 1e-6.",
+ "nodes": [
+  [
+   -13.02342925619295,
+   27.517200107832203,
+   0.0
+  ],
+  [
+   -20.67005952940526,
+   42.69949212018395,
+   0.0
+  ],
+  [
+   -6.5,
+   0.0,
+   0.0
+  ],
+  [
+   -6.5,
+   13.318453844734805,
+   0.0
+  ],
+  [
+   12.313680813793288,
+   22.977491229829617,
+   0.0
+  ],
+  [
+   15.699976118843717,
+   28.84004045231408,
+   0.0
+  ],
+  [
+   6.5,
+   0.0,
+   0.0
+  ],
+  [
+   6.5,
+   16.643567457498868,
+   0.0
+  ]
+ ],
+ "edges": [
+  [
+   7,
+   3
+  ],
+  [
+   7,
+   4
+  ],
+  [
+   3,
+   0
+  ],
+  [
+   3,
+   4
+  ],
+  [
+   0,
+   1
+  ],
+  [
+   0,
+   4
+  ],
+  [
+   4,
+   5
+  ],
+  [
+   2,
+   3
+  ],
+  [
+   6,
+   7
+  ]
+ ],
+ "fixed": [
+  1,
+  5
+ ],
+ "loads": [
+  [
+   0.0,
+   0.0,
+   0.0
+  ],
+  [
+   0.0,
+   0.0,
+   0.0
+  ],
+  [
+   0.0,
+   -1.0,
+   0.0
+  ],
+  [
+   0.0,
+   0.0,
+   0.0
+  ],
+  [
+   0.0,
+   0.0,
+   0.0
+  ],
+  [
+   0.0,
+   0.0,
+   0.0
+  ],
+  [
+   0.0,
+   -1.0,
+   0.0
+  ],
+  [
+   0.0,
+   0.0,
+   0.0
+  ]
+ ],
+ "q_ref": [
+  0.09226620769891038,
+  0.20631691668384106,
+  0.0745965571572221,
+  -0.03788920114943832,
+  0.07037154508091678,
+  0.002031795397169331,
+  0.1589067516308799,
+  0.07508379063049656,
+  0.06008327256482765
+ ],
+ "signs": [
+  1,
+  1,
+  1,
+  -1,
+  1,
+  1,
+  1,
+  1,
+  1
+ ],
+ "target": [
+  [
+   -13.02342925619295,
+   27.517200107832203,
+   0.0
+  ],
+  [
+   -20.67005952940526,
+   42.69949212018395,
+   0.0
+  ],
+  [
+   -6.5,
+   0.0,
+   0.0
+  ],
+  [
+   -6.5,
+   13.318453844734805,
+   0.0
+  ],
+  [
+   12.313680813793288,
+   22.977491229829617,
+   0.0
+  ],
+  [
+   15.699976118843717,
+   28.84004045231408,
+   0.0
+  ],
+  [
+   6.5,
+   0.0,
+   0.0
+  ],
+  [
+   6.5,
+   16.643567457498868,
+   0.0
+  ]
+ ],
+ "bounds": null,
+ "external": {
+  "tool": "compas_cem 0.8.6",
+  "form_finding_time_s": 0.0004382560000522062,
+  "optimization_run": {
+   "algorithm": "nlopt LD_SLSQP",
+   "time_s": 0.09946775436401367,
+   "iterations": 32,
+   "loss_start": 668.3278565258167,
+   "loss_end": 2.6369235698694074e-07,
+   "n_parameters": 9,
+   "n_goals": 2,
+   "status": "NLOPT_EPSVAL_REACHED",
+   "gradient_norm_end": 0.021584589537609316,
+   "stopval_eps": 1e-06,
+   "ftol_abs_kappa": 1e-08,
+   "max_evals": 100,
+   "gradient": "autograd (AD)",
+   "notes": ""
+  },
+  "cem": {
+   "node_keys": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+   ],
+   "n_trail_edges": 6,
+   "n_deviation_edges": 3,
+   "n_indirect_deviation_edges": 1,
+   "n_trails": 2,
+   "n_auxiliary_trails": 0,
+   "auxiliary_trail_edges": [],
+   "dropped_zero_force_auxiliary_trails": 0,
+   "fixed_nodes_note": "CEM support nodes",
+   "origin_nodes": [
+    2,
+    6
+   ],
+   "reference_eta": 1e-13,
+   "reactions": {
+    "5": [
+     0.5381051869884631,
+     0.9315986532211468,
+     -0.0
+    ],
+    "1": [
+     -0.5381051869884631,
+     1.0684013467788533,
+     -0.0
+    ]
+   },
+   "goals": {
+    "PointGoal": 2
+   },
+   "parameters": {
+    "TrailEdgeParameter": 6,
+    "DeviationEdgeParameter": 3
+   },
+   "from_cad2023_paper": false
+  },
+  "fdm_check": {
+   "residual_free_max_abs": 8.881784197001252e-16,
+   "residual_free_rel": 6.796613058078172e-16,
+   "solve_error_max_abs": 2.3092638912203256e-14,
+   "solve_error_rel": 5.408176483037704e-16,
+   "cond_Dff": 31.88474231711014,
+   "n_free": 6
+  }
+ },
+ "target_original": [
+  null,
+  [
+   -20.67,
+   42.7,
+   0.0
+  ],
+  null,
+  null,
+  null,
+  [
+   15.7,
+   28.84,
+   0.0
+  ],
+  null,
+  null
+ ]
+}

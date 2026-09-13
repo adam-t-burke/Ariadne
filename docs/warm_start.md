@@ -129,11 +129,23 @@ geometry can be an order of magnitude further from the target than a uniform
 (or of Stage 1 where the box allows both signs), fits its magnitude per sign
 group by a golden-section search on the exact geometric error (20 Laplacian
 factorisations per group), and compares. If Stage 1 is worse by more than the
-margin it is *suspect*; both seeds then take the frozen step and the lower
-measured error continues; beyond the square of the margin the uniform seed is
-used directly. Measured effect (Section 4.4): on the loose-box jittered quads
-the guard is what separates the pipeline from the previous branch; where
-Stage 1 is fine the race picks Stage 1 and nothing changes.
+margin it is *suspect*; both seeds then run the *whole* of Stage 2 (frozen
+step and Gauss--Newton steps) and the lower final geometric error continues.
+A branch from which no damped step was accepted at all loses to one that
+moved, whatever its error: an unmoved seed has taught Stage 2 nothing about
+the target. The race costs a second Stage 2 only when the guard fires
+(≈ 2× warm-start time on those cases, e.g. 233 ms instead of 121 ms on the
+840-edge jittered quad). Measured effect (Section 4.4): on the loose-box
+jittered quads the guard is what separates the pipeline from the previous
+branch; where Stage 1 is fine the race picks Stage 1 and nothing changes.
+
+Two earlier shortcuts were removed after the external case studies
+(Section 6.1): deciding on the *raw* seed error alone beyond the square of the
+margin, and deciding after the frozen step only. On the CEM curved bridges the
+Stage-1 seed lands 40× further from a jittered target than the uniform seed
+does, yet the compliance-weighted steps recover it to a warm start that
+L-BFGS-B takes to 0.08 L, while the "better-looking" uniform seed sits at a
+point where no damped step is accepted and L-BFGS-B stalls at 0.34–0.58 L.
 
 ### 3.4 Frozen CWLS step
 
@@ -200,6 +212,13 @@ of mixed-sign nets, and the sweep in Section 4.4 shows `λ_LM = 1e-4` losing on
 cable domes and near-exact tied arches while `λ_LM = 0` is within 2 % of the
 best warm start on every suite case. The overshoot the damping was introduced
 for is removed by the seed guard instead.
+
+If the current iterate's geometry has folded an edge onto zero length (two
+nodes coincident, so the edge direction is undefined), the Jacobian cannot be
+assembled there; the step then uses the frozen (target) Jacobian and the
+event is counted in `InverseDiagnostics::degenerate_linearizations` rather
+than aborting the solve. This came out of the CEM curved bridge with 22
+hangers (Section 6.1), whose short deck members fold under a jittered target.
 
 ### 3.7 Reaction constraints (`enforce_zero_r{x,y,z}`, `reaction_weight`)
 
@@ -546,7 +565,7 @@ What the trend says:
 | approach | what it solves | boxes | mixed sign / self-stress | cost per step | measured here |
 |---|---|---|---|---|---|
 | Schek 1974, force-density method (forward) | `x(q)` for given `q` | – | yes | 1 sparse Laplacian solve | the primitive everything else calls (`forward_solve`: 0.4 ms at 1 k edges, 53 ms at 65 k) |
-| Uniform / hand-picked `q` (common practice) | nothing; a starting point | trivially | only if the pattern is right | 0 | median 52× the optimum start; 13/64 cases end > 1.5× the optimum |
+| Uniform / hand-picked `q` (common practice; the start FDMremote, JAX FDM and this repository's own optimiser use) | nothing; a starting point | trivially | only if the pattern is right — and with equal magnitudes the Laplacian is singular on 4 of the 8 CEM structures (Section 6.1) | 0 | median 52× the optimum start; 13/64 suite cases end > 1.5× the optimum |
 | Least-squares force residual on `E(x*)` (Schek's inverse, Block & Lachauer 2014 "best-fit TNA" in force-density form, Linkwitz) | `min ‖E(x*)q − p‖²` | with an interior point (our Stage 1) or unboxed + clip (Gram) | finds the self-stress pattern but not its magnitude | 1 sparse LS solve; ruinous when `EᵀE` is formed densely | 30–130× the optimum start; L-BFGS-B needs 600–900 evaluations to recover, cable dome never |
 | Geometric least squares by Gauss–Newton / L-BFGS on `‖x(q) − x*‖²` (Van Mele & Block 2014 algebraic graph statics for the 2-D case; JAX FDM, Pastrana et al. 2023, for the general differentiable case) | the right objective | box via projection or `L-BFGS-B` | yes, given a start | 1 forward solve + adjoint per evaluation | this is the downstream optimiser; from a cold start it needs 100s–1000s of evaluations |
 | Length-ratio update `q ← q·ℓ(q)/ℓ*` (practitioner heuristic, iterative TNA horizontal equilibrium) | a fixed-point form of the geometric problem | clip | no (diverges with compression) | 1 forward solve | 5× the optimum on shallow tension nets; diverges on the barrel, the tied arch, the dome |
@@ -562,6 +581,170 @@ Two remarks for the paper:
   a sparse saddle with a reusable symbolic factorisation and a monotone
   safeguard on the QP objective. Its role is to make the box exact without an
   interior point; the interior point remains selectable.
+
+### 6.1 Head-to-head on published case studies (`warm_start_bench external`)
+
+The synthetic suite has known funiculars by construction. To test the pipeline
+on structures somebody else designed, the two open-source mixed-sign
+implementations were run on their own bundled examples and the results
+exported as case files (`bench/external/`, one JSON per structure, produced
+by `export_jax_fdm.py` and `export_compas_cem.py` under `uv`):
+
+* **JAX FDM** (Pastrana, Oktay, Adriaenssens, Adams 2023; `jax_fdm 0.14.1`,
+  upstream `9a17fd3`): every example that poses an inverse problem — arch
+  (load path; reaction direction), prestressed cable net, creased shell, dome,
+  grid-shell planarisation, monkey saddle, pillow, pringle, and the one
+  mixed-sign example upstream, `truss_equal_force` (compression top chord,
+  tension bottom chord, compression struts: a tied truss). The example's own
+  optimisation is run first; its optimised force densities `q_ref` and the
+  resulting geometry become the case. JAX FDM is then run a second time on
+  exactly our problem — SciPy L-BFGS-B (`jax_fdm.optimization.LBFGSB`,
+  `ftol = gtol = 1e-10`, 1000 iterations), `NodePointGoal` on every free node,
+  the example's own box, seeded with `sign · median|q_ref|` — and that run is
+  the `ext:jax_fdm` row (wall time excludes JIT compilation).
+* **compas_cem** (Pastrana; `0.8.6`, upstream `0964b76`, `nlopt 2.7.1`): the
+  Python examples (braced tower, suspension bridge, tree, 16-side tensegrity
+  wheel) and the three CAD 2023 paper structures that exist outside
+  Grasshopper — the 64-side tensegrity wheel, the 3-D tree canopy, and the
+  curved bridge under torsion with 10 and 22 hangers. CEM's constrained
+  optimisation (SLSQP / L-BFGS via nlopt with autograd gradients) is run as
+  published; the optimised trail and deviation forces divided by member lengths
+  give `q_ref`. Every export is verified independently in NumPy to be an FDM
+  equilibrium (free-node residual ≤ 3e-14, re-solve ≤ 3e-11 relative) and
+  again by Theseus' forward solve at load time. Self-stressed wheels have no
+  supports in CEM, so three well-spread rim nodes are fixed; CEM's auxiliary
+  trails that ended at exactly zero force are dropped, the others become
+  ordinary members with `|q| ≈ 1e-5` — which is why those matrices have
+  condition numbers of 1e5–1e7 and why the loose box there spans seven
+  decades.
+
+Every case is run three ways: the **exact** target (the reference geometry,
+so a `q` inside the box reproduces it), a **jittered** target (white noise of
+1 % of the bounding-box diagonal on every free coordinate, capped at a fifth
+of the shortest member), and, where the example fitted a designer's surface,
+that **designer** target. Rows: the seven suite methods, uniform seeds at
+×0.1, ×1, ×10 and a ±¼-decade randomised uniform, the pipeline, an *oracle*
+started at `q_ref`, and the external tool's own run. Errors are `‖x − x*‖/L`;
+"its" are L-BFGS-B iterations (cap 1000); the pipeline's ms include Stage 1.
+Full tables: `bench/external/results/rust_external_run.txt`; per-case JSON
+next to it.
+
+| case | target | n_e | T/C | uniform: warm → final (its) | pipeline: ms, warm → final (its) | JAX FDM L-BFGS-B: its / ms / final | oracle final |
+|---|---|---|---|---|---|---|---|
+| jax truss_equal_force | exact | 32 | 11/21 | 17 → **0.24 (59, stuck)** | 2 ms, 1.8e-7 → 1.8e-7 (0) | 54 / 81 / **0.26 (stuck)** | 1.8e-15 |
+| jax truss_equal_force | jit 1 % | 32 | 11/21 | 17 → 0.060 (1000) | 2 ms, 0.028 → 0.028 (210) | – | 0.028 |
+| jax cablenet (prestress only) | exact | 220 | 220/0 | 1.4 → 0.023 (1000) | 7 ms, 7.8e-9 → 7.8e-9 (0) | 462 / 584 / **0.085** | 8e-15 |
+| jax cablenet | jit 1 % | 220 | 220/0 | 1.4 → 0.072 (1000) | 25 ms, 0.26 → 0.068 (1000) | – | 0.068 |
+| jax creased_shell | exact | 324 | 0/324 | 1.2 → 3.1e-5 (1000) | 11 ms, 2.3e-12 → 2.3e-12 (0) | 1000 / 1339 / 2.8e-5 | 3e-15 |
+| jax creased_shell | designer surface | 324 | 0/324 | 1.2 → 0.0687 (1000) | 24 ms, 0.078 → 0.0687 (1000) | – | 0.0687 |
+| jax dome | exact | 480 | 0/480 | 68 → 3.6e-3 (1000) | 31 ms, 8.8e-9 → 8.8e-9 (0) | 1000 / 1389 / 6.4e-3 | 2e-14 |
+| jax dome | jit 0.34 % | 480 | 0/480 | 68 → 0.040 (1000) | 95 ms, 0.042 → 0.037 (1000) | – | 0.039 |
+| jax monkey_saddle | exact | 216 | 0/216 | 0.74 → 9.2e-8 (231) | 4 ms, 4.3e-11 → 4.3e-11 (0) | 202 / 1003 / 7.9e-7 | 9e-16 |
+| jax monkey_saddle | jit 0.43 % | 216 | 0/216 | 0.74 → 0.0227 (270) | 7 ms, 0.0227 → 0.0227 (120) | – | 0.0227 |
+| jax pillow | exact | 144 | 0/144 | 0.20 → 6.8e-7 (209) | 2 ms, 1.1e-11 → 1.1e-11 (0) | 179 / 349 / 2.3e-6 | 3e-15 |
+| jax pringle | exact | 161 | 0/161 | 2.5 → 1.0e-6 (756) | 5 ms, 5.3e-11 → 5.3e-11 (0) | 624 / 632 / 1.1e-5 | 8e-16 |
+| jax gridshell_planarization | exact | 144 | 0/144 | 1.6 → 4.6e-7 (341) | 3 ms, 1.1e-10 → 1.1e-10 (0) | 272 / 664 / 2.2e-6 | 2e-15 |
+| cem braced_tower_2d | exact | 9 | 3/6 | **singular Laplacian** | 0.4 ms, 3.2e-9 → 1.8e-9 (1) | – | 1e-15 |
+| cem tree_2d | exact | 4 | 1/3 | **singular Laplacian** | 0.2 ms, 5.4e-9 → 1.1e-9 (1) | – | 2e-17 |
+| cem tensegrity_wheel_2d | exact | 24 | 16/8 | **singular Laplacian** | 1 ms, 1.8e-15 (0) | – | 3e-15 |
+| cem tensegrity_wheel_2d | jit 1 % | 24 | 16/8 | singular | 2 ms, 0.0227 → 0.0227 (92) | – | 0.0227 |
+| cem tensegrity_wheel_64 (paper) | exact | 96 | 64/32 | 8.1 → **1.44 (1000)** | 4 ms, 2.7e-14 (0) | – | 3e-14 |
+| cem tensegrity_wheel_64 (paper) | jit 0.69 % | 96 | 64/32 | 8.1 → 1.74 (1000) | 10 ms, 0.041 → 0.037 (114) | – | 0.049 |
+| cem tree_canopy_3d (paper) | exact | 144 | 48/96 | **singular Laplacian** | 6 ms, 3.7e-11 → 2.9e-9 (1) | – | 3e-9 |
+| cem tree_canopy_3d (paper) | jit 0.55 % | 144 | 48/96 | singular | 9 ms, 0.025 → 0.015 (1000) | – | 0.026 |
+| cem curved_bridge_10 (paper) | exact | 58 | 19/39 | 0.54 → **0.13 (1000)** | 3 ms, 4.9e-7 (1) | – | 3.4e-6 |
+| cem curved_bridge_10 (paper) | jit 1 % | 58 | 19/39 | 0.55 → 0.14 (1000) | 4 ms, 0.23 → 0.082 (1000) | – | 0.042 |
+| cem curved_bridge_22 (paper) | exact | 130 | 45/85 | 1.0 → **0.35 (1000)** | 6 ms, 1.1e-7 (1) | – | 2.3e-7 |
+| cem curved_bridge_22 (paper) | jit 0.85 % | 130 | 45/85 | 1.0 → 0.45 (1000) | 16 ms, 1.8 → 0.23 (1000) | – | 0.054 |
+| cem bridge_2d | exact | 9 | 8/1 | 2.9 → 6.6e-9 (67) | 0.6 ms, 3.9e-9 (1) | – | 2e-11 |
+
+What the table says:
+
+1. **On every exact target the pipeline returns the answer** (1e-7 to 1e-15
+   of L) in 0.2–31 ms with no L-BFGS-B iterations, on all 18 structures
+   including the eight mixed-sign ones. JAX FDM's L-BFGS-B from the same
+   uniform seed needs 179–1000 iterations (0.35–1.4 s of solver time) on the
+   compression shells and reaches 8e-7–6e-3; our own L-BFGS-B from the same
+   seed needs 209–1000, so this is the seed, not the optimiser or the
+   language.
+2. **Mixed sign is where cold starts fail outright.** On Pastrana's tied
+   truss both L-BFGS-B implementations stall at 0.24–0.26 L from the median
+   seed (SciPy: "relative reduction of f ≤ factr·epsmch"); the ×0.1 seed
+   converges (118 iterations here, 99 in JAX FDM), the ×10 seed stalls at
+   0.10–0.40 L. On four of the eight CEM structures the equal-magnitude sign
+   seed has a *singular* Laplacian: wherever tension and compression members
+   of equal |q| balance at a node the diagonal `Σ q_e` is zero, so an unpivoted
+   LDLᵀ meets a zero pivot (a pivoted solver would proceed to an arbitrary,
+   far-away geometry). On the 64-side wheel and both curved bridges the seed
+   is not singular but L-BFGS-B ends at 0.13–1.4 L after 1000 iterations. The
+   pipeline does not see any of this: Stage 1 fixes the sign *ratios* from
+   the force residual, and the compliance-weighted steps do the rest.
+3. **Prestress-only nets** (the cable net: all loads zero) are a
+   pure self-stress problem: geometry depends only on ratios of `q`. Gram
+   returns `q = 0` (NaN), JAX FDM stops at 0.085 L on a projected-gradient
+   test, and the pipeline lands at 7.8e-9 L in 7 ms.
+4. **Jittered targets on the CEM bridges are hard for everyone.** The
+   Stage-1 force residual explodes (a near-mechanism deck), the warm start is
+   0.23–1.8 L, and L-BFGS-B ends 2–4× above the oracle's basin (0.082 vs
+   0.042; 0.23 vs 0.054). These are the honest failures in the set; they are
+   also the cases that drove the guard race and the degenerate-linearisation
+   fallback of Sections 3.3 and 3.6. Without those, the pipeline ended at
+   0.34 and 0.58 L.
+5. **Where the target is not exactly reachable** (jitter, designer surface),
+   the pipeline's warm start is within 1–13 % of the final L-BFGS-B optimum
+   on every JAX FDM shell, and the evaluations to reach 1.05× the optimum
+   drop from 38–364 for the uniform seed to 0–13 (`ev<1.05b` column of the
+   full tables) — except the jittered dome, where the uniform seed never
+   gets within 5 % in 1000 iterations and the pipeline start needs 258. The
+   1000-iteration final values coincide because L-BFGS-B polishes from either
+   start; the warm start buys the first two orders of magnitude.
+6. **Cost.** The external tool's solve time is 20–100× our L-BFGS-B's for the
+   same iteration count (JAX on CPU vs Rust with a cached symbolic
+   factorisation); the comparison that matters is iterations, which agree
+   within 25 % from equal seeds (ours stops later on its tighter tolerance). The pipeline's own cost is 2–31 ms on these
+   sizes, i.e. 5–40 L-BFGS-B iterations' worth.
+
+CEM itself is not an FDM competitor on the same objective: it parameterises
+trail lengths and deviation forces, not force densities, and its published
+optimisations here are goal-driven (edge-force targets, point and line goals)
+rather than shape fits; the published runs took 0.1–8 s (SLSQP, 32–153
+evaluations) and are recorded in the case files for context. What the CEM
+structures contribute is the mixed-sign, near-mechanism topologies —
+tensegrity wheels, a torsion bridge, a tree canopy — that neither the
+synthetic suite nor JAX FDM's examples contain.
+
+### 6.2 Placing the work
+
+* **Lineage.** This is the successor to *FDMremote* (Burke, Lee, Echelman,
+  Feldman, Mueller, IASS 2023) and the *In Tension* thesis: differentiable FDM
+  with hand-coded adjoints, box-constrained L-BFGS-B on composable objectives,
+  a Grasshopper front end (Ariadne) and a Rust solver (Theseus). Those works
+  start the optimiser from a uniform or user-drawn `q`; the contribution here
+  is the start itself, and Section 6.1 measures it against exactly that
+  baseline in two independent codes.
+* **Closest prior art on the mathematics** is Cuvilliers' thesis (MIT 2020,
+  Mueller group): closest-fit force-density fitting with analytical gradients
+  and Hessians, solved with SQP; and, in the thrust-network setting, Block &
+  Lachauer's best-fit TNA and Van Mele & Block's algebraic graph statics. None
+  of them uses the compliance-weighted norm or an active-set treatment of the
+  box, and none reports mixed-sign or self-stressed cases.
+* **Mixed-sign FDM in Pastrana's work** appears in three places: the JAX FDM
+  paper (ICML DAE 2023) shows `q` sampled in `[−1, −0.1]` next to `q = 1`
+  (Fig. 3) and a tensegrity tower (Fig. 5), and the repository ships the tied
+  truss above; the *Constrained form-finding of tension–compression
+  structures using automatic differentiation* paper (CAD 2023) does mixed
+  sign natively but through CEM, not FDM; and the IASS 2024 coupling paper
+  with Adriaenssens routes the tension cable net through FDM and the
+  compression deck through CEM — a split that is itself a statement about how
+  comfortable mixed-sign FDM was. In all three the FDM optimiser is seeded by
+  hand with the right signs and, where a box is used, it is one-signed per
+  edge; none of them addresses the singular-seed and multi-basin behaviour
+  that Section 6.1 measures.
+* **Other constrained form-finding tools** (the Grasshopper SQP tool of the
+  IASS 2024 "practical applications" paper, Miki & Kawaguchi's extended FDM,
+  Marmo & Rosati's TNA reformulation) fit `q` and `x` jointly with a weak
+  least-squares prior; they are the right comparison for the *objective*
+  design, not for the warm start, and are not benchmarked here.
 
 ---
 
@@ -607,7 +790,14 @@ Two remarks for the paper:
    uniform sign seed is competitive on single-sign nets, so Stage 1 could be
    skipped when the box fixes the sign of every edge and no reaction rows are
    enforced.
-5. **Benchmarks on real projects.** All fixtures are synthetic with a known
-   funicular; the jitter and bump targets are proxies for design intent. The
-   `warm_start_bench` harness accepts any `Net`; a few measured or designed
-   targets would strengthen the paper.
+5. **Benchmarks on real projects.** The synthetic suite and the 18 published
+   case studies of Section 6.1 all have a known feasible `q`; only the
+   creased-shell designer surface is a genuinely unreachable target. The
+   `warm_start_bench external` harness takes any structure as a JSON case
+   file; one or two measured or designed targets from practice (an Echelman
+   net, a built shell) would close this gap.
+6. **Jittered near-mechanism mixed-sign targets.** On the CEM curved bridges
+   the pipeline ends 2–4× above the basin an oracle reaches (Section 6.1).
+   The Stage-1 seed is what limits it there; candidates are a Stage 1 in the
+   compliance-weighted norm of the uniform seed, or several Stage-2 restarts
+   from the seed sweep with the best final error kept.
