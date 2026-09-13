@@ -56,9 +56,11 @@ pub const EXTERNAL_METHODS: [Method; 7] = [
     Method::Legacy,
 ];
 
-/// Loose sign-consistent box when the case carries no bounds: |q| in
-/// `[median/100, 100·median]`.
+/// Loose box factor when the case carries no bounds (see [`Net::box_from_true`]).
 const DEFAULT_BOX_FACTOR: f64 = 100.0;
+
+/// Half-width in decades of the randomised uniform seed.
+const UNIFORM_RAND_DECADES: f64 = 0.25;
 
 /// Amplitude of the isotropic target perturbation relative to the bounding-box diagonal.
 const JITTER_FRACTION: f64 = 0.01;
@@ -137,23 +139,14 @@ impl Case {
         (net, self)
     }
 
-    /// The case's own box, else the loose sign-consistent default.
+    /// The case's own box, else the same loose box the synthetic suite uses:
+    /// per sign group `[min|q|/100, 100·max|q|]` (so `q_ref` is always inside).
     fn box_(&self, net: &Net) -> (Vec<f64>, Vec<f64>, &'static str) {
         if let Some(b) = &self.bounds {
             return (b.lo.clone(), b.hi.clone(), "case");
         }
-        let m = net.seed_magnitude;
-        let (mut lo, mut hi) = (Vec::new(), Vec::new());
-        for &q in &self.q_ref {
-            if q >= 0.0 {
-                lo.push(m / DEFAULT_BOX_FACTOR);
-                hi.push(m * DEFAULT_BOX_FACTOR);
-            } else {
-                lo.push(-m * DEFAULT_BOX_FACTOR);
-                hi.push(-m / DEFAULT_BOX_FACTOR);
-            }
-        }
-        (lo, hi, "median±2dec")
+        let (lo, hi) = net.box_from_true(DEFAULT_BOX_FACTOR, DEFAULT_BOX_FACTOR);
+        (lo, hi, "loose")
     }
 
     fn free_target(&self, net: &Net, full: &[[f64; 3]]) -> Array2<f64> {
@@ -320,6 +313,26 @@ fn run_target(
             tag, net, &fixed, target, &q0, lo, hi, max_iters, &problem,
         ));
     }
+    // Equal-magnitude mixed-sign seeds put exact zeros on the Laplacian
+    // diagonal wherever tension and compression balance at a node; a
+    // log-uniform ±¼-decade scatter is the practitioner's way around it.
+    let mut state = 0x5eed_u64;
+    let q0: Vec<f64> = net
+        .sign_seed()
+        .iter()
+        .map(|q| q * 10f64.powf(UNIFORM_RAND_DECADES * (2.0 * lcg(&mut state) - 1.0)))
+        .collect();
+    rows.push(seed_row(
+        "uniform_rand",
+        net,
+        &fixed,
+        target,
+        &q0,
+        lo,
+        hi,
+        max_iters,
+        &problem,
+    ));
     rows.push(seed_row(
         "oracle(q_ref)",
         net,
@@ -440,18 +453,30 @@ pub fn cmd_external(args: &[String], max_iters: usize, results_dir: Option<&Path
         );
         out.insert("exact".into(), rows_json(&rows, net.extent));
 
-        // Perturbed target: isotropic white noise of JITTER_FRACTION·L on
-        // every free node, so that no q reproduces it exactly (the
-        // realistic situation; Stage 1 alone cannot solve it).
+        // Perturbed target: isotropic white noise on every free node, so that
+        // no q reproduces it exactly (the realistic situation; Stage 1 alone
+        // cannot solve it). Amplitude JITTER_FRACTION·L, capped at a fifth of
+        // the shortest edge so that short auxiliary members are not folded.
+        let min_len = net
+            .edge_lengths(&reference)
+            .into_iter()
+            .filter(|l| l.is_finite() && *l > 0.0)
+            .fold(f64::INFINITY, f64::min);
+        let amplitude = (JITTER_FRACTION * net.extent).min(0.2 * min_len);
         let mut state = 0xc0ffee_u64;
         let mut jittered = target.clone();
         for v in jittered.iter_mut() {
-            *v += JITTER_FRACTION * net.extent * (2.0 * lcg(&mut state) - 1.0);
+            *v += amplitude * (2.0 * lcg(&mut state) - 1.0);
         }
+        let label = format!("jit{:.2}%L", 100.0 * amplitude / net.extent);
         let rows = run_target(
-            &net, &case, "jit1%L", &jittered, &lo, &hi, box_name, &methods, max_iters, false,
+            &net, &case, &label, &jittered, &lo, &hi, box_name, &methods, max_iters, false,
         );
-        out.insert("jit1%L".into(), rows_json(&rows, net.extent));
+        out.insert("jitter".into(), rows_json(&rows, net.extent));
+        out.insert(
+            "jitter_amplitude_over_L".into(),
+            serde_json::json!(amplitude / net.extent),
+        );
 
         if let Some(t) = &case.target_original {
             let complete = net.free.iter().all(|&i| t[i].is_some());

@@ -266,6 +266,9 @@ pub fn diag_note(r: &InverseFdmResult, stage2: bool) -> String {
     if d.active_set_capped > 0 {
         s.push_str(&format!(" cap={}", d.active_set_capped));
     }
+    if d.degenerate_linearizations > 0 {
+        s.push_str(&format!(" degen={}", d.degenerate_linearizations));
+    }
     if d.reaction_residual != 0.0 {
         s.push_str(&format!(" R*={:.2e}", d.reaction_residual));
     }

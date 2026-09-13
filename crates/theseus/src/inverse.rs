@@ -337,6 +337,10 @@ pub struct InverseDiagnostics {
     /// Number of Stage-2 steps on which the active set reached its pass limit
     /// and returned the best feasible iterate seen instead of a settled set.
     pub active_set_capped: usize,
+    /// Number of Gauss–Newton steps whose linearisation point x(q_k) had a
+    /// collapsed edge (two nodes coincident), so the step used the frozen
+    /// (target) Jacobian instead.
+    pub degenerate_linearizations: usize,
     /// `‖E_R(x(q)) q‖`: the support reactions along the enforced axes that a
     /// forward solve at the returned q realises (load units, weight divided
     /// out). Zero when no reaction rows are enforced; NaN if the Laplacian at
