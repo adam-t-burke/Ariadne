@@ -51,15 +51,6 @@ fn pick_inner(opts: &InverseFdmOptions, bounds: &BoxBounds) -> InnerKind {
     }
 }
 
-fn pick_stage2_inner(opts: &InverseFdmOptions, bounds: &BoxBounds) -> InnerKind {
-    match (opts.linear_algebra, bounds.has_finite()) {
-        (LinearAlgebra::Direct, true) => InnerKind::Clarabel,
-        (LinearAlgebra::Direct, false) => InnerKind::Saddle,
-        (LinearAlgebra::Iterative, true) => InnerKind::Spg,
-        (LinearAlgebra::Iterative, false) => InnerKind::Lsqr,
-    }
-}
-
 fn broadcast_f64(values: &[f64], n: usize, fill: f64) -> Result<Vec<f64>, TheseusError> {
     if values.is_empty() {
         Ok(vec![fill; n])
@@ -239,7 +230,7 @@ fn solve_lsqr_on(
         Ok(out)
     };
     let apply_t = |y: &[f64]| -> Result<Vec<f64>, TheseusError> {
-        let weighted = w.apply_inverse(&y[..m_rows])?;
+        let weighted = w.apply_inverse_transpose(&y[..m_rows])?;
         let mut out = m_t.matvec(&weighted);
         if damping > 0.0 {
             for (j, value) in out.iter_mut().enumerate() {
@@ -338,16 +329,25 @@ fn solve_gram_on(
 ///
 /// Every block is sparse, so this is the weighted analogue of
 /// [`build_augmented_system`] without ever forming `S⁻¹M`.
+///
+/// `damping` is the per-column Tikhonov diagonal `Λ`. With `mask = Some((status,
+/// fixed))`, columns whose status is nonzero are held at `fixed[j]`: their
+/// coupling entries are kept in the pattern but zeroed, their diagonal becomes
+/// one with right-hand side `fixed[j]`, and their contribution moves to the
+/// constraint rows. The sparsity pattern is therefore identical for every
+/// active set, which lets one symbolic factorisation serve all passes.
 fn build_weighted_saddle(
     m_mat: &SparseColMatOwned,
     s_mat: &SparseColMatOwned,
     p: &[f64],
-    lambda: f64,
+    damping: &[f64],
+    mask: Option<(&[i8], &[f64])>,
 ) -> (SparseColMatOwned, Vec<f64>) {
     let m = m_mat.nrows;
     let n = m_mat.ncols;
     let total = 2 * m + n;
     let y0 = m + n;
+    let is_fixed = |j: usize| mask.map_or(false, |(status, _)| status[j] != 0);
 
     let mut triplets: Vec<(u32, u32, f64)> = Vec::with_capacity(m + n + 4 * m_mat.nnz());
 
@@ -355,9 +355,10 @@ fn build_weighted_saddle(
     for i in 0..m {
         triplets.push((i as u32, i as u32, 1.0));
     }
-    // (2,2) = λI
+    // (2,2) = Λ (identity rows for held columns)
     for j in 0..n {
-        triplets.push(((m + j) as u32, (m + j) as u32, lambda));
+        let value = if is_fixed(j) { 1.0 } else { damping[j] };
+        triplets.push(((m + j) as u32, (m + j) as u32, value));
     }
     // (1,3) = Sᵀ and (3,1) = S
     for col in 0..s_mat.ncols {
@@ -368,22 +369,31 @@ fn build_weighted_saddle(
             triplets.push(((y0 + row) as u32, col as u32, value));
         }
     }
-    // (2,3) = −Mᵀ and (3,2) = −M
+    // (2,3) = −Mᵀ and (3,2) = −M; held columns keep the pattern with zeros.
+    let mut rhs = vec![0.0; total];
+    for (i, &pi) in p.iter().enumerate() {
+        rhs[y0 + i] = -pi;
+    }
     for col in 0..n {
+        let held = is_fixed(col);
+        let held_value = mask.map_or(0.0, |(_, fixed)| fixed[col]);
+        if held {
+            rhs[m + col] = held_value;
+        }
         for nz in m_mat.col_ptrs[col] as usize..m_mat.col_ptrs[col + 1] as usize {
             let row = m_mat.row_indices[nz] as usize;
-            let value = -m_mat.values[nz];
+            let value = if held { 0.0 } else { -m_mat.values[nz] };
             triplets.push(((m + col) as u32, (y0 + row) as u32, value));
             triplets.push(((y0 + row) as u32, (m + col) as u32, value));
+            if held {
+                // S e − Σ_free M_k q_k = −p + M_held q_held
+                rhs[y0 + row] += m_mat.values[nz] * held_value;
+            }
         }
     }
 
     let k_mat =
         SparseColMatOwned::from_triplets(total, total, &triplets).expect("build_weighted_saddle");
-    let mut rhs = vec![0.0; total];
-    for (i, &pi) in p.iter().enumerate() {
-        rhs[y0 + i] = -pi;
-    }
     (k_mat, rhs)
 }
 
@@ -399,7 +409,8 @@ fn solve_saddle_on(
     let m = p.len();
     let n = m_mat.ncols;
     if let Some(w) = weight {
-        let (k_mat, rhs) = build_weighted_saddle(m_mat, &w.s, p, lambda);
+        let damping = vec![lambda; n];
+        let (k_mat, rhs) = build_weighted_saddle(m_mat, &w.s, p, &damping, None);
         let sol = ldl_solve_cached(&k_mat, &rhs, lambda, cache, factor_stack, solve_stack)?;
         return Ok(sol[m..m + n].to_vec());
     }
@@ -534,7 +545,7 @@ fn to_clarabel_csc(
 fn solve_clarabel_once(
     m_mat: &SparseColMatOwned,
     p: &[f64],
-    lambda: f64,
+    damping: &[f64],
     bounds: &BoxBounds,
     weight: Option<&MetricWeight>,
     max_iter: usize,
@@ -561,9 +572,9 @@ fn solve_clarabel_once(
     }
     for j in 0..n {
         p_colptr[m + j] = p_rowval.len();
-        if lambda > 0.0 {
+        if damping[j] > 0.0 {
             p_rowval.push(m + j);
-            p_nz.push(lambda);
+            p_nz.push(damping[j]);
         }
     }
     p_colptr[n_var] = p_rowval.len();
@@ -733,10 +744,11 @@ fn solve_clarabel_box(
     tol: f64,
     geometric_step: bool,
 ) -> Result<Vec<f64>, TheseusError> {
+    let damping = vec![lambda; m_mat.ncols];
     solve_clarabel_once(
         m_mat,
         p,
-        lambda,
+        &damping,
         bounds,
         weight,
         max_iter,
@@ -772,11 +784,10 @@ fn solve_spg_on(
         for (ri, &pi) in r.iter_mut().zip(p.iter()) {
             *ri -= pi;
         }
-        // Objective ½‖S⁻¹(Mx − p)‖² has gradient Mᵀ S⁻ᵀ S⁻¹ (Mx − p); S is
-        // symmetric, so S⁻¹ is applied twice.
+        // Objective ½‖S⁻¹(Mx − p)‖² has gradient Mᵀ S⁻ᵀ S⁻¹ (Mx − p).
         if let Some(w) = weight {
             r = w.apply_inverse(&r)?;
-            r = w.apply_inverse(&r)?;
+            r = w.apply_inverse_transpose(&r)?;
         }
         let mut g = m_t.matvec(&r);
         if lambda > 0.0 {
@@ -855,10 +866,22 @@ fn l2_norm_prefix(v: &[f64], len: usize) -> f64 {
 
 /// Left weight `S` for the geometric metric.
 ///
-/// `S = blkdiag(D, D, D, I)` over the axis-major equilibrium rows, where
-/// `D = Cnᵀ diag(q) Cn` is the FDM Laplacian. The trailing identity covers the
-/// optional zero-reaction rows, which are support constraints rather than
-/// free-node equilibrium and carry no compliance.
+/// Over the axis-major equilibrium rows
+///
+/// ```text
+/// S = [ D  0  0  0 ]      D = Cnᵀ diag(q) Cn   (FDM Laplacian)
+///     [ 0  D  0  0 ]      G = Cfᵀ diag(q) Cn   (support coupling)
+///     [ 0  0  D  0 ]
+///     [ wG_x wG_y wG_z  I ]   (one block row per enforced reaction axis)
+/// ```
+///
+/// so that `S⁻¹ r` is the negated geometric error on the free-node rows and,
+/// on the reaction rows, the *realised* support reaction `w·E_R(x(q))·q`
+/// rather than its value at the target geometry: `E_R(x(q)) q = E_R(x*) q −
+/// G (x* − x(q))`. The coupling block is the Gauss--Newton term that accounts
+/// for the reaction changing when the free nodes move, which is what makes
+/// the Stage-2 merit and the QP steps consistent with the reactions a forward
+/// solve at the returned `q` actually produces.
 ///
 /// `S` is kept assembled for the backends that embed it (Clarabel, saddle);
 /// `D` is kept factored for the backends that apply `S⁻¹` per matvec (LSQR,
@@ -867,6 +890,11 @@ struct MetricWeight {
     s: SparseColMatOwned,
     d: SparseColMatOwned,
     d_factor: Factorization,
+    /// `w·G`, present only with reaction rows.
+    coupling: Option<SparseColMatOwned>,
+    /// Axis of each reaction block row, in row order.
+    reaction_dims: Vec<usize>,
+    n_fixed: usize,
     n_free: usize,
     n_eq: usize,
     workspace: std::cell::RefCell<Vec<f64>>,
@@ -874,21 +902,50 @@ struct MetricWeight {
 }
 
 impl MetricWeight {
-    /// Assemble and factor the weight at force densities `q`.
+    /// Assemble and factor the weight at force densities `q` for the rows of
+    /// `system`, with the reaction rows scaled by `reaction_weight`.
     fn build(
         problem: &Problem,
         q: &[f64],
-        n_eq: usize,
-        n_free: usize,
+        system: &EquilibriumSystem,
+        reaction_weight: f64,
     ) -> Result<Self, TheseusError> {
+        let n_eq = system.n_eq;
+        let n_free = system.n_free;
         let cn = &problem.topology.free_incidence;
         let cn_t = cn.transpose();
         let scaled = row_scaled_copy(cn, q);
         let d =
             SparseColMatOwned::sparse_times_sparse(&cn_t, &scaled).map_err(TheseusError::Solver)?;
 
-        // S = blkdiag(D, D, D, I) in axis-major row order.
-        let mut triplets = Vec::with_capacity(3 * d.nnz() + (n_eq - 3 * n_free));
+        let n_fixed = problem.topology.fixed_node_indices.len();
+        let reaction_dims = system.reaction_dims.clone();
+        if 3 * n_free + reaction_dims.len() * n_fixed != n_eq {
+            return Err(TheseusError::Shape(format!(
+                "geometric weight: {} rows do not match 3·{n_free} free rows plus {} reaction blocks of {n_fixed}",
+                n_eq,
+                reaction_dims.len()
+            )));
+        }
+        let coupling = if reaction_dims.is_empty() {
+            None
+        } else {
+            let cf_t = problem.topology.fixed_incidence.transpose();
+            let mut g = SparseColMatOwned::sparse_times_sparse(&cf_t, &scaled)
+                .map_err(TheseusError::Solver)?;
+            for value in g.values.iter_mut() {
+                *value *= reaction_weight;
+            }
+            Some(g)
+        };
+
+        let mut triplets = Vec::with_capacity(
+            3 * d.nnz()
+                + (n_eq - 3 * n_free)
+                + coupling
+                    .as_ref()
+                    .map_or(0, |g| g.nnz() * reaction_dims.len()),
+        );
         for col in 0..d.ncols {
             for nz in d.col_ptrs[col] as usize..d.col_ptrs[col + 1] as usize {
                 let row = d.row_indices[nz] as usize;
@@ -901,6 +958,21 @@ impl MetricWeight {
         }
         for row in (3 * n_free)..n_eq {
             triplets.push((row as u32, row as u32, 1.0));
+        }
+        if let Some(g) = &coupling {
+            for (block, &axis) in reaction_dims.iter().enumerate() {
+                let row_offset = 3 * n_free + block * n_fixed;
+                let col_offset = axis * n_free;
+                for col in 0..g.ncols {
+                    for nz in g.col_ptrs[col] as usize..g.col_ptrs[col + 1] as usize {
+                        triplets.push((
+                            (row_offset + g.row_indices[nz] as usize) as u32,
+                            (col_offset + col) as u32,
+                            g.values[nz],
+                        ));
+                    }
+                }
+            }
         }
         let s =
             SparseColMatOwned::from_triplets(n_eq, n_eq, &triplets).map_err(TheseusError::Shape)?;
@@ -931,6 +1003,9 @@ impl MetricWeight {
             s,
             d,
             d_factor,
+            coupling,
+            reaction_dims,
+            n_fixed,
             n_free,
             n_eq,
             workspace: std::cell::RefCell::new(vec![0.0; (n_free * 3).max(1)]),
@@ -940,9 +1015,50 @@ impl MetricWeight {
 
     /// Apply `S⁻¹` to an equilibrium-row vector.
     ///
-    /// Solves the three axis blocks in one triangular solve and passes the
-    /// reaction rows through unchanged.
+    /// Solves the three axis blocks in one triangular solve, then forms the
+    /// reaction rows as `r_R − wG·e_axis` (block forward substitution).
     fn apply_inverse(&self, r: &[f64]) -> Result<Vec<f64>, TheseusError> {
+        let mut out = self.solve_d_blocks(r)?;
+        let first = 3 * self.n_free;
+        out[first..].copy_from_slice(&r[first..]);
+        if let Some(g) = &self.coupling {
+            for (block, &axis) in self.reaction_dims.iter().enumerate() {
+                let e_axis = &out[axis * self.n_free..(axis + 1) * self.n_free];
+                let ge = g.matvec(e_axis);
+                let row_offset = first + block * self.n_fixed;
+                for (f, value) in ge.iter().enumerate() {
+                    out[row_offset + f] -= value;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Apply `S⁻ᵀ` to an equilibrium-row vector (block back substitution:
+    /// the reaction rows pass through, the free-node rows solve
+    /// `D u = v − wGᵀ v_R`). Used for the Hutchinson curvature estimate.
+    fn apply_inverse_transpose(&self, v: &[f64]) -> Result<Vec<f64>, TheseusError> {
+        let first = 3 * self.n_free;
+        let mut rhs = v.to_vec();
+        if let Some(g) = &self.coupling {
+            let g_t = g.transpose();
+            for (block, &axis) in self.reaction_dims.iter().enumerate() {
+                let row_offset = first + block * self.n_fixed;
+                let v_r = &v[row_offset..row_offset + self.n_fixed];
+                let gt_v = g_t.matvec(v_r);
+                for (i, value) in gt_v.iter().enumerate() {
+                    rhs[axis * self.n_free + i] -= value;
+                }
+            }
+        }
+        let mut out = self.solve_d_blocks(&rhs)?;
+        out[first..].copy_from_slice(&v[first..]);
+        Ok(out)
+    }
+
+    /// `D⁻¹` applied to the three axis blocks of `r`; reaction rows are left
+    /// at zero for the caller to fill in.
+    fn solve_d_blocks(&self, r: &[f64]) -> Result<Vec<f64>, TheseusError> {
         if r.len() != self.n_eq {
             return Err(TheseusError::Shape(format!(
                 "geometric weight expected {} rows, got {}",
@@ -1010,7 +1126,6 @@ impl MetricWeight {
                 }
             }
         }
-        out[3 * n_free..].copy_from_slice(&r[3 * n_free..]);
         Ok(out)
     }
 }
@@ -1018,38 +1133,50 @@ impl MetricWeight {
 /// Current geometry and error for an unknown vector under the geometric metric.
 struct GeometryProbe {
     weight: MetricWeight,
-    /// `S⁻¹ r = x* − x(q)`, the negated geometric error.
+    /// `S⁻¹ r`: `x* − x(q)` on the free-node rows, the weighted realised
+    /// reactions `w·E_R(x(q))·q` on the reaction rows.
     neg_error: Vec<f64>,
     /// `‖x(q) − x*‖` over the free-node rows only.
     error: f64,
+    /// `‖S⁻¹ r‖` over all rows: the geometric error plus the weighted
+    /// realised reactions, which is the objective the Stage-2 steps
+    /// minimise. Equal to `error` without reaction rows.
+    merit: f64,
 }
 
 /// Evaluate the exact geometric error at an unknown vector.
 ///
 /// Uses the identity `x(q) − x* = −D(q)⁻¹(E(x*)q − p)`, so no forward solve is
 /// needed. Exact for geometry-independent loads.
+///
+/// Reaction rows, when present, come out as the reactions of the forward
+/// solve at `q` (see [`MetricWeight`]), so the merit is what a forward solve
+/// at `q` would actually report.
 fn probe_geometry(
     problem: &Problem,
     system: &EquilibriumSystem,
     unknown: &[f64],
     solve_for_q: bool,
+    reaction_weight: f64,
 ) -> Result<GeometryProbe, TheseusError> {
     let q = if solve_for_q {
         unknown.to_vec()
     } else {
         forces_to_q(unknown, &system.lengths)
     };
-    let weight = MetricWeight::build(problem, &q, system.n_eq, system.n_free)?;
+    let weight = MetricWeight::build(problem, &q, system, reaction_weight)?;
     let mut r = system.a.matvec(unknown);
     for (ri, &pi) in r.iter_mut().zip(system.p.iter()) {
         *ri -= pi;
     }
     let neg_error = weight.apply_inverse(&r)?;
     let error = l2_norm_prefix(&neg_error, 3 * system.n_free);
+    let merit = l2_norm_prefix(&neg_error, neg_error.len());
     Ok(GeometryProbe {
         weight,
         neg_error,
         error,
+        merit,
     })
 }
 
@@ -1073,7 +1200,7 @@ pub fn geometric_error_vector(
         false,
         false,
     )?;
-    let probe = probe_geometry(problem, &system, q, true)?;
+    let probe = probe_geometry(problem, &system, q, true, 1.0)?;
     let n_free = system.n_free;
     // probe.neg_error is x* − x(q).
     Ok(Array2::from_shape_fn((n_free, 3), |(i, d)| {
@@ -1123,6 +1250,159 @@ fn shift_box(bounds: &BoxBounds, x: &[f64]) -> BoxBounds {
     }
 }
 
+/// Reject reaction constraints that no equilibrium state can satisfy.
+///
+/// `enforce_zero_r*` pins the reaction of every support along that axis to
+/// zero. Global equilibrium then requires the applied load to have no net
+/// component along the same axis; otherwise Stage 1 silently trades the
+/// constraint against the equilibrium rows and returns a collapsed seed.
+fn validate_reaction_constraints(
+    problem: &Problem,
+    opts: &InverseFdmOptions,
+) -> Result<(), TheseusError> {
+    if problem.topology.fixed_node_indices.is_empty() {
+        return Ok(());
+    }
+    let loads = &problem.free_node_loads;
+    let total_abs: f64 = loads.iter().map(|v| v.abs()).sum();
+    if total_abs == 0.0 {
+        return Ok(());
+    }
+    for (axis, enforced, name) in [
+        (0, opts.enforce_zero_rx, "x"),
+        (1, opts.enforce_zero_ry, "y"),
+        (2, opts.enforce_zero_rz, "z"),
+    ] {
+        if !enforced {
+            continue;
+        }
+        let net: f64 = loads.column(axis).iter().sum();
+        if net.abs() > 1e-9 * total_abs {
+            return Err(TheseusError::Solver(format!(
+                "enforce_zero_r{name} is inconsistent with the applied load: the free-node \
+                 loads have a net {name}-component of {net:.3e} (total |load| {total_abs:.3e}), \
+                 which the supports must carry. Zero {name}-reactions at every support \
+                 require a zero net {name}-load."
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `‖E_R(x(q)) q‖`: the norm of the realised reactions along the enforced
+/// axes at the forward-solved geometry, with the row weight divided out (zero
+/// without reaction rows, NaN if the Laplacian at `q` is singular).
+fn reaction_residual(problem: &Problem, system: &EquilibriumSystem, q: &[f64], weight: f64) -> f64 {
+    let first = 3 * system.n_free;
+    if system.n_eq <= first {
+        return 0.0;
+    }
+    match probe_geometry(problem, system, q, true, weight) {
+        Ok(probe) => probe.neg_error[first..]
+            .iter()
+            .map(|v| (v / weight).powi(2))
+            .sum::<f64>()
+            .sqrt(),
+        Err(_) => f64::NAN,
+    }
+}
+
+/// Scale the optional reaction rows (those after the `3·n_free` free-node
+/// rows) of an assembled system by `weight`.
+fn weight_reaction_rows(system: &mut EquilibriumSystem, weight: f64) {
+    let first = 3 * system.n_free;
+    if weight == 1.0 || system.n_eq <= first {
+        return;
+    }
+    let scales: Vec<f64> = (0..system.n_eq)
+        .map(|row| if row >= first { weight } else { 1.0 })
+        .collect();
+    system.a = row_scaled_copy(&system.a, &scales);
+    for value in system.p.iter_mut().skip(first) {
+        *value *= weight;
+    }
+}
+
+/// Dimensional scales used to non-dimensionalise the inverse problem.
+///
+/// Positions are divided by `length`, loads by `force`, so force densities
+/// become `q̃ = q · length / force`. Tikhonov terms are rescaled so that the
+/// scaled objectives are the original ones divided by a constant; the result
+/// is therefore identical in exact arithmetic and only the conditioning of the
+/// assembled systems changes.
+struct Nondimensional {
+    length: f64,
+    force: f64,
+}
+
+impl Nondimensional {
+    fn from_problem(problem: &Problem, target_free_xyz: &Array2<f64>) -> Option<Self> {
+        let mut lo = [f64::INFINITY; 3];
+        let mut hi = [f64::NEG_INFINITY; 3];
+        for row in target_free_xyz
+            .rows()
+            .into_iter()
+            .chain(problem.fixed_node_positions.rows())
+        {
+            for d in 0..3 {
+                lo[d] = lo[d].min(row[d]);
+                hi[d] = hi[d].max(row[d]);
+            }
+        }
+        let length = (0..3).map(|d| (hi[d] - lo[d]).powi(2)).sum::<f64>().sqrt();
+        let force = problem
+            .free_node_loads
+            .iter()
+            .map(|v| v.abs())
+            .fold(0.0_f64, f64::max);
+        if !length.is_finite() || length <= 0.0 {
+            return None;
+        }
+        // A load-free (pure self-stress) problem has no force scale; q is then
+        // homogeneous and any positive scale is equivalent.
+        let force = if force.is_finite() && force > 0.0 {
+            force
+        } else {
+            1.0
+        };
+        Some(Self { length, force })
+    }
+
+    /// `q̃ = q · length / force`.
+    fn q_factor(&self) -> f64 {
+        self.length / self.force
+    }
+
+    fn scale_problem(&self, problem: &Problem) -> Problem {
+        Problem {
+            topology: problem.topology.clone(),
+            free_node_loads: problem.free_node_loads.mapv(|v| v / self.force),
+            fixed_node_positions: problem.fixed_node_positions.mapv(|v| v / self.length),
+            anchors: problem.anchors.clone(),
+            objectives: Vec::new(),
+            bounds: problem.bounds.clone(),
+            solver: problem.solver.clone(),
+            self_weight: problem.self_weight.clone(),
+            pressure: problem.pressure.clone(),
+        }
+    }
+
+    fn scale_options(&self, opts: &InverseFdmOptions) -> InverseFdmOptions {
+        let qf = self.q_factor();
+        let scale_bound = |v: f64| if v.is_finite() { v * qf } else { v };
+        let mut scaled = opts.clone();
+        scaled.nondimensionalize = false;
+        scaled.lower = opts.lower.iter().map(|&v| scale_bound(v)).collect();
+        scaled.upper = opts.upper.iter().map(|&v| scale_bound(v)).collect();
+        scaled.q_ref = opts.q_ref.iter().map(|&v| v * qf).collect();
+        // ‖Eq − p‖² scales by 1/force² and ‖q‖² by qf², so λ̃ = λ / length².
+        scaled.regularization = opts.regularization / (self.length * self.length);
+        // The geometric objective scales by 1/length² and ‖Δq‖² by qf².
+        scaled.cwls_damping = opts.cwls_damping / (self.length * self.length * qf * qf);
+        scaled
+    }
+}
+
 /// Solve the inverse-FDM particular with Direct/Iterative linear algebra,
 /// optional box bounds, and optional IRLS.
 pub fn solve_inverse_fdm(
@@ -1140,8 +1420,43 @@ pub fn solve_inverse_fdm(
             "cwls_damping must be finite and non-negative".into(),
         ));
     }
+    if !opts.lm_damping.is_finite() || opts.lm_damping < 0.0 {
+        return Err(TheseusError::Solver(
+            "lm_damping must be finite and non-negative".into(),
+        ));
+    }
+    if !opts.seed_guard_margin.is_finite() || opts.seed_guard_margin < 0.0 {
+        return Err(TheseusError::Solver(
+            "seed_guard_margin must be finite and non-negative".into(),
+        ));
+    }
+    validate_reaction_constraints(problem, &opts)?;
+
+    if opts.nondimensionalize {
+        if let Some(scales) = Nondimensional::from_problem(problem, target_free_xyz) {
+            let scaled_problem = scales.scale_problem(problem);
+            let scaled_target = target_free_xyz.mapv(|v| v / scales.length);
+            let scaled_opts = scales.scale_options(&opts);
+            let mut result = solve_inverse_fdm(&scaled_problem, &scaled_target, scaled_opts)?;
+            let back = 1.0 / scales.q_factor();
+            for value in result.q.iter_mut() {
+                *value *= back;
+            }
+            result.geometric_error *= scales.length;
+            result.diagnostics.stage1_error *= scales.length;
+            result.diagnostics.uniform_seed_error *= scales.length;
+            result.diagnostics.reaction_residual *= scales.force;
+            return Ok(result);
+        }
+    }
+
+    if !opts.reaction_weight.is_finite() || opts.reaction_weight <= 0.0 {
+        return Err(TheseusError::Solver(
+            "reaction_weight must be finite and positive".into(),
+        ));
+    }
     let ne = problem.topology.num_edges;
-    let stage1_system = EquilibriumSystem::assemble(
+    let mut stage1_system = EquilibriumSystem::assemble(
         problem,
         target_free_xyz,
         if opts.solve_for_q {
@@ -1153,6 +1468,7 @@ pub fn solve_inverse_fdm(
         opts.enforce_zero_ry,
         opts.enforce_zero_rz,
     )?;
+    weight_reaction_rows(&mut stage1_system, opts.reaction_weight);
     let q_bounds = compose_box(ne, &opts.signs, &opts.lower, &opts.upper)?;
     let stage1_bounds = if opts.solve_for_q {
         q_bounds.clone()
@@ -1162,7 +1478,6 @@ pub fn solve_inverse_fdm(
     let stage1_kind = pick_inner(&opts, &stage1_bounds);
 
     let mut ldl_cache = None;
-    let mut stage2_ldl_cache = None;
     let mut qr_symbolic: Option<SymbolicQr<u32>> = None;
     let mut factor_stack = GlobalPodBuffer::new(dyn_stack::StackReq::empty());
     let mut solve_stack = GlobalPodBuffer::new(dyn_stack::StackReq::empty());
@@ -1173,9 +1488,7 @@ pub fn solve_inverse_fdm(
                            p: &[f64],
                            lambda: f64,
                            x0: &[f64],
-                           box_bounds: &BoxBounds,
-                           weight: Option<&MetricWeight>,
-                           geometric_step: bool|
+                           box_bounds: &BoxBounds|
      -> Result<(Vec<f64>, usize, bool), TheseusError> {
         match kind {
             InnerKind::Gram => Ok((
@@ -1195,14 +1508,10 @@ pub fn solve_inverse_fdm(
                     m_mat,
                     p,
                     lambda,
-                    if geometric_step {
-                        &mut stage2_ldl_cache
-                    } else {
-                        &mut ldl_cache
-                    },
+                    &mut ldl_cache,
                     &mut factor_stack,
                     &mut solve_stack,
-                    weight,
+                    None,
                 )?,
                 1,
                 true,
@@ -1210,7 +1519,7 @@ pub fn solve_inverse_fdm(
             InnerKind::Qr => Ok((solve_qr_on(m_mat, p, true, &mut qr_symbolic)?, 1, true)),
             InnerKind::Lsqr => {
                 let result =
-                    solve_lsqr_on(m_mat, p, lambda, opts.tol.max(1e-11), opts.max_iter, weight)?;
+                    solve_lsqr_on(m_mat, p, lambda, opts.tol.max(1e-11), opts.max_iter, None)?;
                 Ok((result.solution, result.iterations, result.converged))
             }
             InnerKind::Clarabel => Ok((
@@ -1219,10 +1528,10 @@ pub fn solve_inverse_fdm(
                     p,
                     lambda,
                     box_bounds,
-                    weight,
+                    None,
                     opts.max_iter,
                     opts.tol,
-                    geometric_step,
+                    false,
                 )?,
                 1,
                 true,
@@ -1236,7 +1545,7 @@ pub fn solve_inverse_fdm(
                     opts.max_iter,
                     opts.tol,
                     x0,
-                    weight,
+                    None,
                 )?;
                 Ok((result.q, result.iterations, result.converged))
             }
@@ -1250,8 +1559,6 @@ pub fn solve_inverse_fdm(
         opts.regularization,
         &start,
         &stage1_bounds,
-        None,
-        false,
     )?;
     clip_to_box(&mut x, &stage1_bounds);
 
@@ -1293,8 +1600,6 @@ pub fn solve_inverse_fdm(
                 effective_reg,
                 &start,
                 &stage1_bounds,
-                None,
-                false,
             )?;
             x = next;
             clip_to_box(&mut x, &stage1_bounds);
@@ -1312,7 +1617,7 @@ pub fn solve_inverse_fdm(
 
     if opts.metric.is_geometric() {
         validate_geometric_options(problem, &opts)?;
-        let stage2_system = EquilibriumSystem::assemble(
+        let mut stage2_system = EquilibriumSystem::assemble(
             problem,
             target_free_xyz,
             EquilibriumUnknown::ForceDensity,
@@ -1320,7 +1625,7 @@ pub fn solve_inverse_fdm(
             opts.enforce_zero_ry,
             opts.enforce_zero_rz,
         )?;
-        let stage2_kind = pick_stage2_inner(&opts, &q_bounds);
+        weight_reaction_rows(&mut stage2_system, opts.reaction_weight);
         let (frozen_budget, newton_budget) = match opts.metric {
             InverseMetric::Force => unreachable!("force metric is not geometric"),
             // Legacy native Geometry callers use max_outer as their frozen budget.
@@ -1328,71 +1633,113 @@ pub fn solve_inverse_fdm(
             InverseMetric::GeometryNewton => (opts.max_frozen_outer, opts.max_outer),
         };
 
-        let mut total_iterations = 0usize;
-        let mut phase_seed = if opts.q_ref.is_empty() {
+        let mut seed = if opts.q_ref.is_empty() {
             stage1_q.clone()
         } else {
+            if opts.q_ref.len() != ne {
+                return Err(TheseusError::Shape(format!(
+                    "q_ref has {} entries, expected {ne}",
+                    opts.q_ref.len()
+                )));
+            }
             opts.q_ref.clone()
         };
-        let mut phase_result = None;
+        clip_to_box(&mut seed, &q_bounds);
 
-        if frozen_budget > 0 {
-            let mut frozen_opts = opts.clone();
-            frozen_opts.metric = InverseMetric::Geometry;
-            frozen_opts.max_frozen_outer = 0;
-            frozen_opts.max_outer = frozen_budget;
-            let result = solve_geometric_outer(
-                problem,
-                &stage2_system,
-                &frozen_opts,
-                &q_bounds,
-                &phase_seed,
-                stage2_kind,
-                &mut solve_inner,
-            )?;
-            total_iterations += result.iterations;
-            phase_seed = result.q.clone();
-            phase_result = Some(result);
+        let mut ctx = Stage2Context::new(problem, &stage2_system, &opts, &q_bounds);
+        let stage1_error = ctx.probe_error(&seed);
+        ctx.diagnostics.stage1_error = stage1_error;
+        ctx.diagnostics.uniform_seed_error = f64::NAN;
+        // A suspicious Stage-1 seed is not discarded on its raw error: the
+        // compliance-weighted phases can rescue a seed whose force residual
+        // exploded (a near-mechanism target) and can equally fail to move a
+        // scaled uniform seed whose Laplacian is nearly singular. Both seeds
+        // therefore run the whole of Stage 2 and the lower final geometric
+        // error wins; the race costs one extra Stage 2 only when the guard
+        // fires.
+        let mut challenger: Option<Vec<f64>> = None;
+        if opts.seed_guard_margin > 0.0 && opts.q_ref.is_empty() {
+            let (uniform, uniform_error) = ctx.scaled_uniform_seed(&seed);
+            ctx.diagnostics.uniform_seed_error = uniform_error;
+            let ratio = stage1_error / uniform_error;
+            let suspicious = !stage1_error.is_finite()
+                || (uniform_error.is_finite() && ratio > opts.seed_guard_margin);
+            if suspicious && uniform_error.is_finite() {
+                if stage1_error.is_finite() && frozen_budget + newton_budget > 0 {
+                    challenger = Some(uniform);
+                } else {
+                    seed = uniform;
+                    ctx.diagnostics.used_uniform_seed = true;
+                }
+            }
         }
 
-        if newton_budget > 0 {
-            let mut newton_opts = opts.clone();
-            newton_opts.metric = InverseMetric::GeometryNewton;
-            newton_opts.q_ref = phase_seed.clone();
-            newton_opts.max_frozen_outer = 0;
-            newton_opts.max_outer = newton_budget;
-            let mut result = solve_geometric_outer(
-                problem,
-                &stage2_system,
-                &newton_opts,
-                &q_bounds,
-                &phase_seed,
-                stage2_kind,
-                &mut solve_inner,
-            )?;
-            result.iterations += total_iterations;
-            return Ok(result);
-        }
+        let run_stage2 = |ctx: &mut Stage2Context<'_>,
+                          seed: &[f64]|
+         -> Result<InverseFdmResult, TheseusError> {
+            ctx.lm = opts.lm_damping;
+            let mut current = seed.to_vec();
+            let mut result = None;
+            let mut total_iterations = 0usize;
+            if frozen_budget > 0 {
+                let frozen =
+                    solve_geometric_outer(ctx, InverseMetric::Geometry, &current, frozen_budget)?;
+                total_iterations += frozen.iterations;
+                current = frozen.q.clone();
+                result = Some(frozen);
+            }
+            if newton_budget > 0 {
+                let mut newton = solve_geometric_outer(
+                    ctx,
+                    InverseMetric::GeometryNewton,
+                    &current,
+                    newton_budget,
+                )?;
+                newton.iterations += total_iterations;
+                result = Some(newton);
+            }
+            match result {
+                Some(result) => Ok(result),
+                // Both phase budgets are zero: report the seed without a
+                // compliance-weighted update.
+                None => solve_geometric_outer(ctx, InverseMetric::Geometry, &current, 0),
+            }
+        };
 
-        if let Some(result) = phase_result {
-            return Ok(result);
+        let before = ctx.diagnostics.clone();
+        let mut result = run_stage2(&mut ctx, &seed)?;
+        if let Some(uniform) = challenger {
+            let stage1_branch = ctx.diagnostics.clone();
+            ctx.diagnostics.frozen_steps = before.frozen_steps;
+            ctx.diagnostics.newton_steps = before.newton_steps;
+            let alternative = run_stage2(&mut ctx, &uniform)?;
+            let uniform_branch = ctx.diagnostics.clone();
+            let factorizations = ctx.diagnostics.stage2_factorizations;
+            let moved = |d: &InverseDiagnostics| {
+                d.frozen_steps + d.newton_steps > before.frozen_steps + before.newton_steps
+            };
+            // A seed from which no damped step was accepted has taught Stage 2
+            // nothing about the target; its unmoved error is not evidence
+            // against a seed that did move.
+            let uniform_wins = match (moved(&uniform_branch), moved(&stage1_branch)) {
+                (false, true) => false,
+                (true, false) => true,
+                _ => ctx.probe_error(&alternative.q) < ctx.probe_error(&result.q),
+            };
+            if uniform_wins {
+                result = alternative;
+                ctx.diagnostics = uniform_branch;
+                ctx.diagnostics.used_uniform_seed = true;
+            } else {
+                ctx.diagnostics = stage1_branch;
+            }
+            // The losing branch's factorisations were still paid for.
+            ctx.diagnostics.stage2_factorizations = factorizations;
         }
-
-        // Both phase budgets are zero: report the Stage-1 seed without a
-        // compliance-weighted update.
-        let mut zero_opts = opts.clone();
-        zero_opts.metric = InverseMetric::Geometry;
-        zero_opts.max_frozen_outer = 0;
-        zero_opts.max_outer = 0;
-        return solve_geometric_outer(
-            problem,
-            &stage2_system,
-            &zero_opts,
-            &q_bounds,
-            &phase_seed,
-            stage2_kind,
-            &mut solve_inner,
-        );
+        result.diagnostics = ctx.diagnostics.clone();
+        result.diagnostics.reaction_residual =
+            reaction_residual(problem, &stage2_system, &result.q, opts.reaction_weight);
+        return Ok(result);
     }
 
     // Report the geometric error even for a force-metric solve so the two are
@@ -1405,7 +1752,7 @@ pub fn solve_inverse_fdm(
         opts.enforce_zero_ry,
         opts.enforce_zero_rz,
     )
-    .and_then(|q_system| probe_geometry(problem, &q_system, &stage1_q, true))
+    .and_then(|q_system| probe_geometry(problem, &q_system, &stage1_q, true, opts.reaction_weight))
     .map(|probe| probe.error)
     .unwrap_or(f64::NAN);
     Ok(InverseFdmResult {
@@ -1413,67 +1760,630 @@ pub fn solve_inverse_fdm(
         iterations,
         converged,
         geometric_error,
+        diagnostics: InverseDiagnostics::default(),
     })
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Stage 2: compliance-weighted warm start
+// ─────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stage2Kind {
+    /// Exact bounded-variable least squares on the sparse weighted saddle.
+    ActiveSet,
+    /// Interior-point QP.
+    Clarabel,
+    /// Unbounded weighted saddle (sparse LDL).
+    Saddle,
+    /// Matrix-free LSQR with `S⁻¹` applied per matvec.
+    Lsqr,
+    /// Projected gradient in the box.
+    Spg,
+}
+
+/// Maximum active-set passes; at the limit the best feasible iterate seen is
+/// returned (no interior-point fallback, whose cost would dominate at scale).
+const ACTIVE_SET_MAX_PASSES: usize = 24;
+/// Relative tolerance on the reduced gradient for releasing a held variable.
+const ACTIVE_SET_KKT_TOL: f64 = 1e-6;
+/// Passes during which held variables may be released; afterwards the sweep
+/// only adds violators, which guarantees termination.
+const ACTIVE_SET_RELEASE_PASSES: usize = 12;
+/// Halvings of the projected line search from the iterate towards each
+/// active-set trial before the pass leaves the iterate where it is.
+const ACTIVE_SET_LINE_SEARCH_STEPS: usize = 8;
+/// Maximum damping increases per outer step before the step is abandoned.
+const LM_MAX_TRIES: usize = 6;
+/// Golden-section probes per sign group when scoring the uniform seed.
+const SEED_GUARD_PROBES: usize = 20;
+/// Rademacher probes for the Marquardt curvature diagonal.
+const LM_SCALE_PROBES: usize = 8;
+
+/// State shared by the Stage-2 phases: caches, the warm-started active set,
+/// the current Levenberg--Marquardt damping, and accumulated diagnostics.
+struct Stage2Context<'a> {
+    problem: &'a Problem,
+    system: &'a EquilibriumSystem,
+    opts: &'a InverseFdmOptions,
+    bounds: &'a BoxBounds,
+    kind: Stage2Kind,
+    /// Per-edge bound status: 0 free, −1 at lower, +1 at upper.
+    active: Vec<i8>,
+    ldl_cache: Option<Factorization>,
+    factor_stack: GlobalPodBuffer,
+    solve_stack: GlobalPodBuffer,
+    lm: f64,
+    diagnostics: InverseDiagnostics,
+}
+
+impl<'a> Stage2Context<'a> {
+    fn new(
+        problem: &'a Problem,
+        system: &'a EquilibriumSystem,
+        opts: &'a InverseFdmOptions,
+        bounds: &'a BoxBounds,
+    ) -> Self {
+        let kind = match (opts.linear_algebra, bounds.has_finite()) {
+            (LinearAlgebra::Direct, true) => match opts.stage2_method {
+                Stage2Method::ActiveSet => Stage2Kind::ActiveSet,
+                Stage2Method::Clarabel => Stage2Kind::Clarabel,
+            },
+            (LinearAlgebra::Direct, false) => Stage2Kind::Saddle,
+            (LinearAlgebra::Iterative, true) => Stage2Kind::Spg,
+            (LinearAlgebra::Iterative, false) => Stage2Kind::Lsqr,
+        };
+        Self {
+            problem,
+            system,
+            opts,
+            bounds,
+            kind,
+            active: vec![0; system.n_edges],
+            ldl_cache: None,
+            factor_stack: GlobalPodBuffer::new(dyn_stack::StackReq::empty()),
+            solve_stack: GlobalPodBuffer::new(dyn_stack::StackReq::empty()),
+            lm: opts.lm_damping,
+            diagnostics: InverseDiagnostics::default(),
+        }
+    }
+
+    /// Predict the active set from a seed: edges sitting on a bound of the
+    /// q-box start held there. Wrongly held edges are released on the first
+    /// pass, so this only saves passes on snug boxes.
+    fn seed_active_set(&mut self, q: &[f64]) {
+        for i in 0..q.len() {
+            let (lo, hi) = (self.bounds.lower[i], self.bounds.upper[i]);
+            let width = if lo.is_finite() && hi.is_finite() {
+                (hi - lo).abs()
+            } else {
+                q[i].abs().max(1.0)
+            };
+            let tol = 1e-9 * width.max(f64::MIN_POSITIVE);
+            self.active[i] = if lo.is_finite() && q[i] <= lo + tol {
+                -1
+            } else if hi.is_finite() && q[i] >= hi - tol {
+                1
+            } else {
+                0
+            };
+        }
+    }
+
+    /// Stage-2 merit of `q` (geometric error plus reaction residuals), or +∞
+    /// when the Laplacian is singular.
+    fn probe_error(&self, q: &[f64]) -> f64 {
+        probe_geometry(
+            self.problem,
+            self.system,
+            q,
+            true,
+            self.opts.reaction_weight,
+        )
+        .map(|probe| probe.merit)
+        .unwrap_or(f64::INFINITY)
+    }
+
+    /// Uniform-magnitude seed with the sign pattern implied by the box (or by
+    /// the Stage-1 seed where the box allows both signs), scaled per sign
+    /// group by golden section on the geometric error.
+    ///
+    /// The compliance weighting is invariant to a common scale of the metric
+    /// seed, so only the sign pattern and the relative scale of the two sign
+    /// groups matter downstream. This costs `SEED_GUARD_PROBES` Laplacian
+    /// factorisations per sign group.
+    fn scaled_uniform_seed(&self, reference: &[f64]) -> (Vec<f64>, f64) {
+        let ne = reference.len();
+        let mut magnitude_log_sum = 0.0;
+        let mut magnitude_count = 0usize;
+        for &v in reference {
+            if v.is_finite() && v != 0.0 {
+                magnitude_log_sum += v.abs().ln();
+                magnitude_count += 1;
+            }
+        }
+        let magnitude = if magnitude_count > 0 {
+            (magnitude_log_sum / magnitude_count as f64).exp()
+        } else {
+            1.0
+        };
+        let mut q: Vec<f64> = (0..ne)
+            .map(|i| {
+                let (lo, hi) = (self.bounds.lower[i], self.bounds.upper[i]);
+                let sign = if lo >= 0.0 {
+                    1.0
+                } else if hi <= 0.0 {
+                    -1.0
+                } else if reference[i] < 0.0 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                sign * magnitude
+            })
+            .collect();
+        let groups: Vec<Vec<usize>> = {
+            let positive: Vec<usize> = (0..ne).filter(|&i| q[i] > 0.0).collect();
+            let negative: Vec<usize> = (0..ne).filter(|&i| q[i] < 0.0).collect();
+            [positive, negative]
+                .into_iter()
+                .filter(|group| !group.is_empty())
+                .collect()
+        };
+        let rounds = if groups.len() > 1 { 2 } else { 1 };
+        let mut best_error = f64::INFINITY;
+        for _ in 0..rounds {
+            for group in &groups {
+                let base = q.clone();
+                let evaluate = |log_scale: f64| -> f64 {
+                    let mut trial = base.clone();
+                    let factor = log_scale.exp();
+                    for &i in group {
+                        trial[i] *= factor;
+                    }
+                    clip_to_box(&mut trial, self.bounds);
+                    self.probe_error(&trial)
+                };
+                let (mut a, mut b) = (-6.0_f64, 6.0_f64);
+                let ratio = 0.618_033_988_749_895;
+                let mut c = b - ratio * (b - a);
+                let mut d = a + ratio * (b - a);
+                let (mut fc, mut fd) = (evaluate(c), evaluate(d));
+                for _ in 0..SEED_GUARD_PROBES {
+                    if fc < fd {
+                        b = d;
+                        d = c;
+                        fd = fc;
+                        c = b - ratio * (b - a);
+                        fc = evaluate(c);
+                    } else {
+                        a = c;
+                        c = d;
+                        fc = fd;
+                        d = a + ratio * (b - a);
+                        fd = evaluate(d);
+                    }
+                }
+                let factor = (0.5 * (a + b)).exp();
+                for &i in group {
+                    q[i] *= factor;
+                }
+                clip_to_box(&mut q, self.bounds);
+                best_error = self.probe_error(&q);
+            }
+        }
+        if groups.is_empty() {
+            best_error = self.probe_error(&q);
+        }
+        (q, best_error)
+    }
+
+    /// Marquardt scaling `≈ diag(Jᵀ S⁻² J)`, the curvature diagonal of the
+    /// compliance-weighted least squares, by a Hutchinson estimate:
+    /// `E[(Jᵀ S⁻¹ z)_j²] = Σ_i (S⁻¹ J)_ij²` for Rademacher `z`. Each probe costs
+    /// one application of `S⁻¹` (three solves with the cached Laplacian
+    /// factorisation) and one transpose matvec, so the estimate stays sparse.
+    fn lm_scale(&self, jacobian: &SparseColMatOwned, weight: &MetricWeight) -> Vec<f64> {
+        let m = jacobian.nrows;
+        let ne = jacobian.ncols;
+        let mut scale = vec![0.0; ne];
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut z = vec![0.0; m];
+        let mut probes_used = 0usize;
+        for _ in 0..LM_SCALE_PROBES {
+            for value in z.iter_mut() {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                *value = if state & 1 == 0 { 1.0 } else { -1.0 };
+            }
+            let Ok(w) = weight.apply_inverse_transpose(&z) else {
+                break;
+            };
+            probes_used += 1;
+            for col in 0..ne {
+                let mut dot = 0.0;
+                for nz in jacobian.col_ptrs[col] as usize..jacobian.col_ptrs[col + 1] as usize {
+                    dot += jacobian.values[nz] * w[jacobian.row_indices[nz] as usize];
+                }
+                scale[col] += dot * dot;
+            }
+        }
+        if probes_used == 0 {
+            // Fall back to the unweighted column norms.
+            for col in 0..ne {
+                for nz in jacobian.col_ptrs[col] as usize..jacobian.col_ptrs[col + 1] as usize {
+                    scale[col] += jacobian.values[nz].powi(2);
+                }
+            }
+        } else {
+            for value in scale.iter_mut() {
+                *value /= probes_used as f64;
+            }
+        }
+        let mean = scale.iter().sum::<f64>() / ne.max(1) as f64;
+        let floor = if mean > 0.0 && mean.is_finite() {
+            1e-8 * mean
+        } else {
+            1e-300
+        };
+        for value in scale.iter_mut() {
+            if !value.is_finite() || *value < floor {
+                *value = floor;
+            }
+        }
+        scale
+    }
+
+    /// One weighted least-squares step `min ‖S⁻¹(JΔ + r)‖² + Σ Λ_j Δ_j²` in the
+    /// shifted box, by the configured backend.
+    fn solve_step(
+        &mut self,
+        jacobian: &SparseColMatOwned,
+        neg_r: &[f64],
+        damping: &[f64],
+        step_bounds: &BoxBounds,
+        weight: &MetricWeight,
+    ) -> Result<Vec<f64>, TheseusError> {
+        let ne = jacobian.ncols;
+        match self.kind {
+            Stage2Kind::ActiveSet => {
+                match self.solve_active_set(jacobian, neg_r, damping, step_bounds, weight) {
+                    Ok(step) => Ok(step),
+                    Err(_) => {
+                        self.diagnostics.clarabel_fallbacks += 1;
+                        self.diagnostics.stage2_factorizations += 1;
+                        solve_clarabel_once(
+                            jacobian,
+                            neg_r,
+                            damping,
+                            step_bounds,
+                            Some(weight),
+                            self.opts.max_iter,
+                            self.opts.tol,
+                            true,
+                        )
+                    }
+                }
+            }
+            Stage2Kind::Clarabel => {
+                self.diagnostics.stage2_factorizations += 1;
+                solve_clarabel_once(
+                    jacobian,
+                    neg_r,
+                    damping,
+                    step_bounds,
+                    Some(weight),
+                    self.opts.max_iter,
+                    self.opts.tol,
+                    true,
+                )
+            }
+            Stage2Kind::Saddle => {
+                self.diagnostics.stage2_factorizations += 1;
+                let (k_mat, rhs) = build_weighted_saddle(jacobian, &weight.s, neg_r, damping, None);
+                let sol = ldl_solve_cached(
+                    &k_mat,
+                    &rhs,
+                    1.0,
+                    &mut self.ldl_cache,
+                    &mut self.factor_stack,
+                    &mut self.solve_stack,
+                )?;
+                let m = neg_r.len();
+                Ok(sol[m..m + ne].to_vec())
+            }
+            Stage2Kind::Lsqr => {
+                let lambda = damping.iter().sum::<f64>() / damping.len().max(1) as f64;
+                let result = solve_lsqr_on(
+                    jacobian,
+                    neg_r,
+                    lambda,
+                    self.opts.tol.max(1e-11),
+                    self.opts.max_iter,
+                    Some(weight),
+                )?;
+                Ok(result.solution)
+            }
+            Stage2Kind::Spg => {
+                let lambda = damping.iter().sum::<f64>() / damping.len().max(1) as f64;
+                let zero = vec![0.0; ne];
+                let result = solve_spg_on(
+                    jacobian,
+                    neg_r,
+                    lambda,
+                    step_bounds,
+                    self.opts.max_iter,
+                    self.opts.tol,
+                    &zero,
+                    Some(weight),
+                )?;
+                Ok(result.q)
+            }
+        }
+    }
+
+    /// Bounded-variable least squares by a primal-dual active set with a
+    /// monotone safeguard.
+    ///
+    /// Every pass is one numeric refactorisation of the weighted saddle with
+    /// the held columns fixed at their bound (same sparsity pattern, so the
+    /// symbolic analysis is reused). After each solve the set is updated in
+    /// one sweep: free variables that left the box are fixed at the violated
+    /// bound, and held variables whose reduced gradient
+    /// `∇f_j = Λ_j Δ_j − J_jᵀ y` points into the box are released. Updating
+    /// both sides at once (Hintermüller--Ito--Kunisch) keeps the pass count
+    /// small and largely independent of the problem size; after
+    /// `ACTIVE_SET_RELEASE_PASSES` passes releases stop so the sweep is
+    /// monotone in the set. Independently of the set, a feasible iterate is
+    /// advanced along the projected path towards each trial by a line search
+    /// on the QP objective, and that iterate is what the sweep returns: on a
+    /// settled sweep it is the KKT point, on a sweep that cycles or hits the
+    /// pass limit (measured on 65 k-edge nets, where the frozen sweep can
+    /// cascade into holding nearly every column) it is still a feasible
+    /// descent step no worse than any trial seen. The status vector persists
+    /// across outer steps as a warm start.
+    fn solve_active_set(
+        &mut self,
+        jacobian: &SparseColMatOwned,
+        neg_r: &[f64],
+        damping: &[f64],
+        step_bounds: &BoxBounds,
+        weight: &MetricWeight,
+    ) -> Result<Vec<f64>, TheseusError> {
+        let ne = jacobian.ncols;
+        let m = neg_r.len();
+        // Bounds that are not finite can never be active.
+        for i in 0..ne {
+            let status = self.active[i];
+            if (status == -1 && !step_bounds.lower[i].is_finite())
+                || (status == 1 && !step_bounds.upper[i].is_finite())
+            {
+                self.active[i] = 0;
+            }
+        }
+        let bound_scale = step_bounds
+            .lower
+            .iter()
+            .chain(step_bounds.upper.iter())
+            .filter(|v| v.is_finite())
+            .map(|v| v.abs())
+            .fold(0.0_f64, f64::max)
+            .max(1.0);
+        let box_tol = 1e-12 * bound_scale;
+        let clamp = |candidate: &mut [f64]| {
+            for (i, value) in candidate.iter_mut().enumerate() {
+                *value = value.clamp(step_bounds.lower[i], step_bounds.upper[i]);
+            }
+        };
+
+        // QP objective ½‖S⁻¹(JΔ − p)‖² + ½ΣΛ_jΔ_j²: one sparse matvec and one
+        // application of the cached compliance, cheap next to a pass.
+        let objective = |candidate: &[f64]| -> Result<f64, TheseusError> {
+            let mut residual = jacobian.matvec(candidate);
+            for (value, &pi) in residual.iter_mut().zip(neg_r) {
+                *value -= pi;
+            }
+            let e = weight.apply_inverse(&residual)?;
+            let data = 0.5 * e.iter().map(|v| v * v).sum::<f64>();
+            let tikhonov = 0.5
+                * candidate
+                    .iter()
+                    .zip(damping)
+                    .map(|(d, l)| l * d * d)
+                    .sum::<f64>();
+            Ok(data + tikhonov)
+        };
+
+        // The zero step is feasible (q is inside the box); `current` is the
+        // monotone iterate the sweep returns.
+        let mut current = vec![0.0; ne];
+        clamp(&mut current);
+        let mut current_f = objective(&current)?;
+        let mut fixed = vec![0.0; ne];
+        let mut trial = vec![0.0; ne];
+        let mut candidate = vec![0.0; ne];
+        let trace = std::env::var_os("THESEUS_AS_TRACE").is_some();
+
+        for pass in 0..ACTIVE_SET_MAX_PASSES {
+            for i in 0..ne {
+                fixed[i] = match self.active[i] {
+                    -1 => step_bounds.lower[i],
+                    1 => step_bounds.upper[i],
+                    _ => 0.0,
+                };
+            }
+            let (k_mat, rhs) = build_weighted_saddle(
+                jacobian,
+                &weight.s,
+                neg_r,
+                damping,
+                Some((&self.active, &fixed)),
+            );
+            self.diagnostics.stage2_factorizations += 1;
+            let sol = ldl_solve_cached(
+                &k_mat,
+                &rhs,
+                1.0,
+                &mut self.ldl_cache,
+                &mut self.factor_stack,
+                &mut self.solve_stack,
+            )?;
+            for i in 0..ne {
+                trial[i] = if self.active[i] == 0 {
+                    sol[m + i]
+                } else {
+                    fixed[i]
+                };
+                if !trial[i].is_finite() {
+                    return Err(TheseusError::Solver("active set: non-finite step".into()));
+                }
+            }
+
+            // Reduced gradient on the held variables, for the release test.
+            let y = &sol[m + ne..];
+            let mut gradients = vec![0.0; ne];
+            let mut gradient_scale = 0.0_f64;
+            for i in 0..ne {
+                if self.active[i] == 0 {
+                    continue;
+                }
+                let mut g = damping[i] * trial[i];
+                for nz in jacobian.col_ptrs[i] as usize..jacobian.col_ptrs[i + 1] as usize {
+                    g -= jacobian.values[nz] * y[jacobian.row_indices[nz] as usize];
+                }
+                gradients[i] = g;
+                gradient_scale = gradient_scale.max(g.abs());
+            }
+            // Scale the release test by the size of the coupling terms over
+            // all columns; the held gradients alone can be pure round-off.
+            let mut coupling_scale = 0.0_f64;
+            for i in 0..ne {
+                let mut g = 0.0;
+                for nz in jacobian.col_ptrs[i] as usize..jacobian.col_ptrs[i + 1] as usize {
+                    g += jacobian.values[nz] * y[jacobian.row_indices[nz] as usize];
+                }
+                coupling_scale = coupling_scale.max(g.abs());
+            }
+            let kkt_tol =
+                ACTIVE_SET_KKT_TOL * coupling_scale.max(gradient_scale).max(f64::MIN_POSITIVE);
+            let allow_release = pass < ACTIVE_SET_RELEASE_PASSES;
+
+            let mut changes = 0usize;
+            for i in 0..ne {
+                match self.active[i] {
+                    0 => {
+                        if trial[i] < step_bounds.lower[i] - box_tol {
+                            self.active[i] = -1;
+                            changes += 1;
+                        } else if trial[i] > step_bounds.upper[i] + box_tol {
+                            self.active[i] = 1;
+                            changes += 1;
+                        }
+                    }
+                    -1 if allow_release && gradients[i] < -kkt_tol => {
+                        self.active[i] = 0;
+                        changes += 1;
+                    }
+                    1 if allow_release && gradients[i] > kkt_tol => {
+                        self.active[i] = 0;
+                        changes += 1;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Monotone safeguard: move the iterate along the projected path
+            // towards the trial as far as the QP objective decreases. A
+            // feasible trial (no violators) is the first candidate, so a
+            // settled sweep returns its KKT point whenever that beats the
+            // iterate; a cycling sweep still returns a feasible point that
+            // is no worse than any clamped trial seen.
+            let mut alpha = 1.0;
+            let mut accepted = false;
+            for _ in 0..ACTIVE_SET_LINE_SEARCH_STEPS {
+                for i in 0..ne {
+                    candidate[i] = current[i] + alpha * (trial[i] - current[i]);
+                }
+                clamp(&mut candidate);
+                let f = objective(&candidate)?;
+                if f < current_f {
+                    std::mem::swap(&mut current, &mut candidate);
+                    current_f = f;
+                    accepted = true;
+                    break;
+                }
+                alpha *= 0.5;
+            }
+            if trace {
+                let held = self.active.iter().filter(|s| **s != 0).count();
+                let step = if accepted { alpha } else { 0.0 };
+                eprintln!(
+                    "as pass {pass}: changes={changes} held={held}/{ne} alpha={step} qp={current_f:.6e}"
+                );
+            }
+            // Only an unchanged set is a KKT point: clamping a few late
+            // toggles was measured to leave the step up to 7× above the QP
+            // optimum on nearly degenerate (self-stressed) nets, so the sweep
+            // runs until it is quiet or out of passes.
+            if changes == 0 {
+                break;
+            }
+            if pass + 1 == ACTIVE_SET_MAX_PASSES {
+                self.diagnostics.active_set_capped += 1;
+            }
+        }
+        Ok(current)
+    }
 }
 
 /// Stage-2 outer loop for the geometric metrics, always in q coordinates.
 ///
 /// Each iteration rebuilds the compliance at the current q, measures the exact
-/// geometric error, solves one weighted least-squares step, and backtracks on
-/// the measured error. The step form makes the existing λ act as
-/// Levenberg--Marquardt damping.
-fn solve_geometric_outer<F>(
-    problem: &Problem,
-    system: &EquilibriumSystem,
-    opts: &InverseFdmOptions,
-    bounds: &BoxBounds,
-    stage1_q: &[f64],
-    kind: InnerKind,
-    solve_inner: &mut F,
-) -> Result<InverseFdmResult, TheseusError>
-where
-    F: FnMut(
-        InnerKind,
-        &SparseColMatOwned,
-        &[f64],
-        f64,
-        &[f64],
-        &BoxBounds,
-        Option<&MetricWeight>,
-        bool,
-    ) -> Result<(Vec<f64>, usize, bool), TheseusError>,
-{
+/// merit (geometric error plus weighted realised reactions), solves one
+/// weighted least-squares step and accepts it only if the merit decreases.
+/// With `lm_damping == 0` (default) the full step is halved until it does.
+/// With `lm_damping > 0` the step direction is damped Levenberg--Marquardt
+/// style instead: a rejected step multiplies the damping by ten, a hundred,
+/// a thousand and re-solves; an accepted step divides it by ten.
+fn solve_geometric_outer(
+    ctx: &mut Stage2Context<'_>,
+    metric: InverseMetric,
+    seed: &[f64],
+    max_outer: usize,
+) -> Result<InverseFdmResult, TheseusError> {
     const MAX_BACKTRACK: usize = 12;
+    let problem = ctx.problem;
+    let system = ctx.system;
+    let opts = ctx.opts;
+    let bounds = ctx.bounds;
     let ne = problem.topology.num_edges;
-
-    // Stage 1 is the normal initializer. q_ref remains only as an explicit
-    // internal test override.
-    let q_seed: Vec<f64> = if opts.q_ref.is_empty() {
-        stage1_q.to_vec()
-    } else {
-        if opts.q_ref.len() != ne {
-            return Err(TheseusError::Shape(format!(
-                "q_ref has {} entries, expected {ne}",
-                opts.q_ref.len()
-            )));
-        }
-        opts.q_ref.clone()
-    };
-    let mut x = q_seed;
+    if seed.len() != ne {
+        return Err(TheseusError::Shape(format!(
+            "Stage-2 seed has {} entries, expected {ne}",
+            seed.len()
+        )));
+    }
+    let mut x = seed.to_vec();
     clip_to_box(&mut x, bounds);
+    if ctx.kind == Stage2Kind::ActiveSet {
+        ctx.seed_active_set(&x);
+    }
 
-    let mut probe = probe_geometry(problem, system, &x, true)?;
+    let mut probe = probe_geometry(problem, system, &x, true, opts.reaction_weight)?;
     let mut best_x = x.clone();
+    let mut best_merit = probe.merit;
     let mut best_error = probe.error;
     let mut iterations = 0;
     let mut converged = false;
-    let max_outer = opts.max_outer;
-    if best_error <= opts.tol.max(1e-12) {
+    let tolerance = opts.tol.max(1e-12);
+    if best_merit <= tolerance {
         return Ok(InverseFdmResult {
             q: best_x,
             iterations,
             converged: true,
             geometric_error: best_error,
+            diagnostics: InverseDiagnostics::default(),
         });
     }
 
@@ -1486,7 +2396,7 @@ where
             *ri -= pi;
         }
 
-        let jacobian = match opts.metric {
+        let jacobian = match metric {
             InverseMetric::Force => unreachable!("force metric does not reach the outer loop"),
             InverseMetric::Geometry => None,
             InverseMetric::GeometryNewton => {
@@ -1495,54 +2405,68 @@ where
                 let current = Array2::from_shape_fn((n_free, 3), |(i, d)| {
                     system.free_positions[[i, d]] - probe.neg_error[d * n_free + i]
                 });
-                let at_current = EquilibriumSystem::assemble(
+                // An iterate whose geometry collapses an edge cannot be
+                // linearised (its direction is undefined); the step then
+                // falls back to the frozen Jacobian rather than aborting.
+                match EquilibriumSystem::assemble(
                     problem,
                     &current,
                     EquilibriumUnknown::ForceDensity,
                     opts.enforce_zero_rx,
                     opts.enforce_zero_ry,
                     opts.enforce_zero_rz,
-                )?;
-                Some(at_current.a)
+                ) {
+                    Ok(mut at_current) => {
+                        weight_reaction_rows(&mut at_current, opts.reaction_weight);
+                        Some(at_current.a)
+                    }
+                    Err(TheseusError::Solver(_)) => {
+                        ctx.diagnostics.degenerate_linearizations += 1;
+                        None
+                    }
+                    Err(other) => return Err(other),
+                }
             }
         };
         let jacobian = jacobian.as_ref().unwrap_or(&system.a);
-
         let neg_r: Vec<f64> = r.iter().map(|v| -v).collect();
         let step_bounds = shift_box(bounds, &x);
-        let zero_start = vec![0.0; ne];
-        // The inner convergence flag is advisory only: acceptance is decided by
-        // the measured geometric error below.
-        let (step, _inner_iters, _inner_ok) = solve_inner(
-            kind,
-            jacobian,
-            &neg_r,
-            opts.cwls_damping,
-            &zero_start,
-            &step_bounds,
-            Some(&probe.weight),
-            true,
-        )?;
-        validate_unknown(&step, ne, "geometric step")?;
+        let scale = if ctx.lm > 0.0 {
+            ctx.lm_scale(jacobian, &probe.weight)
+        } else {
+            vec![0.0; ne]
+        };
 
-        // Backtrack on the measured error; the linear model can overshoot when
-        // the target is far from funicular.
         let mut accepted = false;
+        let mut growth = 10.0;
         let mut failed_probes = 0usize;
+        let mut total_probes = 0usize;
         let mut last_probe_error = None;
-        let mut scale = 1.0;
-        for _ in 0..MAX_BACKTRACK {
-            let mut candidate: Vec<f64> = x
+        let tries = if ctx.lm > 0.0 { LM_MAX_TRIES } else { 1 };
+        'tries: for _ in 0..tries {
+            let damping: Vec<f64> = scale
                 .iter()
-                .zip(&step)
-                .map(|(&xi, &di)| xi + scale * di)
+                .map(|s| opts.cwls_damping + ctx.lm * s)
                 .collect();
-            clip_to_box(&mut candidate, bounds);
-            match probe_geometry(problem, system, &candidate, true) {
-                Ok(next) => {
-                    if next.error < probe.error {
+            let step = ctx.solve_step(jacobian, &neg_r, &damping, &step_bounds, &probe.weight)?;
+            validate_unknown(&step, ne, "geometric step")?;
+
+            // With damping the direction is already regularised; without it,
+            // fall back to halving the step length on the measured error.
+            let backtracks = if ctx.lm > 0.0 { 1 } else { MAX_BACKTRACK };
+            let mut length = 1.0;
+            for _ in 0..backtracks {
+                let mut candidate: Vec<f64> = x
+                    .iter()
+                    .zip(&step)
+                    .map(|(&xi, &di)| xi + length * di)
+                    .collect();
+                clip_to_box(&mut candidate, bounds);
+                total_probes += 1;
+                match probe_geometry(problem, system, &candidate, true, opts.reaction_weight) {
+                    Ok(next) if next.merit < probe.merit => {
                         let improvement =
-                            (probe.error - next.error) / probe.error.max(f64::MIN_POSITIVE);
+                            (probe.merit - next.merit) / probe.merit.max(f64::MIN_POSITIVE);
                         let step_norm = candidate
                             .iter()
                             .zip(&x)
@@ -1554,34 +2478,52 @@ where
                         x = candidate;
                         probe = next;
                         accepted = true;
-                        if probe.error < best_error {
+                        if probe.merit < best_merit {
+                            best_merit = probe.merit;
                             best_error = probe.error;
                             best_x = x.clone();
                         }
-                        let tolerance = opts.tol.max(1e-12);
-                        converged = probe.error <= tolerance
+                        converged = probe.merit <= tolerance
                             || (improvement <= tolerance && relative_step <= tolerance);
-                        break;
+                        break 'tries;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        failed_probes += 1;
+                        last_probe_error = Some(error);
                     }
                 }
-                Err(error) => {
-                    failed_probes += 1;
-                    last_probe_error = Some(error);
-                }
+                length *= 0.5;
             }
-            scale *= 0.5;
+            if ctx.lm > 0.0 {
+                // Nielsen-style growth: 10, then 100, then 1000 per rejection.
+                ctx.lm *= growth;
+                growth *= 10.0;
+            }
         }
 
-        if !accepted {
-            if failed_probes == MAX_BACKTRACK {
+        if accepted {
+            match metric {
+                InverseMetric::Geometry => ctx.diagnostics.frozen_steps += 1,
+                InverseMetric::GeometryNewton => ctx.diagnostics.newton_steps += 1,
+                InverseMetric::Force => {}
+            }
+            if ctx.lm > 0.0 {
+                // Never decay below the configured value: the frozen phase
+                // accepts easily and says nothing about what Gauss--Newton
+                // will need.
+                ctx.lm = (ctx.lm / 10.0).max(opts.lm_damping);
+            }
+        } else {
+            if failed_probes > 0 && failed_probes == total_probes {
                 return Err(TheseusError::Solver(format!(
-                    "CWLS backtracking could not find a nonsingular trial Laplacian after \
-                     {MAX_BACKTRACK} step reductions; last probe: {}",
+                    "CWLS could not find a nonsingular trial Laplacian in {total_probes} \
+                     trial steps; last probe: {}",
                     last_probe_error.expect("a failed probe records its error")
                 )));
             }
-            // No downhill step along this direction; the linear model has
-            // nothing left to offer and the best-so-far point stands.
+            // No downhill step; the linear model has nothing left to offer and
+            // the best-so-far point stands.
             converged = false;
             break;
         }
@@ -1596,6 +2538,7 @@ where
         iterations,
         converged,
         geometric_error: best_error,
+        diagnostics: InverseDiagnostics::default(),
     })
 }
 
@@ -1637,6 +2580,11 @@ pub fn solve_spg_box(
             max_frozen_outer: 0,
             max_outer: DEFAULT_MAX_OUTER,
             cwls_damping: 1e-6,
+            stage2_method: Stage2Method::ActiveSet,
+            lm_damping: DEFAULT_LM_DAMPING,
+            seed_guard_margin: DEFAULT_SEED_GUARD_MARGIN,
+            nondimensionalize: true,
+            reaction_weight: 1.0,
         },
     )?;
     Ok(SpgBoxResult {

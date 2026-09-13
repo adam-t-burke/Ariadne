@@ -1,0 +1,171 @@
+{
+ "name": "cem_tree_2d",
+ "source": "compas_cem",
+ "source_ref": "examples/04_tree_2d.py (compas_cem commit 0964b764783a)",
+ "description": "Tree-like 2D structure: one compression trunk trail, two compression branches and one tension tie as deviation edges, unit downward loads on the two canopy nodes; the canopy nodes get automatic auxiliary trails. Optimisation: TrailEdgeForceGoal(0) on the auxiliary trails (paper's auxiliary-trail trick), parameters = the three deviation-edge forces, nlopt SLSQP. Export note: 2 auxiliary trail(s) with machine-zero optimised force (and their auxiliary support nodes) were dropped.",
+ "nodes": [
+  [
+   -2.0,
+   2.0,
+   0.0
+  ],
+  [
+   2.0,
+   2.0,
+   0.0
+  ],
+  [
+   0.0,
+   0.8,
+   0.0
+  ],
+  [
+   -1.1102230246251565e-16,
+   -0.19999999999999996,
+   0.0
+  ]
+ ],
+ "edges": [
+  [
+   0,
+   2
+  ],
+  [
+   0,
+   1
+  ],
+  [
+   1,
+   2
+  ],
+  [
+   2,
+   3
+  ]
+ ],
+ "fixed": [
+  0,
+  3
+ ],
+ "loads": [
+  [
+   0.0,
+   -1.0,
+   0.0
+  ],
+  [
+   0.0,
+   -1.0,
+   0.0
+  ],
+  [
+   0.0,
+   0.0,
+   0.0
+  ],
+  [
+   0.0,
+   0.0,
+   0.0
+  ]
+ ],
+ "q_ref": [
+  -0.8333333333333333,
+  0.4166666666666667,
+  -0.8333333333333334,
+  -2.0
+ ],
+ "signs": [
+  -1,
+  1,
+  -1,
+  -1
+ ],
+ "target": [
+  [
+   -2.0,
+   2.0,
+   0.0
+  ],
+  [
+   2.0,
+   2.0,
+   0.0
+  ],
+  [
+   0.0,
+   0.8,
+   0.0
+  ],
+  [
+   -1.1102230246251565e-16,
+   -0.19999999999999996,
+   0.0
+  ]
+ ],
+ "bounds": null,
+ "external": {
+  "tool": "compas_cem 0.8.6",
+  "form_finding_time_s": 0.0004590049975377042,
+  "optimization_run": {
+   "algorithm": "nlopt LD_SLSQP",
+   "time_s": 0.014972686767578125,
+   "iterations": 9,
+   "loss_start": 1.5522946432897653,
+   "loss_end": 9.860761315262648e-32,
+   "n_parameters": 3,
+   "n_goals": 4,
+   "status": "NLOPT_EPSVAL_REACHED",
+   "gradient_norm_end": null,
+   "stopval_eps": 1e-06,
+   "ftol_abs_kappa": 1e-08,
+   "max_evals": 100,
+   "gradient": "autograd (AD)",
+   "notes": "upstream example registers each TrailEdgeForceGoal twice (weight 2)"
+  },
+  "cem": {
+   "node_keys": [
+    1,
+    2,
+    3,
+    4
+   ],
+   "n_trail_edges": 1,
+   "n_deviation_edges": 3,
+   "n_indirect_deviation_edges": 0,
+   "n_trails": 3,
+   "n_auxiliary_trails": 2,
+   "auxiliary_trail_edges": [],
+   "dropped_zero_force_auxiliary_trails": 2,
+   "fixed_nodes_note": "CEM support nodes [3] give a singular FDM matrix at the reference state (zero-stiffness mode); additionally fixed nodes [0]",
+   "origin_nodes": [
+    0,
+    1,
+    2
+   ],
+   "reference_eta": 1e-13,
+   "reactions": {
+    "3": [
+     2.220446049250313e-16,
+     2.0,
+     -0.0
+    ]
+   },
+   "goals": {
+    "TrailEdgeForceGoal": 4
+   },
+   "parameters": {
+    "DeviationEdgeParameter": 3
+   },
+   "from_cad2023_paper": false
+  },
+  "fdm_check": {
+   "residual_free_max_abs": 4.440892098500626e-16,
+   "residual_free_rel": 2.220446049250313e-16,
+   "solve_error_max_abs": 4.440892098500626e-16,
+   "solve_error_rel": 2.220446049250313e-16,
+   "cond_Dff": 17.952631191997867,
+   "n_free": 2
+  }
+ }
+}

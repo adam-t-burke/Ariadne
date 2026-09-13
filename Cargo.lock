@@ -1229,6 +1229,8 @@ dependencies = [
  "ndarray",
  "nurbsbook",
  "rayon",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -102,6 +102,7 @@ fn reduced_four_bar_with_fixed_side_has_one_mechanism() {
         n_edges: 4,
         free_positions: Array2::zeros((0, 3)),
         n_free: 0,
+        reaction_dims: Vec::new(),
     };
     let report = analyze_projector(&system, &options(4)).unwrap();
 
@@ -129,6 +130,7 @@ fn sparse_qr_comparison_reports_valid_full_column_rank_fixture() {
         n_edges: 4,
         free_positions: Array2::zeros((0, 3)),
         n_free: 0,
+        reaction_dims: Vec::new(),
     };
     let report = analyze(
         &system,
@@ -165,6 +167,7 @@ fn sparse_qr_comparison_rejects_unvalidated_rank_deficiency() {
         n_edges: 3,
         free_positions: Array2::zeros((0, 3)),
         n_free: 0,
+        reaction_dims: Vec::new(),
     };
     let error = analyze(
         &system,

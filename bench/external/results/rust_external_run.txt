@@ -1,0 +1,604 @@
+
+##### cem_braced_tower_2d [compas_cem] nodes=6 free=4 fixed=2 edges=9 (T=3 C=6) L=2.609 median|q|=1.000e0 box=loose q_ref outside box: 0
+# Two-storey braced tower in 2D: two compression trails (columns), two compression deviation edges (beams) and three tension indirect deviation edges (bracing); unit downward loads at the top nodes. Pure CEM form-finding, no optimisation.
+# forward(q_ref) vs exported nodes: ||dx||/L = 1.416e-15
+
+=== cem_braced_tower_2d exact box=loose [-167.143,-0.008] (ne=9, nfree=4)  best final err/L = 1.828e-9 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0          -          -     0      -        -          -        -         -          -         -  clipped q gives singular forward solve
+s1                      0.2   3.153e-9   3.153e-9     0      1        0   1.828e-9        2         2          2       0.3  it=1 lib_err=8.23e-9
+gram_sparse             0.0   1.331e-7   5.202e-1     4     42        1   2.256e-7        -         -          -         -  λ=2.7e-8 it=1 lib_err=3.47e-7
+length_ratio            0.0          -          -     0      -        -          -        -         -          -         -  sweeps=0 best@0 | clipped q gives singular forward solve
+frozen                  0.4   3.153e-9   3.153e-9     0      1        0   1.828e-9        2         2          2       0.5  it=0 lib_err=8.23e-9 s1e=8.23e-9 u=2.62e0 fr0 gn0 fac=0 fb=0
+pipeline                0.4   3.153e-9   3.153e-9     0      1        0   1.828e-9        2         2          2       0.5  it=0 lib_err=8.23e-9 s1e=8.23e-9 u=2.62e0 fr0 gn0 fac=0 fb=0
+legacy                  0.1   3.153e-9   3.153e-9     0      1        0   1.828e-9        2         2          2       0.2  it=0 lib_err=8.23e-9 s1e=8.23e-9 fr0 gn0 fac=0 fb=0
+uniform_x0.1            0.0          -          -     0      -        -          -        -         -          -         -  seed gives singular forward solve
+uniform_x10             0.0          -          -     0      -        -          -        -         -          -         -  seed gives singular forward solve
+uniform_rand            0.0    8.752e0    8.752e0     0    125        5   1.851e-7        -         -          -         -  
+oracle(q_ref)           0.0  1.416e-15  1.416e-15     0      0        0  1.416e-15        0         0          0       0.0  
+
+=== cem_braced_tower_2d jit1.00%L box=loose [-167.143,-0.008] (ne=9, nfree=4)  best final err/L = 9.698e-3 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0          -          -     0      -        -          -        -         -          -         -  clipped q gives singular forward solve
+s1                      0.2   1.041e-2   1.041e-2     0     23        1   9.698e-3        0         2          5       0.2  it=1 lib_err=2.71e-2
+gram_sparse             0.0   9.746e-3    3.584e0     4    152        5   9.698e-3      181       196        198       4.7  λ=2.7e-8 it=1 lib_err=2.54e-2
+length_ratio            0.0          -          -     0      -        -          -        -         -          -         -  sweeps=0 best@0 | clipped q gives singular forward solve
+frozen                  0.5   9.717e-3   9.717e-3     0     20        1   9.698e-3        0         0          0       0.5  it=1! lib_err=2.53e-2 s1e=2.71e-2 u=3.35e0 fr1 gn0 fac=1 fb=0
+pipeline                0.5   9.698e-3   9.698e-3     0      0        0   9.698e-3        0         0          0       0.5  it=3! lib_err=2.53e-2 s1e=2.71e-2 u=3.35e0 fr1 gn2 fac=4 fb=0
+legacy                  0.6   9.698e-3   9.698e-3     0      1        0   9.698e-3        0         0          0       0.6  it=3! lib_err=2.53e-2 s1e=2.71e-2 fr1 gn2 fac=3 fb=0
+uniform_x0.1            0.0          -          -     0      -        -          -        -         -          -         -  seed gives singular forward solve
+uniform_x10             0.0          -          -     0      -        -          -        -         -          -         -  seed gives singular forward solve
+uniform_rand            0.0    8.746e0    8.746e0     0     46        2   9.698e-3       73        78         79       1.7  
+oracle(q_ref)           0.0   2.265e-2   2.265e-2     0     32        1   9.698e-3        7        10         16       0.2  
+
+##### cem_bridge_2d [compas_cem] nodes=8 free=6 fixed=2 edges=9 (T=8 C=1) L=56.089 median|q|=7.460e-2 box=loose q_ref outside box: 0
+# Suspended bridge in 2D loaded from the repo JSON: two tension trails (cables) rising from the loaded deck nodes 2 and 6 to the supports 1 and 5, cross-linked by two tension ties and one compression strut (deviation edges); unit downward loads at nodes 2 and 6. Optimisation: PointGoal on the two support nodes (1, 5), parameters = all trail-edge lengths (bounds -15/+5) and all deviation-edge forces (+-10), nlopt SLSQP, 100 evals, eps 1e-6.
+# forward(q_ref) vs exported nodes: ||dx||/L = 3.491e-16
+
+=== cem_bridge_2d exact box=loose [0.000,20.632] (ne=9, nfree=6)  best final err/L = 2.328e-11 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0    2.944e0    2.944e0     0     67        3   6.609e-9        -         -          -         -  
+s1                      0.2   3.927e-9   3.927e-9     0      1        0   2.540e-9        -         -          -         -  it=1 lib_err=2.20e-7
+gram_sparse             0.0   4.109e-7   4.109e-7     0     10        0   3.932e-8        -         -          -         -  λ=5.0e-6 it=1 lib_err=2.30e-5
+length_ratio            0.1   7.726e-1   7.726e-1     0     76        2   3.385e-1        -         -          -         -  sweeps=2 best@1
+frozen                  0.6   3.927e-9   3.927e-9     0      1        0   2.540e-9        -         -          -         -  it=0 lib_err=2.20e-7 s1e=2.20e-7 u=1.67e1 fr0 gn0 fac=0 fb=0
+pipeline                0.5   3.927e-9   3.927e-9     0      1        0   2.540e-9        -         -          -         -  it=0 lib_err=2.20e-7 s1e=2.20e-7 u=1.67e1 fr0 gn0 fac=0 fb=0
+legacy                  0.3  7.959e-12  7.959e-12     0      1        0  2.328e-11        0         2          2       0.3  it=1 lib_err=4.46e-10 s1e=2.20e-7 fr1 gn0 fac=1 fb=0
+uniform_x0.1            0.0    3.932e1    3.932e1     0     52        2   1.176e-8        -         -          -         -  
+uniform_x10             0.0    1.874e0    1.874e0     0    100        3   8.419e-9        -         -          -         -  
+uniform_rand            0.0   9.530e-1   9.530e-1     0     51        2   5.020e-9        -         -          -         -  
+oracle(q_ref)           0.0  3.491e-16  3.491e-16     0      1        0  2.197e-11        0         0          2       0.0  
+
+=== cem_bridge_2d jit1.00%L box=loose [0.000,20.632] (ne=9, nfree=6)  best final err/L = 1.963e-2 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0    2.943e0    2.943e0     0     74        3   1.963e-2       85        91         96       2.1  
+s1                      0.2   8.401e-2   8.401e-2     0     42        1   1.963e-2        8        13         29       0.5  it=1 lib_err=4.71e0
+gram_sparse             0.0   8.401e-2   8.401e-2     0     46        1   1.963e-2        8        13         29       0.3  λ=4.9e-6 it=1 lib_err=4.71e0
+length_ratio            0.1   7.823e-1   7.823e-1     0     75        2   3.422e-1        -         -          -         -  sweeps=2 best@1
+frozen                  0.6   1.970e-2   1.970e-2     0     54        2   1.963e-2        0         0          0       0.6  it=1! lib_err=1.10e0 s1e=4.71e0 u=1.66e1 fr1 gn0 fac=1 fb=0
+pipeline                0.6   1.963e-2   1.963e-2     0     13        0   1.963e-2        0         0          0       0.6  it=3! lib_err=1.10e0 s1e=4.71e0 u=1.66e1 fr1 gn2 fac=3 fb=0
+legacy                  0.6   1.963e-2   1.963e-2     0     13        0   1.963e-2        0         0          0       0.6  it=3! lib_err=1.10e0 s1e=4.71e0 fr1 gn2 fac=3 fb=0
+uniform_x0.1            0.0    3.932e1    3.932e1     0     51        2   1.963e-2       51        63         67       1.4  
+uniform_x10             0.0    1.876e0    1.876e0     0     81        3   1.963e-2      110       118        121       2.7  
+uniform_rand            0.0   9.532e-1   9.532e-1     0     66        2   1.963e-2       30        46         53       1.1  
+oracle(q_ref)           0.0   2.557e-2   2.557e-2     0     45        1   1.963e-2        0        12         26       0.3  
+# target_original covers 0/6 free nodes — partial targets are not run
+
+##### cem_curved_bridge_10_3d [compas_cem] nodes=40 free=26 fixed=14 edges=58 (T=19 C=39) L=12.094 median|q|=6.507e-1 box=loose q_ref outside box: 0
+# Curved bridge under torsion from the CAD 2023 paper with 10 hangers: a compression bottom chord (-5) and a tension top chord (+5) split by a middle deviation edge into two trails each, vertical compression hangers (-0.1), tension ties (+1.5) and compression deck struts (-1.5) as deviation edges; the deck nodes carry a uniform downward line load and get auxiliary trails along +z. Supports at both ends of both chords. Optimisation: TrailEdgeForceGoal(0) on the auxiliary trails and LineGoal pulling the four chord-end supports onto vertical target lines; parameters = all deviation forces (+-10) and the lengths of the trail edges at the supports (+-0.5); nlopt SLSQP, 100 evals, stopval 1e-6.
+# forward(q_ref) vs exported nodes: ||dx||/L = 2.281e-6
+# WARNING: export is not an FDM equilibrium under Theseus' conventions; results below fit the exported geometry anyway
+
+=== cem_curved_bridge_10_3d exact box=loose [-499.713,-0.000] (ne=58, nfree=26)  best final err/L = 4.928e-7 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0   5.423e-1   5.423e-1     0   1000       49   1.346e-1        -         -          -         -  
+s1                      1.0   6.901e-1   6.901e-1     0   1000       49   2.072e-3        -         -          -         -  it=1 lib_err=8.35e0
+gram_sparse             0.1   1.659e-2   1.659e-2     2    205       12   5.940e-4        -         -          -         -  λ=3.2e-8 it=1 lib_err=2.01e-1
+length_ratio            0.5   3.239e-1   3.239e-1     0   1000       45   1.057e-1        -         -          -         -  sweeps=7 best@6
+frozen                  2.6   4.928e-7   4.928e-7     0      1        1   4.928e-7        0         0          0       2.6  it=1 lib_err=2.96e-9 s1e=8.35e0 u=4.80e0 fr1 gn0 fac=1 fb=0
+pipeline                2.7   4.928e-7   4.928e-7     0      1        1   4.928e-7        0         0          0       2.7  it=1 lib_err=2.96e-9 s1e=8.35e0 u=4.80e0 fr1 gn0 fac=1 fb=0
+legacy                  5.1   3.416e-6   3.416e-6     0      5        0   3.113e-6        -         -          -         -  it=3! lib_err=4.12e-5 s1e=4.79e-1 fr1 gn2 fac=3 fb=0
+uniform_x0.1            0.0    6.128e0    6.128e0     0   1000       47   1.414e-1        -         -          -         -  
+uniform_x10             0.0   4.931e-1   4.931e-1     0   1000       47   8.242e-2        -         -          -         -  
+uniform_rand            0.0   8.589e-1   8.589e-1     0   1000       48   2.047e-1        -         -          -         -  
+oracle(q_ref)           0.0   2.281e-6   2.281e-6     0      3        1   3.389e-6        6         -          -         -  
+
+=== cem_curved_bridge_10_3d jit1.00%L box=loose [-499.713,-0.000] (ne=58, nfree=26)  best final err/L = 7.155e-2 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0   5.464e-1   5.464e-1     0   1000       47   1.367e-1        -         -          -         -  
+s1                      1.0    1.553e1    1.553e1     0    756       36   6.997e-1        -         -          -         -  it=1 lib_err=1.88e2
+gram_sparse             0.1    4.598e0    1.184e1     8   1000       50   8.995e-2      735         -          -         -  λ=3.2e-8 it=1 lib_err=5.56e1
+length_ratio            0.2   3.637e-1   3.637e-1     0   1000       46   1.010e-1      855         -          -         -  sweeps=3 best@2
+frozen                  3.2   4.695e-1   4.695e-1     0   1000       48   1.587e-1        -         -          -         -  it=1! lib_err=5.68e0 s1e=1.88e2 u=4.86e0 fr1 gn0 fac=8 fb=0
+pipeline                4.2   2.311e-1   2.311e-1     0   1000       47   8.185e-2       27         -          -         -  it=3! lib_err=2.79e0 s1e=1.88e2 u=4.86e0 fr1 gn2 fac=24 fb=0
+legacy                  5.2   2.311e-1   2.311e-1     0   1000       49   7.155e-2       18       352        830      19.6  it=3! lib_err=2.79e0 s1e=1.88e2 fr1 gn2 fac=3 fb=0
+uniform_x0.1            0.0    6.133e0    6.133e0     0   1000       47   1.391e-1        -         -          -         -  
+uniform_x10             0.0   4.916e-1   4.916e-1     0   1000       46   9.235e-2      814         -          -         -  
+uniform_rand            0.0   8.619e-1   8.619e-1     0   1000       49   1.719e-1        -         -          -         -  
+oracle(q_ref)           0.0   5.515e-2   5.515e-2     0    477       25   4.248e-2        0         0          0       0.0  
+# target_original covers 0/26 free nodes — partial targets are not run
+
+##### cem_curved_bridge_22_3d [compas_cem] nodes=88 free=62 fixed=26 edges=130 (T=45 C=85) L=12.106 median|q|=3.465e-1 box=loose q_ref outside box: 0
+# Curved bridge under torsion from the CAD 2023 paper with 22 hangers: a compression bottom chord (-5) and a tension top chord (+5) split by a middle deviation edge into two trails each, vertical compression hangers (-0.1), tension ties (+1.5) and compression deck struts (-1.5) as deviation edges; the deck nodes carry a uniform downward line load and get auxiliary trails along +z. Supports at both ends of both chords. Optimisation: TrailEdgeForceGoal(0) on the auxiliary trails and LineGoal pulling the four chord-end supports onto vertical target lines; parameters = all deviation forces (+-10) and the lengths of the trail edges at the supports (+-0.5); nlopt SLSQP, 100 evals, stopval 1e-6.
+# forward(q_ref) vs exported nodes: ||dx||/L = 2.266e-7
+
+=== cem_curved_bridge_22_3d exact box=loose [-1228.333,-0.000] (ne=130, nfree=62)  best final err/L = 8.500e-8 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0    1.008e0    1.008e0     0   1000       78   3.541e-1        -         -          -         -  
+s1                      2.3   3.069e-2   3.069e-2     0   1000       67   2.751e-4        -         -          -         -  it=1 lib_err=3.72e-1
+gram_sparse             0.2   7.395e-2   7.395e-2     2   1000       66   1.984e-3        -         -          -         -  λ=2.8e-8 it=1 lib_err=8.95e-1
+length_ratio            0.3   8.465e-1   8.465e-1     0    160       14   3.620e-1        -         -          -         -  sweeps=2 best@1
+frozen                  6.3   1.143e-7   1.143e-7     0      1        0   8.500e-8        -         -          -         -  it=1 lib_err=1.03e-8 s1e=3.72e-1 u=9.37e0 fr1 gn0 fac=1 fb=0
+pipeline                5.9   1.143e-7   1.143e-7     0      1        0   8.500e-8        -         -          -         -  it=1 lib_err=1.03e-8 s1e=3.72e-1 u=9.37e0 fr1 gn0 fac=1 fb=0
+legacy                 10.2   1.932e-6   1.932e-6     0      4        2   1.813e-6        -         -          -         -  it=2! lib_err=2.30e-5 s1e=3.72e-1 fr1 gn0 fac=2 fb=0
+uniform_x0.1            0.0    8.583e0    8.583e0     0   1000       67   2.628e-1        -         -          -         -  
+uniform_x10             0.0   9.183e-1   9.183e-1     0   1000       66   1.894e-1        -         -          -         -  
+uniform_rand            0.0    1.066e0    1.066e0     0   1000       72   4.760e-1        -         -          -         -  
+oracle(q_ref)           0.0   2.266e-7   2.266e-7     0      0        1   2.266e-7        0         -          -         -  
+
+=== cem_curved_bridge_22_3d jit0.85%L box=loose [-1228.333,-0.000] (ne=130, nfree=62)  best final err/L = 1.926e-1 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0    1.010e0    1.010e0     0   1000       68   4.524e-1        -         -          -         -  
+s1                      2.1    3.128e1    3.128e1     0    624       42    1.222e0        -         -          -         -  it=1 lib_err=3.79e2
+gram_sparse             0.3    1.146e1    2.645e1    22   1000       81   3.772e-1        -         -          -         -  λ=2.8e-8 it=1 lib_err=1.39e2
+length_ratio            0.3   8.364e-1   8.364e-1     0    226       17   3.625e-1        -         -          -         -  sweeps=2 best@1
+frozen                  8.2    4.068e0    4.068e0     0   1000       69   2.419e-1      215         -          -         -  it=1! lib_err=4.93e1 s1e=3.79e2 u=9.38e0 fr1 gn0 fac=11 fb=0
+pipeline               15.9    1.783e0    1.783e0     0   1000       69   2.266e-1       98         -          -         -  it=3! lib_err=2.16e1 s1e=3.79e2 u=9.38e0 fr1 gn2 fac=27 fb=1
+legacy                 13.8    1.785e0    1.785e0     0   1000       68   2.168e-1       73         -          -         -  it=3! lib_err=2.16e1 s1e=3.79e2 fr1 gn2 fac=3 fb=0
+uniform_x0.1            0.0    8.586e0    8.586e0     0   1000       66   2.624e-1      321         -          -         -  
+uniform_x10             0.0   9.184e-1   9.184e-1     0   1000       66   1.926e-1       96       967       1060      55.9  
+uniform_rand            0.0    1.067e0    1.067e0     0   1000       73   5.420e-1        -         -          -         -  
+oracle(q_ref)           0.0   6.578e-2   6.578e-2     0   1000       64   5.399e-2        0         0          0       0.0  
+# target_original covers 0/62 free nodes — partial targets are not run
+
+##### cem_tensegrity_wheel_2d [compas_cem] nodes=16 free=13 fixed=3 edges=24 (T=16 C=8) L=1.414 median|q|=5.228e0 box=loose q_ref outside box: 0
+# Self-stressed planar tensegrity wheel with 16 sides: tension deviation edges on the rim (+1), compression spokes through the centre (-0.5), no external loads; every rim node gets an automatic auxiliary trail of length 0.1. Optimisation: TrailEdgeForceGoal(0) on all 16 auxiliary trails, parameters = all 24 deviation-edge forces (+-2), nlopt LBFGS with autograd gradients. Export note: 16 auxiliary trail(s) with machine-zero optimised force (and their auxiliary support nodes) were dropped. Export note: self-stressed CEM result with no supports left after dropping the zero-force auxiliary trails; 3 well-spread nodes fixed for the FDM problem.
+# forward(q_ref) vs exported nodes: ||dx||/L = 2.705e-15
+
+=== cem_tensegrity_wheel_2d exact box=loose [0.042,653.485] (ne=24, nfree=13)  best final err/L = 9.832e-16 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0          -          -     0      -        -          -        -         -          -         -  clipped q gives singular forward solve
+s1                      0.2  1.772e-15  1.772e-15     0      0        0  1.772e-15        -         -          -         -  it=1 lib_err=2.10e-16
+gram_sparse             0.1          -  7.805e-16    24      1        0  2.827e-10        -         -          -         -  λ=5.8e-9 it=1 lib_err=NaN
+length_ratio            0.0          -          -     0      -        -          -        -         -          -         -  sweeps=0 best@0 | clipped q gives singular forward solve
+frozen                  0.9  1.772e-15  1.772e-15     0      0        0  1.772e-15        -         -          -         -  it=0 lib_err=2.10e-16 s1e=2.10e-16 u=1.56e-15 fr0 gn0 fac=0 fb=0
+pipeline                0.9  1.772e-15  1.772e-15     0      0        0  1.772e-15        -         -          -         -  it=0 lib_err=2.10e-16 s1e=2.10e-16 u=1.56e-15 fr0 gn0 fac=0 fb=0
+legacy                  0.2  9.832e-16  9.832e-16     0      0        0  9.832e-16        -         -          -         -  it=0 lib_err=1.73e-16 s1e=1.73e-16 fr0 gn0 fac=0 fb=0
+uniform_x0.1            0.0          -          -     0      -        -          -        -         -          -         -  seed gives singular forward solve
+uniform_x10             0.0          -    5.199e0     8     68        4    1.054e0        -         -          -         -  
+uniform_rand            0.0    2.422e1    2.422e1     0    136        7    1.136e0        -         -          -         -  
+oracle(q_ref)           0.0  2.705e-15  2.705e-15     0      0        0  2.705e-15        -         -          -         -  
+
+=== cem_tensegrity_wheel_2d jit1.00%L box=loose [0.042,653.485] (ne=24, nfree=13)  best final err/L = 2.268e-2 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0          -          -     0      -        -          -        -         -          -         -  clipped q gives singular forward solve
+s1                      0.4   1.854e-1   1.854e-1     0    475       16   2.268e-2       13        72        202       2.6  it=1 lib_err=2.62e-1
+gram_sparse             0.1          -   3.768e-2    24    510       17   2.268e-2       23        97        267       3.0  λ=5.9e-9 it=1 lib_err=NaN
+length_ratio            0.0          -          -     0      -        -          -        -         -          -         -  sweeps=0 best@0 | clipped q gives singular forward solve
+frozen                  1.4   2.384e-2   2.384e-2     4    547       19   2.268e-2        0         4        142       1.6  it=1! lib_err=3.37e-2 s1e=2.62e-1 u=5.27e-2 fr1 gn0 fac=10 fb=0
+pipeline                1.7   2.268e-2   2.268e-2     1     92        3   2.268e-2        0         0          0       1.7  it=3! lib_err=3.21e-2 s1e=2.62e-1 u=5.27e-2 fr1 gn2 fac=19 fb=0
+legacy                  1.9   2.268e-2   2.268e-2     0    113        4   2.268e-2        0         0          0       1.9  it=3! lib_err=3.21e-2 s1e=2.62e-1 fr1 gn2 fac=3 fb=0
+uniform_x0.1            0.0          -          -     0      -        -          -        -         -          -         -  seed gives singular forward solve
+uniform_x10             0.0          -    5.191e0     8    503       21    1.030e0        -         -          -         -  
+uniform_rand            0.0    2.423e1    2.423e1     0    858       30   2.268e-2      596       688        729      20.3  
+oracle(q_ref)           0.0   3.768e-2   3.768e-2     0    353       12   2.268e-2        7        52        136       1.6  
+
+##### cem_tensegrity_wheel_64_paper [compas_cem] nodes=64 free=61 fixed=3 edges=96 (T=64 C=32) L=1.414 median|q|=2.128e1 box=loose q_ref outside box: 0
+# Self-stressed planar tensegrity wheel with 64 sides as in the CAD 2023 paper: rim tension +1, spoke compression -1, no loads, one auxiliary trail (length 0.1) per rim node. Optimisation: TrailEdgeForceGoal(0) on all auxiliary trails, parameters = all deviation-edge forces (+-2), nlopt LBFGS, AD gradients, stopval 1e-6. Export note: 64 auxiliary trail(s) with machine-zero optimised force (and their auxiliary support nodes) were dropped. Export note: self-stressed CEM result with no supports left after dropping the zero-force auxiliary trails; 3 well-spread nodes fixed for the FDM problem.
+# forward(q_ref) vs exported nodes: ||dx||/L = 2.913e-14
+
+=== cem_tensegrity_wheel_64_paper exact box=loose [0.170,2659.695] (ne=96, nfree=61)  best final err/L = 1.155e-14 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0          -    8.098e0    32   1000       62    1.427e0        -         -          -         -  
+s1                      0.8  2.701e-14  2.701e-14     0      0        0  2.701e-14        -         -          -         -  it=1 lib_err=1.75e-15
+gram_sparse             0.2          -  7.335e-15    96      1        0   2.208e-9        -         -          -         -  λ=6.4e-9 it=1 lib_err=NaN
+length_ratio            0.2    4.258e0    4.258e0     0     64        6    2.134e0        -         -          -         -  sweeps=2 best@1
+frozen                  3.8  2.701e-14  2.701e-14     0      0        0  2.701e-14        -         -          -         -  it=0 lib_err=1.75e-15 s1e=1.75e-15 u=8.11e-14 fr0 gn0 fac=0 fb=0
+pipeline                3.9  2.701e-14  2.701e-14     0      0        0  2.701e-14        -         -          -         -  it=0 lib_err=1.75e-15 s1e=1.75e-15 u=8.11e-14 fr0 gn0 fac=0 fb=0
+legacy                  0.8  1.155e-14  1.155e-14     0      0        0  1.155e-14        -         -          -         -  it=0 lib_err=2.29e-15 s1e=2.29e-15 fr0 gn0 fac=0 fb=0
+uniform_x0.1            0.0          -          -     0      -        -          -        -         -          -         -  seed gives singular forward solve
+uniform_x10             0.0          -    4.415e0    32     85       10    1.953e0        -         -          -         -  
+uniform_rand            0.0    1.326e1    1.188e1    30   1000       79    2.594e0        -         -          -         -  
+oracle(q_ref)           0.0  2.913e-14  2.913e-14     0      0        0  2.913e-14        -         -          -         -  
+
+=== cem_tensegrity_wheel_64_paper jit0.69%L box=loose [0.170,2659.695] (ne=96, nfree=61)  best final err/L = 3.721e-2 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0          -    8.104e0    32   1000       64    1.678e0        -         -          -         -  
+s1                      1.5    6.762e0    6.762e0     0   1000       67    1.420e0        -         -          -         -  it=1 lib_err=9.56e0
+gram_sparse             0.2          -   5.322e-2    96    100        6   5.114e-2        0         -          -         -  λ=6.4e-9 it=1 lib_err=NaN
+length_ratio            0.3    4.183e0    4.183e0     0    514       43    1.984e0        -         -          -         -  sweeps=2 best@1
+frozen                  7.1   4.573e-2   4.573e-2     0    108        7   4.393e-2        0         -          -         -  it=1! lib_err=6.47e-2 s1e=9.56e0 u=7.51e-2 guard→u fr1 gn0 fac=14 fb=0
+pipeline               10.1   4.071e-2   4.071e-2     0    114        7   3.728e-2        0         3         18      10.3  it=3! lib_err=5.76e-2 s1e=9.56e0 u=7.51e-2 guard→u fr1 gn2 fac=35 fb=0
+legacy                  8.8   4.685e-2   4.685e-2     0    335       20   3.721e-2        0         3          8       8.9  it=3! lib_err=6.63e-2 s1e=9.56e0 fr1 gn2 fac=3 fb=0
+uniform_x0.1            0.0          -          -     0      -        -          -        -         -          -         -  seed gives singular forward solve
+uniform_x10             0.0          -    4.422e0    32     97        8    2.033e0        -         -          -         -  
+uniform_rand            0.0    1.327e1    1.188e1    30     81        6    2.723e0        -         -          -         -  
+oracle(q_ref)           0.0   5.322e-2   5.322e-2     0    207       13   4.946e-2        0         -          -         -  
+
+##### cem_tree_2d [compas_cem] nodes=4 free=2 fixed=2 edges=4 (T=1 C=3) L=4.565 median|q|=8.333e-1 box=loose q_ref outside box: 0
+# Tree-like 2D structure: one compression trunk trail, two compression branches and one tension tie as deviation edges, unit downward loads on the two canopy nodes; the canopy nodes get automatic auxiliary trails. Optimisation: TrailEdgeForceGoal(0) on the auxiliary trails (paper's auxiliary-trail trick), parameters = the three deviation-edge forces, nlopt SLSQP. Export note: 2 auxiliary trail(s) with machine-zero optimised force (and their auxiliary support nodes) were dropped.
+# forward(q_ref) vs exported nodes: ||dx||/L = 2.432e-17
+
+=== cem_tree_2d exact box=loose [-200.000,-0.008] (ne=4, nfree=2)  best final err/L = 1.323e-10 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0          -          -     0      -        -          -        -         -          -         -  clipped q gives singular forward solve
+s1                      0.1   5.449e-9   5.449e-9     0      1        0   1.099e-9        -         -          -         -  it=1 lib_err=2.49e-8
+gram_sparse             0.0   4.983e-7   4.983e-7     0      4        0   7.320e-8        -         -          -         -  λ=8.3e-8 it=1 lib_err=2.27e-6
+length_ratio            0.0          -          -     0      -        -          -        -         -          -         -  sweeps=0 best@0 | clipped q gives singular forward solve
+frozen                  0.2   5.449e-9   5.449e-9     0      1        0   1.099e-9        -         -          -         -  it=0 lib_err=2.49e-8 s1e=2.49e-8 u=1.64e0 fr0 gn0 fac=0 fb=0
+pipeline                0.2   5.449e-9   5.449e-9     0      1        0   1.099e-9        -         -          -         -  it=0 lib_err=2.49e-8 s1e=2.49e-8 u=1.64e0 fr0 gn0 fac=0 fb=0
+legacy                  0.1  1.323e-10  1.323e-10     0      0        0  1.323e-10        0         0          0       0.1  it=1 lib_err=6.04e-10 s1e=2.49e-8 fr1 gn0 fac=1 fb=0
+uniform_x0.1            0.0          -          -     0      -        -          -        -         -          -         -  seed gives singular forward solve
+uniform_x10             0.0          -          -     0      -        -          -        -         -          -         -  seed gives singular forward solve
+uniform_rand            0.0    1.091e0    1.091e0     0     40        1   8.886e-1        -         -          -         -  
+oracle(q_ref)           0.0  2.432e-17  2.432e-17     0      0        0  2.432e-17        0         0          0       0.0  
+
+=== cem_tree_2d jit1.00%L box=loose [-200.000,-0.008] (ne=4, nfree=2)  best final err/L = 4.704e-3 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0          -          -     0      -        -          -        -         -          -         -  clipped q gives singular forward solve
+s1                      0.1   7.561e-3   7.561e-3     0     28        1   4.704e-3        4         5         14       0.2  it=1 lib_err=3.45e-2
+gram_sparse             0.0   7.561e-3   7.561e-3     0     28        1   4.704e-3        4         5         14       0.1  λ=8.6e-8 it=1 lib_err=3.45e-2
+length_ratio            0.0          -          -     0      -        -          -        -         -          -         -  sweeps=0 best@0 | clipped q gives singular forward solve
+frozen                  0.3   4.710e-3   4.710e-3     0     18        0   4.704e-3        0         0          0       0.3  it=1! lib_err=2.15e-2 s1e=3.45e-2 u=1.60e0 fr1 gn0 fac=1 fb=0
+pipeline                0.3   4.704e-3   4.704e-3     0      0        0   4.704e-3        0         0          0       0.3  it=3! lib_err=2.15e-2 s1e=3.45e-2 u=1.60e0 fr1 gn2 fac=3 fb=0
+legacy                  0.3   4.704e-3   4.704e-3     0      0        0   4.704e-3        0         0          0       0.3  it=3! lib_err=2.15e-2 s1e=3.45e-2 fr1 gn2 fac=3 fb=0
+uniform_x0.1            0.0          -          -     0      -        -          -        -         -          -         -  seed gives singular forward solve
+uniform_x10             0.0          -          -     0      -        -          -        -         -          -         -  seed gives singular forward solve
+uniform_rand            0.0    1.098e0    1.098e0     0     39        1   8.968e-1        -         -          -         -  
+oracle(q_ref)           0.0   1.431e-2   1.431e-2     0     30        1   4.704e-3       17        26         28       0.5  
+
+##### cem_tree_canopy_3d [compas_cem] nodes=92 free=46 fixed=46 edges=144 (T=48 C=96) L=36.435 median|q|=1.719e-1 box=loose q_ref outside box: 0
+# 3D tree canopy from the CAD 2023 paper: compression branch/trunk edges (-1) and tension canopy edges (+0.5) all modelled as deviation edges; loads of -0.5 z on the canopy nodes; every node receives an automatic auxiliary trail (default length -1 along (1,1,1)). The auxiliary trails at the ground nodes (z=0) act as the real supports. Optimisation: TrailEdgeForceGoal(0) on all other auxiliary trails; parameters = all deviation forces (+-5) and the Y/Z coordinates of the non-ground origin nodes (+-1.5); nlopt SLSQP, 500 evals, stopval 1e-6.
+# forward(q_ref) vs exported nodes: ||dx||/L = 5.913e-13
+
+=== cem_tree_canopy_3d exact box=loose [-807.346,-0.000] (ne=144, nfree=46)  best final err/L = 2.940e-9 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0          -          -     0      -        -          -        -         -          -         -  clipped q gives singular forward solve
+s1                      2.2   2.676e-4   2.676e-4     0    143       10   2.817e-6        -         -          -         -  it=1 lib_err=9.75e-3
+gram_sparse             0.3   1.104e-5    1.973e0    38    985       82   7.955e-2        -         -          -         -  λ=2.2e-7 it=1 lib_err=4.02e-4
+length_ratio            0.1          -          -     0      -        -          -        -         -          -         -  sweeps=0 best@0 | clipped q gives singular forward solve
+frozen                  6.2  3.705e-11  3.705e-11     0      1        0   2.940e-9        0         0          0       6.2  it=1 lib_err=1.35e-9 s1e=9.75e-3 u=1.25e1 fr1 gn0 fac=1 fb=0
+pipeline                6.3  3.705e-11  3.705e-11     0      1        0   2.940e-9        0         0          0       6.3  it=1 lib_err=1.35e-9 s1e=9.75e-3 u=1.25e1 fr1 gn0 fac=1 fb=0
+legacy                 10.6   7.578e-7   7.578e-7     0      1        0   7.577e-7        -         -          -         -  it=2! lib_err=2.76e-5 s1e=3.75e-2 fr1 gn0 fac=2 fb=0
+uniform_x0.1            0.0          -          -     0      -        -          -        -         -          -         -  seed gives singular forward solve
+uniform_x10             0.0          -          -     0      -        -          -        -         -          -         -  seed gives singular forward solve
+uniform_rand            0.0    2.220e0    2.220e0     0   1000       74   5.092e-2        -         -          -         -  
+oracle(q_ref)           0.0  5.913e-13  5.913e-13     0      1        0   2.894e-9        0         0          0       0.0  
+
+=== cem_tree_canopy_3d jit0.55%L box=loose [-807.346,-0.000] (ne=144, nfree=46)  best final err/L = 1.458e-2 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0          -          -     0      -        -          -        -         -          -         -  clipped q gives singular forward solve
+s1                      2.7   9.466e-1   9.466e-1     0   1000       80   2.496e-2        -         -          -         -  it=1 lib_err=3.45e1
+gram_sparse             0.4   4.720e-3    2.113e0    52   1000       70   6.180e-2        -         -          -         -  λ=2.2e-7 it=1 lib_err=1.72e-1
+length_ratio            0.1          -          -     0      -        -          -        -         -          -         -  sweeps=0 best@0 | clipped q gives singular forward solve
+frozen                  6.8   3.653e-2   3.653e-2    18   1000       67   1.458e-2       14       232        863      20.7  it=1! lib_err=1.33e0 s1e=3.45e1 u=1.25e1 fr1 gn0 fac=5 fb=0
+pipeline                8.6   2.467e-2   2.467e-2    15   1000       66   1.496e-2        9       269          -      24.4  it=3! lib_err=8.99e-1 s1e=3.45e1 u=1.25e1 fr1 gn2 fac=12 fb=0
+legacy                 13.6   2.467e-2   2.467e-2     0   1000       70   1.492e-2        9       314          -      33.3  it=3! lib_err=8.99e-1 s1e=3.45e1 fr1 gn2 fac=3 fb=0
+uniform_x0.1            0.0          -          -     0      -        -          -        -         -          -         -  seed gives singular forward solve
+uniform_x10             0.0          -          -     0      -        -          -        -         -          -         -  seed gives singular forward solve
+uniform_rand            0.0    2.222e0    2.222e0     0   1000       77   7.861e-2        -         -          -         -  
+oracle(q_ref)           0.0   3.740e-2   3.740e-2     0   1000       72   2.610e-2        -         -          -         -  
+
+##### jaxfdm_arch_loadpath [jax_fdm] nodes=11 free=9 fixed=2 edges=10 (T=0 C=10) L=5.884 median|q|=1.151e0 box=case q_ref outside box: 0
+# A 10-segment planar arch under uniform vertical nodal loads whose total load path is minimised subject to hard edge-length constraints 0.75 <= L <= 1.0.
+# forward(q_ref) vs exported nodes: ||dx||/L = 2.296e-16
+
+=== jaxfdm_arch_loadpath exact box=case [-115.126,-0.012] (ne=10, nfree=9)  best final err/L = 1.316e-10 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0   3.528e-1   3.528e-1     0     20        1   3.635e-9        -         -          -         -  
+s1                      0.3  1.316e-10  1.316e-10     0      0        0  1.316e-10        0         0          0       0.3  it=1 lib_err=7.74e-10
+gram_sparse             0.0   3.135e-7   3.135e-7     0      2        0   5.596e-8        -         -          -         -  λ=1.3e-8 it=1 lib_err=1.84e-6
+length_ratio            0.7   4.501e-7   4.501e-7     0      2        0   2.829e-8        -         -          -         -  sweeps=20 best@20
+frozen                  0.5  1.316e-10  1.316e-10     0      0        0  1.316e-10        0         0          0       0.5  it=0 lib_err=7.74e-10 s1e=7.74e-10 u=1.56e0 fr0 gn0 fac=0 fb=0
+pipeline                0.5  1.316e-10  1.316e-10     0      0        0  1.316e-10        0         0          0       0.5  it=0 lib_err=7.74e-10 s1e=7.74e-10 u=1.56e0 fr0 gn0 fac=0 fb=0
+legacy                  0.3  1.419e-10  1.419e-10     0      0        0  1.419e-10        0         0          -       0.3  it=0 lib_err=8.35e-10 s1e=8.35e-10 fr0 gn0 fac=0 fb=0
+uniform_x0.1            0.0    1.174e1    1.174e1     0     94        5   1.077e-7        -         -          -         -  
+uniform_x10             0.0   9.550e-1   9.550e-1     0     42        2   8.811e-9        -         -          -         -  
+uniform_rand            0.0   2.645e-1   2.645e-1     0     40        1   1.129e-7        -         -          -         -  
+oracle(q_ref)           0.0  2.296e-16  2.296e-16     0      0        0  2.296e-16        0         0          0       0.0  
+ext:jax_fdm             0.0   3.528e-1   3.528e-1     0     19       21   2.605e-8        -         -          -         -  jax_fdm.optimization.LBFGSB (scipy.optimize.minimize method='L-BFGS-B', tol=1e-10 -> ftol=gtol=1e-10, maxiter=1000, maxfun/maxls/maxcor = scipy defaults 15000/20/10, jac from jax.value_and_grad, jit), wall time of the external tool
+
+=== jaxfdm_arch_loadpath jit1.00%L box=case [-115.126,-0.012] (ne=10, nfree=9)  best final err/L = 2.445e-2 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0   3.473e-1   3.473e-1     0     37        1   2.445e-2        9        14         16       0.4  
+s1                      0.3   2.552e-1   2.552e-1     0     25        1   2.445e-2        6         8         11       0.5  it=1 lib_err=1.50e0
+gram_sparse             0.0   2.552e-1   2.552e-1     0     25        1   2.445e-2        6         8         11       0.2  λ=1.4e-8 it=1 lib_err=1.50e0
+length_ratio            0.2   2.569e-2   2.569e-2     0     20        1   2.445e-2        0         2          3       0.3  sweeps=7 best@6
+frozen                  0.3   2.458e-2   2.458e-2     0     18        1   2.445e-2        0         0          2       0.3  it=1! lib_err=1.45e-1 s1e=1.50e0 u=1.53e0 fr1 gn0 fac=1 fb=0
+pipeline                0.4   2.445e-2   2.445e-2     0      8        0   2.445e-2        0         0          0       0.4  it=3! lib_err=1.44e-1 s1e=1.50e0 u=1.53e0 fr1 gn2 fac=3 fb=0
+legacy                  0.7   2.445e-2   2.445e-2     0      8        0   2.445e-2        0         0          0       0.7  it=3! lib_err=1.44e-1 s1e=1.50e0 fr1 gn2 fac=3 fb=0
+uniform_x0.1            0.0    1.174e1    1.174e1     0    146        7   2.445e-2      245       251        253       6.3  
+uniform_x10             0.0   9.559e-1   9.559e-1     0     58        2   2.445e-2       60        63         66       1.5  
+uniform_rand            0.0   2.622e-1   2.622e-1     0     35        1   2.445e-2       14        16         18       0.4  
+oracle(q_ref)           0.0   3.094e-2   3.094e-2     0     26        1   2.445e-2        0         5          9       0.1  
+
+##### jaxfdm_arch_reaction_0p8 [jax_fdm] nodes=11 free=9 fixed=2 edges=10 (T=0 C=10) L=5.122 median|q|=3.375e0 box=case q_ref outside box: 0
+# A 10-segment planar arch (11 nodes, 2 supports) under uniform vertical nodal loads. The original example steers the support reaction directions to [+-1, 0, -0.8] (one of six variants swept in the script).
+# forward(q_ref) vs exported nodes: ||dx||/L = 7.609e-16
+
+=== jaxfdm_arch_reaction_0p8 exact box=case [-337.500,-0.034] (ne=10, nfree=9)  best final err/L = 2.117e-16 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0  4.590e-16  4.590e-16     0      0        0  4.590e-16        -         -          -         -  
+s1                      0.2  4.583e-11  4.583e-11     0      0        0  4.583e-11        -         -          -         -  it=1 lib_err=2.35e-10
+gram_sparse             0.0   4.117e-7   4.117e-7     0      3        0   1.080e-7        -         -          -         -  λ=5.5e-9 it=1 lib_err=2.11e-6
+length_ratio            0.1  2.117e-16  2.117e-16     0      0        0  2.117e-16        -         -          -         -  sweeps=3 best@2
+frozen                  0.3  4.583e-11  4.583e-11     0      0        0  4.583e-11        -         -          -         -  it=0 lib_err=2.35e-10 s1e=2.35e-10 u=3.89e-4 fr0 gn0 fac=0 fb=0
+pipeline                0.3  4.583e-11  4.583e-11     0      0        0  4.583e-11        -         -          -         -  it=0 lib_err=2.35e-10 s1e=2.35e-10 u=3.89e-4 fr0 gn0 fac=0 fb=0
+legacy                  0.2  4.795e-11  4.795e-11     0      0        0  4.795e-11        -         -          -         -  it=0 lib_err=2.46e-10 s1e=2.46e-10 fr0 gn0 fac=0 fb=0
+uniform_x0.1            0.0    4.509e0    4.509e0     0     30        1   1.526e-8        -         -          -         -  
+uniform_x10             0.0   4.509e-1   4.509e-1     0     30        1   6.852e-8        -         -          -         -  
+uniform_rand            0.0   1.646e-1   1.646e-1     0     29        1   1.287e-7        -         -          -         -  
+oracle(q_ref)           0.0  7.609e-16  7.609e-16     0      0        0  7.609e-16        -         -          -         -  
+ext:jax_fdm             0.0  3.876e-16  3.876e-16     0      0        2  3.607e-16        -         -          -         -  jax_fdm.optimization.LBFGSB (scipy.optimize.minimize method='L-BFGS-B', tol=1e-10 -> ftol=gtol=1e-10, maxiter=1000, maxfun/maxls/maxcor = scipy defaults 15000/20/10, jac from jax.value_and_grad, jit), wall time of the external tool
+
+=== jaxfdm_arch_reaction_0p8 jit1.00%L box=case [-337.500,-0.034] (ne=10, nfree=9)  best final err/L = 2.331e-2 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0   3.094e-2   3.094e-2     0     30        1   2.331e-2        0         5          8       0.1  
+s1                      0.2   5.216e-1   5.216e-1     0     35        1   2.331e-2        9        12         16       0.5  it=1 lib_err=2.67e0
+gram_sparse             0.0   5.216e-1   5.216e-1     0     35        1   2.331e-2        9        12         16       0.3  λ=5.6e-9 it=1 lib_err=2.67e0
+length_ratio            0.1   2.447e-2   2.447e-2     0     23        1   2.331e-2        0         0          4       0.1  sweeps=2 best@1
+frozen                  0.4   2.391e-2   2.391e-2     0     28        1   2.331e-2        0         0          5       0.4  it=1! lib_err=1.22e-1 s1e=2.67e0 u=1.58e-1 guard→u fr1 gn0 fac=2 fb=0
+pipeline                0.5   2.331e-2   2.331e-2     0      9        0   2.331e-2        0         0          0       0.5  it=3! lib_err=1.19e-1 s1e=2.67e0 u=1.58e-1 fr1 gn2 fac=6 fb=0
+legacy                  0.8   2.331e-2   2.331e-2     0      9        0   2.331e-2        0         0          0       0.8  it=3! lib_err=1.19e-1 s1e=2.67e0 fr1 gn2 fac=3 fb=0
+uniform_x0.1            0.0    4.506e0    4.506e0     0     55        2   2.331e-2       70        74         76       1.7  
+uniform_x10             0.0   4.543e-1   4.543e-1     0     55        2   2.331e-2       62        68         72       1.6  
+uniform_rand            0.0   1.720e-1   1.720e-1     0     28        1   2.331e-2        6        10         13       0.2  
+oracle(q_ref)           0.0   3.094e-2   3.094e-2     0     30        1   2.331e-2        0         5          8       0.1  
+
+##### jaxfdm_cablenet [jax_fdm] nodes=121 free=117 fixed=4 edges=220 (T=220 C=0) L=15.000 median|q|=1.040e-1 box=case+loose q_ref outside box: 0
+# A 10 x 10 square cable-net (tension only, no loads) with the four corners anchored and one diagonal pair of corners lifted by 5 m. The original example prestresses the net so that the boundary cables carry 20 kN and the interior cables are 1 m long.
+# forward(q_ref) vs exported nodes: ||dx||/L = 8.387e-15
+
+=== jaxfdm_cablenet exact box=case+loose [0.100,2019.243] (ne=220, nfree=117)  best final err/L = 7.669e-9 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0    1.406e0    1.406e0     0   1000       87   2.232e-2        -         -          -         -  
+s1                      3.3   8.359e-8   8.359e-8     0      1        0   8.134e-8        -         -          -         -  it=1 lib_err=1.25e-6
+gram_sparse             0.6          -    1.406e0   220   1000       87   1.965e-3        -         -          -         -  λ=2.0e-8 it=1 lib_err=NaN
+length_ratio            3.1   5.487e-1   5.487e-1     0   1000       89   9.897e-2        -         -          -         -  sweeps=20 best@20
+frozen                  7.0   7.766e-9   7.766e-9     0      0        0   7.766e-9        0         0          -       7.0  it=1 lib_err=1.16e-7 s1e=1.25e-6 u=2.11e1 fr1 gn0 fac=1 fb=0
+pipeline                6.6   7.766e-9   7.766e-9     0      0        0   7.766e-9        0         0          -       6.6  it=1 lib_err=1.16e-7 s1e=1.25e-6 u=2.11e1 fr1 gn0 fac=1 fb=0
+legacy                 35.6   7.669e-9   7.669e-9     0      0        0   7.669e-9        0         0          0      35.6  it=3! lib_err=1.15e-7 s1e=1.25e-6 fr1 gn2 fac=3 fb=0
+uniform_x0.1            0.0    1.406e0    1.406e0   220   1000       86   1.965e-3        -         -          -         -  
+uniform_x10             0.0    1.406e0    1.406e0     0   1000       87   2.133e-3        -         -          -         -  
+uniform_rand            0.0    1.316e0    1.360e0   109   1000       86   7.998e-3        -         -          -         -  
+oracle(q_ref)           0.0  8.387e-15  8.387e-15     0      0        0  8.387e-15        0         0          0       0.0  
+ext:jax_fdm             0.0    1.406e0    1.406e0     0    462      584   8.509e-2        -         -          -         -  jax_fdm.optimization.LBFGSB (scipy.optimize.minimize method='L-BFGS-B', tol=1e-10 -> ftol=gtol=1e-10, maxiter=1000, maxfun/maxls/maxcor = scipy defaults 15000/20/10, jac from jax.value_and_grad, jit), wall time of the external tool
+
+=== jaxfdm_cablenet jit1.00%L box=case+loose [0.100,2019.243] (ne=220, nfree=117)  best final err/L = 6.833e-2 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0    1.410e0    1.410e0     0   1000       88   7.157e-2      453      1023          -      87.6  
+s1                      4.0    1.472e0    1.472e0     0   1000       86   7.030e-2      519       908          -      80.5  it=1 lib_err=2.21e1
+gram_sparse             0.5          -    1.410e0   220   1000       86   6.928e-2      330       614          -      51.5  λ=2.1e-8 it=1 lib_err=NaN
+length_ratio            3.2   5.980e-1   5.980e-1     0   1000       84   8.857e-2      595         -          -         -  sweeps=20 best@20
+frozen                 10.8   4.051e-1   4.051e-1     0   1000       85   8.125e-2      211         -          -         -  it=1! lib_err=6.08e0 s1e=2.21e1 u=2.11e1 fr1 gn0 fac=6 fb=0
+pipeline               24.7   2.595e-1   2.595e-1     0   1000       86   6.833e-2       32       247        904      45.1  it=3! lib_err=3.89e0 s1e=2.21e1 u=2.11e1 fr1 gn2 fac=27 fb=0
+legacy                 45.3   2.595e-1   2.595e-1     0   1000       86   6.834e-2       32       247        921      65.7  it=3! lib_err=3.89e0 s1e=2.21e1 fr1 gn2 fac=3 fb=0
+uniform_x0.1            0.0    1.410e0    1.410e0   220   1000       86   6.928e-2      330       614          -      50.7  
+uniform_x10             0.0    1.410e0    1.410e0     0   1000       85   6.945e-2      345       646          -      52.8  
+uniform_rand            0.0    1.320e0    1.365e0   109   1000       86   6.913e-2      330       751          -      62.2  
+oracle(q_ref)           0.0   1.070e-1   1.070e-1     0   1000       85   6.835e-2        3       176        810      14.2  
+
+##### jaxfdm_creased_shell [jax_fdm] nodes=193 free=156 fixed=37 edges=324 (T=0 C=324) L=30.191 median|q|=5.190e-1 box=case q_ref outside box: 0
+# A creased compression shell network (193 nodes, 37 leaf supports) under uniform vertical loads. The original example is a best-fit problem: it drives every free node onto the designer's target surface stored in the input JSON (kept here as target_original).
+# forward(q_ref) vs exported nodes: ||dx||/L = 2.796e-15
+
+=== jaxfdm_creased_shell exact box=case [-20.000,0.000] (ne=324, nfree=156)  best final err/L = 2.342e-12 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0          -    1.219e0     7   1000      113   3.087e-5        -         -          -         -  
+s1                      5.2   3.100e-6   3.100e-6     0     24        3   1.351e-7        -         -          -         -  it=1 lib_err=9.36e-5
+gram_sparse             0.8   1.077e-5   1.075e-5     4    134       15   6.076e-7        -         -          -         -  λ=6.1e-8 it=1 lib_err=3.25e-4
+length_ratio            5.5   2.167e-1   2.167e-1     0   1000      115   2.289e-5        -         -          -         -  sweeps=20 best@20
+frozen                 11.4  2.342e-12  2.342e-12     0      0        1  2.342e-12        -         -          -         -  it=1 lib_err=7.07e-11 s1e=9.36e-5 u=2.28e1 fr1 gn0 fac=1 fb=0
+pipeline               11.3  2.342e-12  2.342e-12     0      0        0  2.342e-12        -         -          -         -  it=1 lib_err=7.07e-11 s1e=9.36e-5 u=2.28e1 fr1 gn0 fac=1 fb=0
+legacy                 39.0   2.065e-6   2.065e-6     0     89       11   3.407e-7        -         -          -         -  it=2! lib_err=6.24e-5 s1e=4.84e-4 fr1 gn0 fac=2 fb=0
+uniform_x0.1            0.0          -    1.976e1     7     20        4    1.094e0        -         -          -         -  
+uniform_x10             0.0          -    1.144e0     7      8        1   8.977e-1        -         -          -         -  
+uniform_rand            0.0    1.557e0    1.294e0     7   1000      114   2.126e-5        -         -          -         -  
+oracle(q_ref)           0.0  2.796e-15  2.796e-15     0      0        0  2.796e-15        -         -          -         -  
+ext:jax_fdm             0.0    1.246e0    1.246e0     0   1000     1339   2.827e-5        -         -          -         -  jax_fdm.optimization.LBFGSB (scipy.optimize.minimize method='L-BFGS-B', tol=1e-10 -> ftol=gtol=1e-10, maxiter=1000, maxfun/maxls/maxcor = scipy defaults 15000/20/10, jac from jax.value_and_grad, jit), wall time of the external tool
+
+=== jaxfdm_creased_shell jit0.46%L box=case [-20.000,0.000] (ne=324, nfree=156)  best final err/L = 3.274e-2 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0          -    1.222e0     7   1000      111   3.274e-2      133       309        395      33.3  
+s1                      4.4    2.350e0    2.350e0     0     21        3    1.087e0        -         -          -         -  it=1 lib_err=7.10e1
+gram_sparse             0.9    2.729e0    1.950e0    50     26        4    1.073e0        -         -          -         -  λ=6.2e-8 it=1 lib_err=8.24e1
+length_ratio            5.8   2.327e-1   2.327e-1     0   1000      111   3.274e-2       87       268        355      34.6  sweeps=20 best@20
+frozen                 19.2   5.426e-2   5.426e-2     0   1000      109   3.274e-2        7        57        132      25.2  it=1! lib_err=1.64e0 s1e=7.10e1 u=2.29e1 fr1 gn0 fac=9 fb=0
+pipeline               37.6   3.279e-2   3.279e-2     0    781       87   3.274e-2        0         0          0      37.6  it=3! lib_err=9.90e-1 s1e=7.10e1 u=2.29e1 fr1 gn2 fac=26 fb=0
+legacy                 48.2   3.279e-2   3.279e-2     0    783       86   3.274e-2        0         0          0      48.2  it=3! lib_err=9.90e-1 s1e=7.10e1 fr1 gn2 fac=3 fb=0
+uniform_x0.1            0.0          -    1.976e1     7     17        3    1.105e0        -         -          -         -  
+uniform_x10             0.0          -    1.144e0     7      9        2   8.315e-1        -         -          -         -  
+uniform_rand            0.0    1.562e0    1.297e0     7      1        0    1.297e0        -         -          -         -  
+oracle(q_ref)           0.0   5.707e-2   5.707e-2     0   1000      110   3.274e-2        7        59        188       6.3  
+
+=== jaxfdm_creased_shell designer box=case [-20.000,0.000] (ne=324, nfree=156)  best final err/L = 6.870e-2 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0          -    1.224e0     7   1000      113   6.870e-2       82       216        383      23.1  
+s1                      4.3   6.701e-1   6.701e-1     0   1000      112   6.870e-2       50       116        226      16.8  it=1 lib_err=2.02e1
+gram_sparse             0.8   7.543e-1   7.569e-1    28   1000      112   6.870e-2       55       116        214      13.2  λ=6.0e-8 it=1 lib_err=2.28e1
+length_ratio            5.4   2.633e-1   2.633e-1     0   1000      112   6.870e-2       46       171        339      23.6  sweeps=20 best@20
+frozen                 15.3   1.700e-1   1.700e-1     0      1        0   1.700e-1        -         -          -         -  it=1! lib_err=5.13e0 s1e=2.02e1 u=2.29e1 fr1 gn0 fac=6 fb=0
+pipeline               23.8   7.769e-2   7.769e-2     0   1000      111   6.870e-2        0         6         75      24.4  it=3! lib_err=2.35e0 s1e=2.02e1 u=2.29e1 fr1 gn2 fac=14 fb=0
+legacy                 47.1   7.769e-2   7.769e-2     0   1000      111   6.870e-2        0         6         76      47.7  it=3! lib_err=2.35e0 s1e=2.02e1 fr1 gn2 fac=3 fb=0
+uniform_x0.1            0.0          -    1.976e1     7     18        4    1.111e0        -         -          -         -  
+uniform_x10             0.0          -    1.142e0     7     10        2   7.849e-1        -         -          -         -  
+uniform_rand            0.0    1.559e0    1.298e0     7   1000      110   6.870e-2       84       221        372      23.5  
+oracle(q_ref)           0.0   6.875e-2   6.875e-2     0   1000      112   6.870e-2        0         0          0       0.0  
+
+##### jaxfdm_dome [jax_fdm] nodes=248 free=240 fixed=8 edges=480 (T=0 C=480) L=1.575 median|q|=4.646e0 box=case+loose q_ref outside box: 0
+# An 8-sided, 30-ring compression dome network (radial + hoop edges) anchored at the outer ring under uniform vertical nodal loads. The original example gives the radial edges a target length of 0.03 and target inclinations graded from 15 to 45 degrees.
+# forward(q_ref) vs exported nodes: ||dx||/L = 1.589e-14
+
+=== jaxfdm_dome exact box=case+loose [-11779.778,-0.000] (ne=480, nfree=240)  best final err/L = 8.752e-9 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0    6.808e1    6.808e1     0   1000      138   3.587e-3        -         -          -         -  
+s1                     10.5   3.540e-6   3.540e-6     0      2        1   2.897e-6        -         -          -         -  it=1 lib_err=5.58e-6
+gram_sparse             1.1   1.617e-3   1.617e-3     0    417       58   1.744e-5        -         -          -         -  λ=6.3e-10 it=1 lib_err=2.55e-3
+length_ratio            5.7   2.206e-1   2.206e-1     0   1000      141   4.677e-3        -         -          -         -  sweeps=20 best@20
+frozen                 19.3   7.818e-8   7.818e-8     0      0        0   7.818e-8        -         -          -         -  it=1! lib_err=1.23e-7 s1e=5.58e-6 u=4.84e0 fr1 gn0 fac=2 fb=0
+pipeline               30.8   8.752e-9   8.752e-9     0      0        0   8.752e-9        0         0          0      30.8  it=3 lib_err=1.38e-8 s1e=5.58e-6 u=4.84e0 fr1 gn2 fac=10 fb=0
+legacy                 82.5   2.635e-5   2.635e-5     0     26        4   1.236e-5        -         -          -         -  it=2! lib_err=4.15e-5 s1e=5.79e-5 fr1 gn0 fac=2 fb=0
+uniform_x0.1            0.0    7.205e2    7.205e2     0   1000      142   9.758e-2        -         -          -         -  
+uniform_x10             0.0    4.135e0    4.135e0     0   1000      143   8.370e-2        -         -          -         -  
+uniform_rand            0.0    6.711e1    6.711e1     0   1000      139   8.914e-3        -         -          -         -  
+oracle(q_ref)           0.0  1.589e-14  1.589e-14     0      0        0  1.589e-14        0         0          0       0.0  
+ext:jax_fdm             0.0    8.004e1    8.004e1     0   1000     1389   6.376e-3        -         -          -         -  jax_fdm.optimization.LBFGSB (scipy.optimize.minimize method='L-BFGS-B', tol=1e-10 -> ftol=gtol=1e-10, maxiter=1000, maxfun/maxls/maxcor = scipy defaults 15000/20/10, jac from jax.value_and_grad, jit), wall time of the external tool
+
+=== jaxfdm_dome jit0.34%L box=case+loose [-11779.778,-0.000] (ne=480, nfree=240)  best final err/L = 3.727e-2 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0    6.809e1    6.809e1     0   1000      140   3.975e-2      272         -          -         -  
+s1                      9.5    3.672e3    3.672e3     0   1000      150   1.090e-1        -         -          -         -  it=1 lib_err=5.78e3
+gram_sparse             1.0    2.184e3    4.782e4   121   1000      142   4.175e-2      552         -          -         -  λ=6.3e-10 it=1 lib_err=3.44e3
+length_ratio            5.7   2.702e-1   2.702e-1     0   1000      136   3.727e-2      172       438        869      65.4  sweeps=20 best@20
+frozen                 34.9   2.047e-1   2.047e-1     0   1000      138   3.820e-2      188       754          -     138.7  it=1! lib_err=3.22e-1 s1e=5.78e3 u=2.16e2 guard→u fr1 gn0 fac=14 fb=0
+pipeline               95.3   4.179e-2   4.179e-2     0   1000      135   3.740e-2        0       246        925     128.4  it=3! lib_err=6.58e-2 s1e=5.78e3 u=2.16e2 guard→u fr1 gn2 fac=59 fb=0
+legacy                119.1    1.093e1    1.093e1     0   1000      142   4.938e-2      695         -          -         -  it=3! lib_err=1.72e1 s1e=5.78e3 fr1 gn2 fac=3 fb=0
+uniform_x0.1            0.0    7.205e2    7.205e2     0   1000      143   4.187e-2      479         -          -         -  
+uniform_x10             0.0    4.137e0    4.137e0     0   1000      142   1.052e-1        -         -          -         -  
+uniform_rand            0.0    6.711e1    6.711e1     0   1000      137   4.148e-2      383         -          -         -  
+oracle(q_ref)           0.0   5.209e-2   5.209e-2     0   1000      135   3.950e-2        0         -          -         -  
+
+##### jaxfdm_gridshell_planarization [jax_fdm] nodes=81 free=70 fixed=11 edges=144 (T=0 C=144) L=16.385 median|q|=1.467e0 box=case q_ref outside box: 0
+# An 8 x 8 quad compression gridshell (10 m square) pinned at the four corners and along one full side, under unit vertical nodal loads. The original example planarises the quad faces while holding the funicular shape and smoothing, and also lets the pinned-side supports slide in x (the exported fixed coordinates are the optimised ones).
+# forward(q_ref) vs exported nodes: ||dx||/L = 1.665e-15
+
+=== jaxfdm_gridshell_planarization exact box=case [-50.000,-0.010] (ne=144, nfree=70)  best final err/L = 1.119e-10 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0    1.603e0    1.603e0     0    341       23   4.560e-7        -         -          -         -  
+s1                      1.6  1.119e-10  1.119e-10     0      0        0  1.119e-10        0         0          0       1.6  it=1 lib_err=1.83e-9
+gram_sparse             0.3   9.196e-7   9.196e-7     8      6        1   1.678e-7        -         -          -         -  λ=4.0e-8 it=1 lib_err=1.51e-5
+length_ratio            2.1   4.664e-2   4.664e-2     0    363       24   2.672e-7        -         -          -         -  sweeps=20 best@20
+frozen                  2.8  1.119e-10  1.119e-10     0      0        0  1.119e-10        0         0          0       2.8  it=0 lib_err=1.83e-9 s1e=1.83e-9 u=1.36e1 fr0 gn0 fac=0 fb=0
+pipeline                2.8  1.119e-10  1.119e-10     0      0        0  1.119e-10        0         0          0       2.8  it=0 lib_err=1.83e-9 s1e=1.83e-9 u=1.36e1 fr0 gn0 fac=0 fb=0
+legacy                  1.7  1.119e-10  1.119e-10     0      0        0  1.119e-10        0         0          0       1.7  it=0 lib_err=1.83e-9 s1e=1.83e-9 fr0 gn0 fac=0 fb=0
+uniform_x0.1            0.0    3.504e1    3.504e1     0    891       62   3.324e-7        -         -          -         -  
+uniform_x10             0.0    2.160e0    2.160e0     0    647       45   1.877e-7        -         -          -         -  
+uniform_rand            0.0    1.634e0    1.634e0     0    399       28   3.285e-7        -         -          -         -  
+oracle(q_ref)           0.0  1.665e-15  1.665e-15     0      0        0  1.665e-15        0         0          0       0.0  
+ext:jax_fdm             0.0    1.630e0    1.630e0     0    272      664   2.216e-6        -         -          -         -  jax_fdm.optimization.LBFGSB (scipy.optimize.minimize method='L-BFGS-B', tol=1e-10 -> ftol=gtol=1e-10, maxiter=1000, maxfun/maxls/maxcor = scipy defaults 15000/20/10, jac from jax.value_and_grad, jit), wall time of the external tool
+
+=== jaxfdm_gridshell_planarization jit1.00%L box=case [-50.000,-0.010] (ne=144, nfree=70)  best final err/L = 4.712e-2 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0    1.604e0    1.604e0     0    353       25   4.712e-2       24        51        106       3.1  
+s1                      1.7    1.271e0    1.271e0     0    313       21   4.712e-2       19        42         69       4.3  it=1 lib_err=2.08e1
+gram_sparse             0.3    1.264e0    1.239e0    19    309       21   4.712e-2       20        43         71       3.0  λ=4.1e-8 it=1 lib_err=2.07e1
+length_ratio            2.0   7.604e-2   7.604e-2     0    293       20   4.712e-2        2        24         63       3.5  sweeps=20 best@20
+frozen                  3.9   5.936e-2   5.936e-2     0    294       20   4.712e-2        0        28         57       5.7  it=1! lib_err=9.73e-1 s1e=2.08e1 u=1.36e1 fr1 gn0 fac=2 fb=0
+pipeline                5.3   4.772e-2   4.772e-2     0    254       18   4.712e-2        0         0         12       5.3  it=3! lib_err=7.82e-1 s1e=2.08e1 u=1.36e1 fr1 gn2 fac=6 fb=0
+legacy                 14.9   4.772e-2   4.772e-2     0    259       19   4.712e-2        0         0         12      14.9  it=3! lib_err=7.82e-1 s1e=2.08e1 fr1 gn2 fac=3 fb=0
+uniform_x0.1            0.0    3.504e1    3.504e1     0   1000       70   4.712e-2      790       997       1032      61.0  
+uniform_x10             0.0    2.160e0    2.160e0     0    632       45   4.712e-2      345       424        456      26.6  
+uniform_rand            0.0    1.636e0    1.636e0     0    334       23   4.712e-2       32        53        100       3.3  
+oracle(q_ref)           0.0   8.180e-2   8.180e-2     0    354       24   4.712e-2        4        35         98       2.2  
+
+##### jaxfdm_monkey_saddle [jax_fdm] nodes=121 free=94 fixed=27 edges=216 (T=0 C=216) L=25.870 median|q|=1.445e0 box=case q_ref outside box: 0
+# A monkey-saddle compression shell mesh (coarse mesh quad-subdivided twice) anchored along its three shorter boundary polyedges under uniform vertical loads. The original example keeps the flat-mesh edge lengths, grades the support reactions between 4 and 8 and penalises load path with an L2 regulariser.
+# forward(q_ref) vs exported nodes: ||dx||/L = 9.414e-16
+
+=== jaxfdm_monkey_saddle exact box=case [-20.000,-0.010] (ne=216, nfree=94)  best final err/L = 4.289e-11 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0   7.407e-1   7.407e-1     0    231       19   9.170e-8        -         -          -         -  
+s1                      2.3  4.289e-11  4.289e-11     0      0        0  4.289e-11        0         0          0       2.3  it=1 lib_err=1.11e-9
+gram_sparse             0.5   4.658e-7   4.658e-7    24      7        1   2.188e-8        -         -          -         -  λ=5.2e-8 it=1 lib_err=1.20e-5
+length_ratio            2.8   4.296e-2   4.296e-2     0    225       18   2.009e-7        -         -          -         -  sweeps=20 best@20
+frozen                  4.0  4.289e-11  4.289e-11     0      0        0  4.289e-11        0         0          0       4.0  it=0 lib_err=1.11e-9 s1e=1.11e-9 u=6.83e0 fr0 gn0 fac=0 fb=0
+pipeline                3.9  4.289e-11  4.289e-11     0      0        0  4.289e-11        0         0          0       3.9  it=0 lib_err=1.11e-9 s1e=1.11e-9 u=6.83e0 fr0 gn0 fac=0 fb=0
+legacy                  2.4  4.289e-11  4.289e-11     0      0        0  4.289e-11        0         0          0       2.4  it=0 lib_err=1.11e-9 s1e=1.11e-9 fr0 gn0 fac=0 fb=0
+uniform_x0.1            0.0    1.514e1    1.514e1     0    634       53   1.297e-7        -         -          -         -  
+uniform_x10             0.0   7.979e-1   7.979e-1     0    536       45   9.546e-8        -         -          -         -  
+uniform_rand            0.0   7.702e-1   7.702e-1     0    275       22   1.285e-7        -         -          -         -  
+oracle(q_ref)           0.0  9.414e-16  9.414e-16     0      0        0  9.414e-16        0         0          0       0.0  
+ext:jax_fdm             0.0   8.073e-1   8.073e-1     0    202     1003   7.894e-7        -         -          -         -  jax_fdm.optimization.LBFGSB (scipy.optimize.minimize method='L-BFGS-B', tol=1e-10 -> ftol=gtol=1e-10, maxiter=1000, maxfun/maxls/maxcor = scipy defaults 15000/20/10, jac from jax.value_and_grad, jit), wall time of the external tool
+
+=== jaxfdm_monkey_saddle jit0.43%L box=case [-20.000,-0.010] (ne=216, nfree=94)  best final err/L = 2.267e-2 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0   7.420e-1   7.420e-1     0    270       22   2.267e-2       22        38         66       2.9  
+s1                      2.2   2.227e-1   2.227e-1     0    226       18   2.267e-2        8        21         45       3.8  it=1 lib_err=5.76e0
+gram_sparse             0.5   2.293e-1   2.192e-1    52    244       19   2.267e-2        9        24         46       2.3  λ=5.2e-8 it=1 lib_err=5.93e0
+length_ratio            2.8   5.290e-2   5.290e-2     0    239       19   2.267e-2        3        11         33       3.7  sweeps=20 best@20
+frozen                  5.7   2.312e-2   2.312e-2     0    212       17   2.267e-2        0         0         15       5.7  it=1! lib_err=5.98e-1 s1e=5.76e0 u=6.95e0 fr1 gn0 fac=3 fb=0
+pipeline                7.0   2.267e-2   2.267e-2     0    120       10   2.267e-2        0         0          0       7.0  it=3! lib_err=5.86e-1 s1e=5.76e0 u=6.95e0 fr1 gn2 fac=6 fb=0
+legacy                 18.4   2.267e-2   2.267e-2     0    126       10   2.267e-2        0         0          0      18.4  it=3! lib_err=5.86e-1 s1e=5.76e0 fr1 gn2 fac=3 fb=0
+uniform_x0.1            0.0    1.514e1    1.514e1     0    894       73   2.267e-2      620       722        768      54.7  
+uniform_x10             0.0   7.998e-1   7.998e-1     0    657       56   2.267e-2      388       506        529      39.2  
+uniform_rand            0.0   7.715e-1   7.715e-1     0    263       21   2.267e-2       28        48         78       3.6  
+oracle(q_ref)           0.0   4.077e-2   4.077e-2     0    233       18   2.267e-2        3        22         42       1.7  
+
+##### jaxfdm_pillow [jax_fdm] nodes=81 free=49 fixed=32 edges=144 (T=0 C=144) L=14.469 median|q|=1.872e0 box=case q_ref outside box: 0
+# An 8 x 8 quad 'pillow' compression shell with the whole boundary supported and a total vertical load of 100 distributed by tributary area (frozen nodal loads). The original example keeps every free vertex on its vertical line while enforcing hard edge-length, edge-force and mid-column curvature constraints.
+# forward(q_ref) vs exported nodes: ||dx||/L = 2.713e-15
+
+=== jaxfdm_pillow exact box=case [-185.823,-0.019] (ne=144, nfree=49)  best final err/L = 1.048e-11 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0   2.021e-1   2.021e-1     0    209       13   6.763e-7        -         -          -         -  
+s1                      1.4  1.057e-11  1.057e-11     0      0        0  1.057e-11        0         -          -         -  it=1 lib_err=1.53e-10
+gram_sparse             0.3   2.699e-7   2.699e-7    32      4        0   6.375e-8        -         -          -         -  λ=2.9e-8 it=1 lib_err=3.90e-6
+length_ratio            1.8   4.136e-2   4.136e-2     0    284       18   2.531e-7        -         -          -         -  sweeps=20 best@20
+frozen                  2.2  1.057e-11  1.057e-11     0      0        0  1.057e-11        0         -          -         -  it=0 lib_err=1.53e-10 s1e=1.53e-10 u=1.80e0 fr0 gn0 fac=0 fb=0
+pipeline                2.2  1.057e-11  1.057e-11     0      0        0  1.057e-11        0         -          -         -  it=0 lib_err=1.53e-10 s1e=1.53e-10 u=1.80e0 fr0 gn0 fac=0 fb=0
+legacy                  1.5  1.048e-11  1.048e-11     0      0        0  1.048e-11        0         -          -         -  it=0 lib_err=1.52e-10 s1e=1.52e-10 fr0 gn0 fac=0 fb=0
+uniform_x0.1            0.0    1.098e1    1.098e1     0    716       47   2.943e-7        -         -          -         -  
+uniform_x10             0.0   9.310e-1   9.310e-1     0    372       24   1.989e-7        -         -          -         -  
+uniform_rand            0.0   2.372e-1   2.372e-1     0    255       16   1.802e-7        -         -          -         -  
+oracle(q_ref)           0.0  2.713e-15  2.713e-15     0      0        0  2.713e-15        0         0          0       0.0  
+ext:jax_fdm             0.0   2.094e-1   2.094e-1     0    179      349   2.281e-6        -         -          -         -  jax_fdm.optimization.LBFGSB (scipy.optimize.minimize method='L-BFGS-B', tol=1e-10 -> ftol=gtol=1e-10, maxiter=1000, maxfun/maxls/maxcor = scipy defaults 15000/20/10, jac from jax.value_and_grad, jit), wall time of the external tool
+
+=== jaxfdm_pillow jit1.00%L box=case [-185.823,-0.019] (ne=144, nfree=49)  best final err/L = 4.128e-2 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0   2.212e-1   2.212e-1     0    268       17   4.128e-2       17        38        113       2.2  
+s1                      1.6   2.554e-1   2.554e-1     0    257       16   4.128e-2        8        27         57       3.1  it=1 lib_err=3.69e0
+gram_sparse             0.2   2.592e-1   2.505e-1    46    268       17   4.128e-2        8        28         55       1.9  λ=2.9e-8 it=1 lib_err=3.75e0
+length_ratio            1.7   6.209e-2   6.209e-2     0    263       17   4.128e-2        1        23         55       3.1  sweeps=20 best@20
+frozen                  3.4   5.240e-2   5.240e-2     0    249       16   4.128e-2        0        13        103       4.2  it=1! lib_err=7.58e-1 s1e=3.69e0 u=2.14e0 fr1 gn0 fac=4 fb=0
+pipeline                5.4   4.172e-2   4.172e-2     0    202       13   4.128e-2        0         0         13       5.4  it=3! lib_err=6.04e-1 s1e=3.69e0 u=2.14e0 fr1 gn2 fac=15 fb=0
+legacy                 10.8   4.172e-2   4.172e-2     0    196       12   4.128e-2        0         0         13      10.8  it=3! lib_err=6.04e-1 s1e=3.69e0 fr1 gn2 fac=3 fb=0
+uniform_x0.1            0.0    1.099e1    1.099e1     0   1000       67   1.643e-1        -         -          -         -  
+uniform_x10             0.0   9.297e-1   9.297e-1     0    319       21   4.128e-2      129       151        184       8.8  
+uniform_rand            0.0   2.550e-1   2.550e-1     0    280       18   4.128e-2       17        40        100       2.3  
+oracle(q_ref)           0.0   6.972e-2   6.972e-2     0    212       13   4.128e-2        1        12         79       0.7  
+
+##### jaxfdm_pringle [jax_fdm] nodes=90 free=72 fixed=18 edges=161 (T=0 C=161) L=6.875 median|q|=2.905e-1 box=case q_ref outside box: 0
+# A 10 x 9 compression grid (a 'pringle' vault, 6 m x 3 m) anchored along the two short ends. The original example targets a graded distribution of support reaction magnitudes, keeps free nodes on their transverse planes and preserves the transverse edge lengths.
+# forward(q_ref) vs exported nodes: ||dx||/L = 7.915e-16
+
+=== jaxfdm_pringle exact box=case [-5.000,-0.100] (ne=161, nfree=72)  best final err/L = 5.327e-11 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0    2.457e0    2.457e0     0    756       56   1.016e-6        -         -          -         -  
+s1                      2.2   1.614e-6   1.614e-6     0     11        1   5.419e-7        -         -          -         -  it=1 lib_err=1.11e-5
+gram_sparse             0.3   1.885e-6   1.739e-6    32     16        1   6.163e-7        -         -          -         -  λ=5.7e-9 it=1 lib_err=1.30e-5
+length_ratio            2.1   1.986e-1   1.986e-1     0    491       35   8.954e-7        -         -          -         -  sweeps=20 best@20
+frozen                  4.6  5.327e-11  5.327e-11     0      0        0  5.327e-11        0         0          0       4.6  it=1 lib_err=3.66e-10 s1e=1.11e-5 u=3.36e0 fr1 gn0 fac=2 fb=0
+pipeline                4.9  5.327e-11  5.327e-11     0      0        0  5.327e-11        0         0          0       4.9  it=1 lib_err=3.66e-10 s1e=1.11e-5 u=3.36e0 fr1 gn0 fac=2 fb=0
+legacy                 13.1   5.161e-6   5.161e-6     0     79        6   1.137e-6        -         -          -         -  it=2! lib_err=3.55e-5 s1e=2.33e-4 fr1 gn0 fac=2 fb=0
+uniform_x0.1            0.0    3.240e1    8.769e0   161    645       45   1.341e-6        -         -          -         -  
+uniform_x10             0.0   7.666e-1   7.666e-1     0    561       40   1.405e-6        -         -          -         -  
+uniform_rand            0.0    2.459e0    2.459e0     0    910       66   7.258e-7        -         -          -         -  
+oracle(q_ref)           0.0  7.915e-16  7.915e-16     0      0        0  7.915e-16        0         0          0       0.0  
+ext:jax_fdm             0.0    2.457e0    2.457e0     0    624      632   1.109e-5        -         -          -         -  jax_fdm.optimization.LBFGSB (scipy.optimize.minimize method='L-BFGS-B', tol=1e-10 -> ftol=gtol=1e-10, maxiter=1000, maxfun/maxls/maxcor = scipy defaults 15000/20/10, jac from jax.value_and_grad, jit), wall time of the external tool
+
+=== jaxfdm_pringle jit1.00%L box=case [-5.000,-0.100] (ne=161, nfree=72)  best final err/L = 5.136e-2 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0    2.459e0    2.459e0     0    766       54   5.136e-2      336       376        399      24.3  
+s1                      1.7    2.015e0    2.015e0     0    976       69   5.136e-2      510       635        655      43.2  it=1 lib_err=1.39e1
+gram_sparse             0.3    7.767e0    1.419e0    73    675       46   5.136e-2      187       238        304      15.5  λ=5.8e-9 it=1 lib_err=5.34e1
+length_ratio            2.2   2.096e-1   2.096e-1     0    490       33   5.136e-2       17        43         93       4.9  sweeps=20 best@20
+frozen                  6.0   6.716e-2   6.716e-2     0    478       34   5.136e-2        0        32         84       8.1  it=1! lib_err=4.62e-1 s1e=1.39e1 u=3.41e0 fr1 gn0 fac=8 fb=0
+pipeline               11.1   5.137e-2   5.137e-2     0    318       22   5.136e-2        0         0          0      11.1  it=3! lib_err=3.53e-1 s1e=1.39e1 u=3.41e0 fr1 gn2 fac=24 fb=0
+legacy                 14.4   5.137e-2   5.137e-2     0    358       25   5.136e-2        0         0          0      14.4  it=3! lib_err=3.53e-1 s1e=1.39e1 fr1 gn2 fac=3 fb=0
+uniform_x0.1            0.0    3.240e1    8.770e0   161    593       41   5.136e-2      107       144        188       9.1  
+uniform_x10             0.0   7.716e-1   7.716e-1     0    560       39   5.136e-2       90       172        194      11.1  
+uniform_rand            0.0    2.461e0    2.461e0     0    973       68   5.136e-2      455       517        583      33.1  
+oracle(q_ref)           0.0   8.288e-2   8.288e-2     0    492       34   5.136e-2        3        31         85       2.0  
+
+##### jaxfdm_truss_equal_force [jax_fdm] nodes=22 free=20 fixed=2 edges=32 (T=11 C=21) L=5.082 median|q|=1.395e0 box=case q_ref outside box: 0
+# Planar 'truss' network in the xy plane: a straight top chord in compression, a hanging bottom chord in tension and vertical struts in compression, loaded on the free top nodes. The original example makes every bottom-chord force equal to 1.5 while keeping the top chord colinear.
+# forward(q_ref) vs exported nodes: ||dx||/L = 1.787e-15
+
+=== jaxfdm_truss_equal_force exact box=case [-131.724,-0.013] (ne=32, nfree=20)  best final err/L = 1.803e-7 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0    1.700e1    1.700e1     0     59        3   2.367e-1        -         -          -         -  
+s1                      0.6   1.191e-6   1.191e-6     0      8        0   2.516e-7       10         -          -         -  it=1 lib_err=6.05e-6
+gram_sparse             0.1   1.957e-5   6.031e-2     4    104        4   3.453e-7        -         -          -         -  λ=6.0e-9 it=1 lib_err=9.94e-5
+length_ratio            0.2   1.723e-1   1.723e-1     0    388       15   2.203e-6        -         -          -         -  sweeps=4 best@3
+frozen                  1.7   1.803e-7   1.803e-7     0      0        0   1.803e-7        0         0          0       1.7  it=1! lib_err=9.16e-7 s1e=6.05e-6 u=8.83e-1 fr1 gn0 fac=1 fb=0
+pipeline                1.9   1.803e-7   1.803e-7     0      0        0   1.803e-7        0         0          0       1.9  it=3! lib_err=9.16e-7 s1e=6.05e-6 u=8.83e-1 fr1 gn2 fac=3 fb=0
+legacy                  2.5   7.569e-7   7.569e-7     0      0        0   7.569e-7        -         -          -         -  it=3! lib_err=3.85e-6 s1e=1.49e-4 fr1 gn1 fac=3 fb=0
+uniform_x0.1            0.0    1.728e2    1.728e2     0    118        5   5.101e-7        -         -          -         -  
+uniform_x10             0.0    1.455e0    1.455e0     0    167        9   1.006e-1        -         -          -         -  
+uniform_rand            0.0    8.736e0    8.736e0     0   1000       44   1.258e-1        -         -          -         -  
+oracle(q_ref)           0.0  1.787e-15  1.787e-15     0      0        0  1.787e-15        0         0          0       0.0  
+ext:jax_fdm             0.0    1.803e1    1.803e1     0     54       81   2.611e-1        -         -          -         -  jax_fdm.optimization.LBFGSB (scipy.optimize.minimize method='L-BFGS-B', tol=1e-10 -> ftol=gtol=1e-10, maxiter=1000, maxfun/maxls/maxcor = scipy defaults 15000/20/10, jac from jax.value_and_grad, jit), wall time of the external tool
+
+=== jaxfdm_truss_equal_force jit1.00%L box=case [-131.724,-0.013] (ne=32, nfree=20)  best final err/L = 2.779e-2 ===
+config/box          warm_ms  err_raw/L err_clip/L  clip  lb_it    lb_ms    final/L  ev<1.5b  ev<1.05b  ev<1.005b  ms->1.05  note
+uniform                 0.0    1.700e1    1.700e1     0   1000       42   5.971e-2        -         -          -         -  
+s1                      0.4   8.799e-1   8.799e-1     0    312       12   2.779e-2       29        98        159       3.8  it=1 lib_err=4.47e0
+gram_sparse             0.1   8.796e-1   8.476e-1     2    362       14   2.779e-2       28        98        139       3.4  λ=6.2e-9 it=1 lib_err=4.47e0
+length_ratio            0.2   1.487e-1   1.487e-1     0    649       25   2.779e-2       53       486        579      16.7  sweeps=3 best@2
+frozen                  1.9   3.058e-2   3.058e-2     1    255       10   2.779e-2        0        49         93       3.5  it=1! lib_err=1.55e-1 s1e=4.47e0 u=7.35e-1 fr1 gn0 fac=6 fb=0
+pipeline                2.3   2.785e-2   2.785e-2     1    210        8   2.779e-2        0         0          0       2.3  it=3! lib_err=1.42e-1 s1e=4.47e0 u=7.35e-1 guard→u fr1 gn2 fac=15 fb=0
+legacy                  2.2   2.786e-2   2.786e-2     0    158        6   2.779e-2        0         0          0       2.2  it=3! lib_err=1.42e-1 s1e=4.47e0 fr1 gn2 fac=3 fb=0
+uniform_x0.1            0.0    1.728e2    1.728e2     0    260       10   2.779e-2       36        57        129       2.0  
+uniform_x10             0.0    1.454e0    1.454e0     0   1000       42   5.818e-2        -         -          -         -  
+uniform_rand            0.0    8.738e0    8.738e0     0   1000       44   9.793e-2        -         -          -         -  
+oracle(q_ref)           0.0   4.795e-2   4.795e-2     0    226        8   2.779e-2        6        23         96       0.8  

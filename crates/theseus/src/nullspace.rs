@@ -37,6 +37,9 @@ pub struct EquilibriumSystem {
     pub free_positions: Array2<f64>,
     /// Number of ordinary free-node rows before optional reaction rows.
     pub n_free: usize,
+    /// Axes (0 = x, 1 = y, 2 = z) with a block of `n_fixed` zero-reaction
+    /// rows after the free-node rows, in row order.
+    pub reaction_dims: Vec<usize>,
 }
 
 impl EquilibriumSystem {
@@ -180,6 +183,7 @@ impl EquilibriumSystem {
             n_edges: topo.num_edges,
             free_positions: target_free_xyz.clone(),
             n_free,
+            reaction_dims,
         })
     }
 }

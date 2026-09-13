@@ -4,6 +4,7 @@ use ndarray::Array2;
 use std::time::Instant;
 use theseus::fdm;
 use theseus::inverse::{
+    Stage2Method, DEFAULT_LM_DAMPING, DEFAULT_SEED_GUARD_MARGIN,
     compose_box, geometric_error_vector, solve_inverse_fdm, solve_pseudoinverse_dispatch,
     solve_spg_box, InverseFdmOptions, InverseMetric, LinearAlgebra, ParticularMethod,
     DEFAULT_MAX_OUTER,
@@ -243,6 +244,11 @@ fn inverse_opts(
         max_frozen_outer: 0,
         max_outer: DEFAULT_MAX_OUTER,
         cwls_damping: 1e-6,
+        stage2_method: Stage2Method::ActiveSet,
+        lm_damping: DEFAULT_LM_DAMPING,
+        seed_guard_margin: DEFAULT_SEED_GUARD_MARGIN,
+        nondimensionalize: true,
+        reaction_weight: 1.0,
     }
 }
 
@@ -368,7 +374,7 @@ fn pseudoinverse_reaction_constraints_reduce_reaction_norm() {
         ParticularMethod::Gram,
         true,
         true,
-        true,
+        false,
         true,
     )
     .unwrap();
@@ -746,7 +752,6 @@ fn reaction_rows_reduce_reaction_norm_on_clarabel_and_spg() {
         let mut pinned = free.clone();
         pinned.enforce_zero_rx = true;
         pinned.enforce_zero_ry = true;
-        pinned.enforce_zero_rz = true;
         let unconstrained = solve_inverse_fdm(&problem, &target, free).unwrap();
         let constrained = solve_inverse_fdm(&problem, &target, pinned).unwrap();
         let unconstrained_reaction =
@@ -758,6 +763,20 @@ fn reaction_rows_reduce_reaction_norm_on_clarabel_and_spg() {
              constrained={constrained_reaction}, unconstrained={unconstrained_reaction}"
         );
     }
+}
+
+#[test]
+fn reaction_rows_inconsistent_with_the_load_are_rejected() {
+    let (problem, _) = arch_problem(false);
+    let (target, _) = forward_target(&problem, &[1.0; 8]);
+    let mut opts = inverse_opts(1e-8, true, ParticularMethod::Clarabel, LinearAlgebra::Direct, true);
+    opts.enforce_zero_rz = true;
+    let error = solve_inverse_fdm(&problem, &target, opts)
+        .expect_err("zero vertical reactions under vertical load must be rejected");
+    assert!(
+        error.to_string().contains("enforce_zero_rz is inconsistent"),
+        "unexpected message: {error}"
+    );
 }
 
 #[test]

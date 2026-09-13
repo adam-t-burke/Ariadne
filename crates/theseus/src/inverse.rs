@@ -5,6 +5,44 @@
 //! Stage 2 in force-density coordinates, weighted by the FDM compliance.
 //! Public signs and bounds always constrain force density, including when
 //! Stage 1 uses member force.
+//!
+//! # Warm-start pipeline
+//!
+//! The geometric metrics are a warm start for a downstream nonlinear optimiser
+//! (L-BFGS-B on the forward solve). The pipeline is
+//!
+//! 1. **Non-dimensionalise** (`nondimensionalize`): positions are divided by the
+//!    target extent and loads by their largest component, so Stage 2 is
+//!    assembled in dimensionless form. Results are identical in exact
+//!    arithmetic; the conditioning of the assembled systems is not.
+//! 2. **Stage 1**: force residual at the target geometry, `min ‖E(x*)q − p‖²`
+//!    in the box. This recovers the *pattern* of `q` (and the self-stress
+//!    distribution of self-tied systems), but it is blind to the scale of `q`
+//!    and its vertical rows are down-weighted on shallow targets.
+//! 3. **Seed guard** (`seed_guard_margin`): the Stage-1 seed is scored on the
+//!    exact geometric error against a uniform-magnitude sign seed scaled per
+//!    sign group. When Stage 1 is worse by more than the margin it has
+//!    collapsed and the uniform seed initialises Stage 2 instead.
+//! 4. **Frozen compliance-weighted step(s)** (`max_frozen_outer`):
+//!    `min ‖D(q_k)⁻¹(E(x*)q − p)‖²`. Because `x(q) − x* = −D(q)⁻¹(E(x*)q − p)`,
+//!    this is Gauss--Newton on the geometric error with the Jacobian taken at
+//!    the target geometry; it cannot overshoot the way the current-geometry
+//!    Jacobian can.
+//! 5. **Gauss--Newton step(s)** (`max_outer`): the same weighted least
+//!    squares with the Jacobian re-assembled at `x(q_k)`. Steps are accepted
+//!    only if the exact merit decreases, with step halving; an optional
+//!    Levenberg--Marquardt diagonal (`lm_damping`) that grows on rejected
+//!    steps is available but off by default.
+//!
+//! Bounds inside Stage 2 are handled by an exact active-set bounded-variable
+//! least squares on the sparse weighted saddle system (`Stage2Method`), warm
+//! started across steps; Clarabel remains available as the interior-point
+//! alternative and as the fallback.
+//!
+//! Two facts worth keeping in mind: the compliance weighting is invariant to a
+//! common scale of the metric seed, `D(s·q) = s·D(q)`, so only the pattern of
+//! the seed matters; and the frozen step and the Gauss--Newton step share the
+//! same fixed point, since `E(x(q)) = E(x*)` once `x(q) = x*`.
 
 use crate::nullspace::{
     apply_pseudoinverse, solve_lsqr, solve_saddle_pseudoinverse, EquilibriumSystem,
@@ -134,6 +172,9 @@ pub struct InverseFdmOptions {
     pub lower: Vec<f64>,
     pub upper: Vec<f64>,
     pub max_iter: usize,
+    /// Inner-solver tolerance and Stage-2 geometric convergence tolerance. Not
+    /// rescaled by `nondimensionalize`; the geometric test is then applied to
+    /// the dimensionless error.
     pub tol: f64,
     /// Residual metric. `Force` reproduces the historical solve exactly.
     pub metric: InverseMetric,
@@ -143,10 +184,67 @@ pub struct InverseFdmOptions {
     pub q_ref: Vec<f64>,
     /// Frozen-target CWLS update count before Gauss--Newton.
     pub max_frozen_outer: usize,
-    /// Gauss--Newton CWLS update count. Geometric solves stop earlier at tolerance.
+    /// Gauss--Newton CWLS update count (accepted steps). Geometric solves stop
+    /// earlier at tolerance.
     pub max_outer: usize,
-    /// Stage-2 damping in force-density coordinates.
+    /// Fixed Stage-2 Tikhonov floor on `Δq`, in force-density coordinates.
+    /// The adaptive Levenberg--Marquardt term (`lm_damping`) is added on top.
     pub cwls_damping: f64,
+    /// Bound handling for the Stage-2 steps under `LinearAlgebra::Direct`.
+    pub stage2_method: Stage2Method,
+    /// Levenberg--Marquardt damping floor for the Stage-2 steps, relative to
+    /// the curvature diagonal `diag(Jᵀ S⁻² J)`. `0` (default) takes the
+    /// undamped Gauss--Newton direction and halves the step length on the
+    /// exact merit until it decreases. A positive value damps the direction
+    /// instead: rejected steps multiply the damping by 10, 100, 1000, …, and
+    /// an accepted step divides it by ten, never below this floor. Marquardt
+    /// scaling penalises the long moves along the nearly flat self-stress
+    /// directions of mixed-sign nets, which is why the default is off: on the
+    /// benchmark suite `0` is within 2 % of the best warm start on every case,
+    /// `1e-4` loses on cable domes and near-exact tied arches.
+    pub lm_damping: f64,
+    /// Stage-1 collapse guard. After Stage 1, a scaled uniform sign seed is
+    /// scored on the same geometric error. When Stage 1 is worse by more than
+    /// this factor it is suspect: both seeds then take the frozen step and the
+    /// lower measured error continues. Beyond the square of the margin (or
+    /// without a frozen phase) the uniform seed is used directly. `0` disables.
+    pub seed_guard_margin: f64,
+    /// Scale positions by the target extent and loads by their magnitude
+    /// before assembling, so that Stage 2 is solved in dimensionless form.
+    pub nondimensionalize: bool,
+    /// Weight of the `enforce_zero_r*` reaction rows relative to the
+    /// equilibrium rows (Stage 1) and to the geometric rows (Stage 2). The
+    /// rows are least-squares penalties, not hard constraints: `1` treats a
+    /// reaction of one load unit like a geometric error of one target extent
+    /// (with `nondimensionalize`); larger values push harder towards zero
+    /// reaction at the expense of geometric fit.
+    pub reaction_weight: f64,
+}
+
+/// Bound handling for the Stage-2 compliance-weighted steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Stage2Method {
+    /// Bounded-variable least squares by an add/release active set on the
+    /// sparse weighted saddle system. Exact and warm-started across steps;
+    /// falls back to Clarabel if the active set cycles.
+    #[default]
+    ActiveSet = 0,
+    /// Clarabel interior-point QP (the previous default).
+    Clarabel = 1,
+}
+
+impl TryFrom<i32> for Stage2Method {
+    type Error = TheseusError;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::ActiveSet),
+            1 => Ok(Self::Clarabel),
+            other => Err(TheseusError::Solver(format!(
+                "unknown InvFDM stage-2 method {other} (expected 0=ActiveSet, 1=Clarabel)"
+            ))),
+        }
+    }
 }
 
 impl InverseFdmOptions {
@@ -180,9 +278,19 @@ impl InverseFdmOptions {
             max_frozen_outer: 0,
             max_outer: DEFAULT_MAX_OUTER,
             cwls_damping: 1e-6,
+            stage2_method: Stage2Method::ActiveSet,
+            lm_damping: DEFAULT_LM_DAMPING,
+            seed_guard_margin: DEFAULT_SEED_GUARD_MARGIN,
+            nondimensionalize: true,
+            reaction_weight: 1.0,
         }
     }
 }
+
+/// Default Levenberg--Marquardt damping floor for the Stage-2 steps (off).
+pub const DEFAULT_LM_DAMPING: f64 = 0.0;
+/// Default Stage-1 collapse guard margin.
+pub const DEFAULT_SEED_GUARD_MARGIN: f64 = 3.0;
 
 /// Default Gauss--Newton CWLS iteration budget.
 pub const DEFAULT_MAX_OUTER: usize = 3;
@@ -200,6 +308,44 @@ pub struct InverseFdmResult {
     /// geometric one on the same scale. NaN when the Laplacian at the returned
     /// q is singular and the error could not be evaluated.
     pub geometric_error: f64,
+    /// Stage-2 warm-start diagnostics.
+    pub diagnostics: InverseDiagnostics,
+}
+
+/// Diagnostics recorded by the Stage-2 warm start.
+#[derive(Debug, Clone, Default)]
+pub struct InverseDiagnostics {
+    /// Stage-2 merit of the Stage-1 particular after clipping to the box:
+    /// the geometric error plus the reaction residuals when reaction rows are
+    /// enforced (identical to the geometric error otherwise).
+    pub stage1_error: f64,
+    /// Stage-2 merit of the scaled uniform sign seed scored by the guard. NaN
+    /// when the guard was disabled.
+    pub uniform_seed_error: f64,
+    /// True when the guard replaced the Stage-1 seed by the uniform seed.
+    pub used_uniform_seed: bool,
+    /// Frozen-Jacobian steps accepted.
+    pub frozen_steps: usize,
+    /// Gauss--Newton steps accepted.
+    pub newton_steps: usize,
+    /// Stage-2 linear solves (factorisations) performed, including active-set
+    /// passes and rejected damping trials.
+    pub stage2_factorizations: usize,
+    /// Number of Stage-2 steps that fell back from the active set to Clarabel
+    /// (only after a numerical failure of the sparse saddle solve).
+    pub clarabel_fallbacks: usize,
+    /// Number of Stage-2 steps on which the active set reached its pass limit
+    /// and returned the best feasible iterate seen instead of a settled set.
+    pub active_set_capped: usize,
+    /// Number of Gauss–Newton steps whose linearisation point x(q_k) had a
+    /// collapsed edge (two nodes coincident), so the step used the frozen
+    /// (target) Jacobian instead.
+    pub degenerate_linearizations: usize,
+    /// `‖E_R(x(q)) q‖`: the support reactions along the enforced axes that a
+    /// forward solve at the returned q realises (load units, weight divided
+    /// out). Zero when no reaction rows are enforced; NaN if the Laplacian at
+    /// the returned q is singular.
+    pub reaction_residual: f64,
 }
 
 /// Result from the box-constrained spectral projected-gradient solver.
