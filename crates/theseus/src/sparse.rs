@@ -230,16 +230,31 @@ impl SparseColMatOwned {
     /// Add value to diagonal: A += d * I. Modifies in place.
     pub fn add_diagonal(&mut self, d: f64) {
         let n = self.nrows.min(self.ncols);
+        let mut missing = Vec::new();
         for j in 0..n {
             let start = self.col_ptrs[j] as usize;
             let end = self.col_ptrs[j + 1] as usize;
-            for idx in start..end {
-                if self.row_indices[idx] == j as u32 {
-                    self.values[idx] += d;
-                    break;
-                }
+            match (start..end).find(|&idx| self.row_indices[idx] == j as u32) {
+                Some(idx) => self.values[idx] += d,
+                None => missing.push(j),
             }
         }
+        if missing.is_empty() {
+            return;
+        }
+        // Structurally empty diagonals (e.g. the Gram column of an edge whose
+        // both ends are fixed) must receive the shift too, or a factorisation
+        // meets an exact zero pivot.
+        let mut triplets: Vec<(u32, u32, f64)> = Vec::with_capacity(self.nnz() + missing.len());
+        for j in 0..self.ncols {
+            for idx in self.col_ptrs[j] as usize..self.col_ptrs[j + 1] as usize {
+                triplets.push((self.row_indices[idx], j as u32, self.values[idx]));
+            }
+        }
+        for j in missing {
+            triplets.push((j as u32, j as u32, d));
+        }
+        *self = Self::from_triplets(self.nrows, self.ncols, &triplets).expect("add_diagonal");
     }
 
     /// Extract selected columns into a new matrix.

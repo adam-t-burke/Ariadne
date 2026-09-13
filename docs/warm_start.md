@@ -290,8 +290,8 @@ wall clock on the benchmark machine (4 vCPU).
 |---|---|---|---|---|---|---|---|---|---|---|
 | uniform | 4 | 1.029 | 26 | 35 | 13 | 906 | 25 | 51.6 | 0.0 | 0.0 |
 | s1 (Stage 1 only) | 0 | 1.014 | 37 | 45 | 13 | 572 | 22 | 27.6 | 7.6 | 19.1 |
-| gram_sparse | 16 | 1.029 | 18 | 28 | 15 | 841 | 20 | 132.6 | 0.9 | 2.0 |
-| gram_dense | 0 | 1.020 | 34 | 42 | 17 | 584 | 22 | 55.7 | 17.2 | 55.0 |
+| gram_sparse | 0 | 1.019 | 32 | 42 | 17 | 577 | 22 | 55.7 | 1.1 | 2.1 |
+| gram_dense | 0 | 1.020 | 34 | 42 | 17 | 584 | 22 | 55.7 | 17.4 | 57.4 |
 | length_ratio | 4 | 1.016 | 31 | 42 | 12 | 614 | 18 | 5.2 | 5.2 | 12.9 |
 | frozen (1 CWLS step) | 0 | 1.000 | 54 | 61 | 0 | 84 | 7 | 1.15 | 25.6 | 100.9 |
 | **pipeline** | 0 | 1.000 | **64** | **64** | 0 | **0** | 4* | **1.00** | 37.0 | 200.7 |
@@ -303,8 +303,11 @@ targets lie in the FDM image, so all errors are at round-off (`1e-10·L`) and
 "within 5 %" is meaningless.
 "failures" are singular Laplacians or NaN after clipping (e.g. the uniform
 seed on the hypar and the cable truss, where a single-magnitude `q` of both
-signs makes `D` indefinite; the sparse Gram on nets whose `EᵀE` is singular
-at the shift used).
+signs makes `D` indefinite). The sparse Gram originally failed on the four
+nets with edges joining two fixed nodes: such an edge has an all-zero column
+in `E`, hence a structurally empty diagonal in `EᵀE`, and `add_diagonal` did
+not create the entry, so the LDL met an exact zero pivot. Fixed on this
+branch; sparse and dense Gram now agree on every case.
 
 Reading: the force-residual seeds (`s1`, both Grams) start 30–130× above the
 reachable error and L-BFGS-B needs 600–900 evaluations to get within 5 % of it,
@@ -324,16 +327,16 @@ iterations, and `ev<1.05b` (`–` = not reached within 1000 evaluations).
 | quad21c_d1 jit2%d loose (1.55e-01) | 29.1 / 1.053 / – | 1.41e+03 / 1.048 / 1066 | 953 / 1.056 / – | 3.61 / 1.003 / 608 | 6.32 / 1.034 / 905 | 4.27 / 1.000 / 562 | 381 / 1.475 / – |
 | quad21c_comp jit2%d loose (5.44e-02) | 34.9 / 1.050 / 1095 | 2.14e+03 / 1.061 / – | 1.97e+03 / 1.065 / – | 5.15 / 1.028 / 612 | 3.01 / 1.038 / 862 | 1.97 / 1.000 / 116 | 3.3 / 1.013 / 416 |
 | holes21c jit2%d loose (5.60e-02) | 21.7 / 1.107 / – | 2.64e+03 / 1.320 / – | 2.31e+03 / 2.491 / – | 2 / 1.026 / 654 | 3.55 / 1.068 / – | 2.76 / 1.000 / 316 | 12.9 / 1.027 / 838 |
-| crease21 jit2%d loose (4.06e-02) | 16.4 / 1.001 / 386 | 134 / 19.505 / – | fail | 3.06 / 1.001 / 317 | 2.16 / 1.000 / 253 | 1.02 / 1.000 / 0 | 1.06 / 1.000 / 6 |
-| creasediag21 bump10%d loose (8.13e-03) | 73.5 / 1.023 / 915 | 7.21 / 1.018 / 796 | fail | 7.87 / 1.010 / 748 | 1.05 / 1.000 / 0 | 1 / 1.000 / 0 | 1 / 1.000 / 0 |
+| crease21 jit2%d loose (4.06e-02) | 16.4 / 1.001 / 386 | 134 / 19.505 / – | 127 / 1.001 / 518 | 3.06 / 1.001 / 317 | 2.16 / 1.000 / 253 | 1.02 / 1.000 / 0 | 1.06 / 1.000 / 6 |
+| creasediag21 bump10%d loose (8.13e-03) | 73.5 / 1.023 / 915 | 7.21 / 1.018 / 796 | 7.2 / 1.018 / 790 | 7.87 / 1.010 / 748 | 1.05 / 1.000 / 0 | 1 / 1.000 / 0 | 1 / 1.000 / 0 |
 | hypar21m jit2%d loose (6.02e-02) | fail | 859 / 5.963 / – | 1.3e+03 / 133.311 / – | fail | 1.23 / 1.000 / 111 | 1.02 / 1.000 / 0 | 1.02 / 1.000 / 0 |
-| barrel16x12 jit2%d loose (3.05e-02) | 461 / 8.791 / – | 60.5 / 1.003 / 187 | fail | 94.1 / 13.208 / – | 1.09 / 1.001 / 29 | 1 / 1.000 / 0 | 1 / 1.000 / 0 |
+| barrel16x12 jit2%d loose (3.05e-02) | 461 / 8.791 / – | 60.5 / 1.003 / 187 | 60.5 / 1.003 / 183 | 94.1 / 13.208 / – | 1.09 / 1.001 / 29 | 1 / 1.000 / 0 | 1 / 1.000 / 0 |
 | cabledome4x16 jit2%d loose (2.47e-02) | 212 / 24.133 / – | 176 / 17.440 / – | 367 / 16.947 / – | 119 / 39.211 / – | 12.3 / 1.047 / 1044 | 4.63 / 1.000 / 138 | 4.63 / 1.000 / 129 |
 | cabledome4x16 bump10%d snug (7.87e-03) | 365 / 80.435 / – | 30.4 / 2.194 / – | 2.07e+03 / 100.114 / – | 365 / 80.435 / – | 5.45 / 1.084 / – | 1 / 1.000 / 0 | 1 / 1.000 / 0 |
 | tiedarch16 jit2%d loose (8.92e-03) | 2.21e+04 / 1.000 / 196 | 59.6 / 1.000 / 291 | 366 / 1.000 / 220 | 64.4 / 2.386 / – | 2.1 / 1.000 / 150 | 1 / 1.000 / 0 | 1 / 1.000 / 0 |
 | cabletruss16 jit2%d loose (1.15e-02) | fail | 162 / 9.818 / – | 216 / 7.639 / – | fail | 2.36 / 1.000 / 471 | 1.02 / 1.000 / 0 | 1 / 1.000 / 0 |
 | wheel24a4 jit2%d loose (1.26e-02) | 347 / 8.857 / – | 7.21 / 1.000 / 167 | 7.21 / 1.000 / 162 | 11.1 / 1.000 / 193 | 1.01 / 1.000 / 0 | 1 / 1.000 / 0 | 1 / 1.000 / 0 |
-| oculus21h7 bump10%d loose (4.85e-03) | 154 / 1.085 / – | 3.86 / 1.009 / 477 | fail | 7 / 1.058 / – | 1.01 / 1.000 / 0 | 1 / 1.000 / 0 | 1 / 1.000 / 0 |
+| oculus21h7 bump10%d loose (4.85e-03) | 154 / 1.085 / – | 3.86 / 1.009 / 477 | 3.86 / 1.012 / 469 | 7 / 1.058 / – | 1.01 / 1.000 / 0 | 1 / 1.000 / 0 | 1 / 1.000 / 0 |
 | diamond10 jit2%d snug (2.84e-02) | 24.4 / 1.000 / 268 | 44.5 / 1.000 / 202 | 50.9 / 1.000 / 267 | 1.97 / 1.000 / 167 | 1.06 / 1.000 / 15 | 1 / 1.000 / 0 | 1 / 1.000 / 0 |
 
 Observations worth putting on a slide:
