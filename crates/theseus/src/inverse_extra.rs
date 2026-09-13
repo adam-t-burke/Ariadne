@@ -1520,9 +1520,12 @@ pub fn solve_inverse_fdm(
         let mut result = None;
         let mut total_iterations = 0usize;
         if frozen_budget > 0 {
+            let steps_before = ctx.diagnostics.frozen_steps;
             let mut frozen =
                 solve_geometric_outer(&mut ctx, InverseMetric::Geometry, &seed, frozen_budget)?;
             if let Some(uniform) = challenger {
+                let stage1_steps = ctx.diagnostics.frozen_steps - steps_before;
+                ctx.diagnostics.frozen_steps = steps_before;
                 let alternative = solve_geometric_outer(
                     &mut ctx,
                     InverseMetric::Geometry,
@@ -1532,6 +1535,8 @@ pub fn solve_inverse_fdm(
                 if alternative.geometric_error < frozen.geometric_error {
                     frozen = alternative;
                     ctx.diagnostics.used_uniform_seed = true;
+                } else {
+                    ctx.diagnostics.frozen_steps = steps_before + stage1_steps;
                 }
             }
             total_iterations += frozen.iterations;
@@ -1596,12 +1601,17 @@ enum Stage2Kind {
 
 /// Maximum active-set passes before falling back to Clarabel.
 const ACTIVE_SET_MAX_PASSES: usize = 24;
-/// Maximum KKT release rounds per active-set solve.
-const ACTIVE_SET_MAX_RELEASES: usize = 3;
+/// Relative tolerance on the reduced gradient for releasing a held variable.
+const ACTIVE_SET_KKT_TOL: f64 = 1e-6;
+/// Passes during which held variables may be released; afterwards the sweep
+/// only adds violators, which guarantees termination.
+const ACTIVE_SET_RELEASE_PASSES: usize = 12;
 /// Maximum damping increases per outer step before the step is abandoned.
 const LM_MAX_TRIES: usize = 6;
 /// Golden-section probes per sign group when scoring the uniform seed.
 const SEED_GUARD_PROBES: usize = 20;
+/// Rademacher probes for the Marquardt curvature diagonal.
+const LM_SCALE_PROBES: usize = 8;
 
 /// State shared by the Stage-2 phases: caches, the warm-started active set,
 /// the current Levenberg--Marquardt damping, and accumulated diagnostics.
@@ -1648,6 +1658,24 @@ impl<'a> Stage2Context<'a> {
             solve_stack: GlobalPodBuffer::new(dyn_stack::StackReq::empty()),
             lm: opts.lm_damping,
             diagnostics: InverseDiagnostics::default(),
+        }
+    }
+
+    /// Predict the active set from a seed: edges sitting on a bound of the
+    /// q-box start held there. Wrongly held edges are released on the first
+    /// pass, so this only saves passes on snug boxes.
+    fn seed_active_set(&mut self, q: &[f64]) {
+        for i in 0..q.len() {
+            let (lo, hi) = (self.bounds.lower[i], self.bounds.upper[i]);
+            let width = if lo.is_finite() && hi.is_finite() { (hi - lo).abs() } else { q[i].abs().max(1.0) };
+            let tol = 1e-9 * width.max(f64::MIN_POSITIVE);
+            self.active[i] = if lo.is_finite() && q[i] <= lo + tol {
+                -1
+            } else if hi.is_finite() && q[i] >= hi - tol {
+                1
+            } else {
+                0
+            };
         }
     }
 
@@ -1752,36 +1780,49 @@ impl<'a> Stage2Context<'a> {
         (q, best_error)
     }
 
-    /// Marquardt scaling `≈ diag(Jᵀ S⁻² J)` from the local resistance of each
-    /// edge: `‖J_j‖²` split over its free end nodes and divided by their
-    /// Laplacian diagonal. Reaction rows carry unit weight.
+    /// Marquardt scaling `≈ diag(Jᵀ S⁻² J)`, the curvature diagonal of the
+    /// compliance-weighted least squares, by a Hutchinson estimate:
+    /// `E[(Jᵀ S⁻¹ z)_j²] = Σ_i (S⁻¹ J)_ij²` for Rademacher `z`. Each probe costs
+    /// one application of `S⁻¹` (three solves with the cached Laplacian
+    /// factorisation) and one transpose matvec, so the estimate stays sparse.
     fn lm_scale(&self, jacobian: &SparseColMatOwned, weight: &MetricWeight) -> Vec<f64> {
-        let n_free = self.system.n_free;
-        let mut d_diag = vec![1.0; n_free];
-        for col in 0..weight.d.ncols {
-            for nz in weight.d.col_ptrs[col] as usize..weight.d.col_ptrs[col + 1] as usize {
-                if weight.d.row_indices[nz] as usize == col {
-                    d_diag[col] = weight.d.values[nz].abs().max(f64::MIN_POSITIVE);
+        let m = jacobian.nrows;
+        let ne = jacobian.ncols;
+        let mut scale = vec![0.0; ne];
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut z = vec![0.0; m];
+        let mut probes_used = 0usize;
+        for _ in 0..LM_SCALE_PROBES {
+            for value in z.iter_mut() {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                *value = if state & 1 == 0 { 1.0 } else { -1.0 };
+            }
+            let Ok(w) = weight.apply_inverse(&z) else { break };
+            probes_used += 1;
+            for col in 0..ne {
+                let mut dot = 0.0;
+                for nz in jacobian.col_ptrs[col] as usize..jacobian.col_ptrs[col + 1] as usize {
+                    dot += jacobian.values[nz] * w[jacobian.row_indices[nz] as usize];
+                }
+                scale[col] += dot * dot;
+            }
+        }
+        if probes_used == 0 {
+            // Fall back to the unweighted column norms.
+            for col in 0..ne {
+                for nz in jacobian.col_ptrs[col] as usize..jacobian.col_ptrs[col + 1] as usize {
+                    scale[col] += jacobian.values[nz].powi(2);
                 }
             }
-        }
-        let mut scale = vec![0.0; jacobian.ncols];
-        for col in 0..jacobian.ncols {
-            let mut sum = 0.0;
-            for nz in jacobian.col_ptrs[col] as usize..jacobian.col_ptrs[col + 1] as usize {
-                let row = jacobian.row_indices[nz] as usize;
-                let value = jacobian.values[nz];
-                let denominator = if row < 3 * n_free {
-                    d_diag[row % n_free]
-                } else {
-                    1.0
-                };
-                sum += value * value / (denominator * denominator);
+        } else {
+            for value in scale.iter_mut() {
+                *value /= probes_used as f64;
             }
-            scale[col] = sum;
         }
-        let mean = scale.iter().sum::<f64>() / scale.len().max(1) as f64;
-        let floor = if mean > 0.0 { 1e-12 * mean } else { 1e-300 };
+        let mean = scale.iter().sum::<f64>() / ne.max(1) as f64;
+        let floor = if mean > 0.0 && mean.is_finite() { 1e-8 * mean } else { 1e-300 };
         for value in scale.iter_mut() {
             if !value.is_finite() || *value < floor {
                 *value = floor;
@@ -1877,14 +1918,19 @@ impl<'a> Stage2Context<'a> {
         }
     }
 
-    /// Bounded-variable least squares by an add/release active set.
+    /// Bounded-variable least squares by a primal-dual active set.
     ///
     /// Every pass is one numeric refactorisation of the weighted saddle with
-    /// the bound columns masked out (same sparsity pattern, so the symbolic
-    /// analysis is reused). Variables that leave the box are fixed at the
-    /// violated bound; once no violations remain, bound variables whose
-    /// multiplier points into the box are released. The status vector persists
-    /// across outer steps as a warm start.
+    /// the bound columns held at their bound (same sparsity pattern, so the
+    /// symbolic analysis is reused). After each solve the set is updated in
+    /// one sweep: free variables that left the box are fixed at the violated
+    /// bound, and held variables whose reduced gradient
+    /// `∇f_j = Λ_j Δ_j − J_jᵀ y` points into the box are released. Updating
+    /// both sides at once (Hintermüller--Ito--Kunisch) keeps the pass count
+    /// small and largely independent of the problem size; after
+    /// `ACTIVE_SET_RELEASE_PASSES` passes releases stop so the sweep is
+    /// monotone and terminates. The status vector persists across outer steps
+    /// as a warm start.
     fn solve_active_set(
         &mut self,
         jacobian: &SparseColMatOwned,
@@ -1906,7 +1952,6 @@ impl<'a> Stage2Context<'a> {
         }
         let mut fixed = vec![0.0; ne];
         let mut step = vec![0.0; ne];
-        let mut releases = 0usize;
         let bound_scale = step_bounds
             .lower
             .iter()
@@ -1917,7 +1962,7 @@ impl<'a> Stage2Context<'a> {
             .max(1.0);
         let box_tol = 1e-12 * bound_scale;
 
-        for _pass in 0..ACTIVE_SET_MAX_PASSES {
+        for pass in 0..ACTIVE_SET_MAX_PASSES {
             for i in 0..ne {
                 fixed[i] = match self.active[i] {
                     -1 => step_bounds.lower[i],
@@ -1950,27 +1995,10 @@ impl<'a> Stage2Context<'a> {
                 }
             }
 
-            let mut violations = 0usize;
-            for i in 0..ne {
-                if self.active[i] != 0 {
-                    continue;
-                }
-                if step[i] < step_bounds.lower[i] - box_tol {
-                    self.active[i] = -1;
-                    violations += 1;
-                } else if step[i] > step_bounds.upper[i] + box_tol {
-                    self.active[i] = 1;
-                    violations += 1;
-                }
-            }
-            if violations > 0 {
-                continue;
-            }
-
-            // KKT release: ∇f_j = Λ_j Δ_j − J_jᵀ y for bound variables.
+            // Reduced gradient on the held variables, for the release test.
             let y = &sol[m + ne..];
+            let mut gradients = vec![0.0; ne];
             let mut gradient_scale = 0.0_f64;
-            let mut gradients: Vec<(usize, f64)> = Vec::new();
             for i in 0..ne {
                 if self.active[i] == 0 {
                     continue;
@@ -1979,28 +2007,54 @@ impl<'a> Stage2Context<'a> {
                 for nz in jacobian.col_ptrs[i] as usize..jacobian.col_ptrs[i + 1] as usize {
                     g -= jacobian.values[nz] * y[jacobian.row_indices[nz] as usize];
                 }
+                gradients[i] = g;
                 gradient_scale = gradient_scale.max(g.abs());
-                gradients.push((i, g));
             }
-            let y_scale = y.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-            let kkt_tol = 1e-10 * gradient_scale.max(y_scale).max(f64::MIN_POSITIVE);
-            let mut released = 0usize;
-            if releases < ACTIVE_SET_MAX_RELEASES {
-                for &(i, g) in &gradients {
-                    if (self.active[i] == -1 && g < -kkt_tol) || (self.active[i] == 1 && g > kkt_tol) {
-                        self.active[i] = 0;
-                        released += 1;
+            // Scale the release test by the size of the coupling terms over
+            // all columns; the held gradients alone can be pure round-off.
+            let mut coupling_scale = 0.0_f64;
+            for i in 0..ne {
+                let mut g = 0.0;
+                for nz in jacobian.col_ptrs[i] as usize..jacobian.col_ptrs[i + 1] as usize {
+                    g += jacobian.values[nz] * y[jacobian.row_indices[nz] as usize];
+                }
+                coupling_scale = coupling_scale.max(g.abs());
+            }
+            let kkt_tol = ACTIVE_SET_KKT_TOL * coupling_scale.max(gradient_scale).max(f64::MIN_POSITIVE);
+            let allow_release = pass < ACTIVE_SET_RELEASE_PASSES;
+
+            let mut changes = 0usize;
+            for i in 0..ne {
+                match self.active[i] {
+                    0 => {
+                        if step[i] < step_bounds.lower[i] - box_tol {
+                            self.active[i] = -1;
+                            changes += 1;
+                        } else if step[i] > step_bounds.upper[i] + box_tol {
+                            self.active[i] = 1;
+                            changes += 1;
+                        }
                     }
+                    -1 if allow_release && gradients[i] < -kkt_tol => {
+                        self.active[i] = 0;
+                        changes += 1;
+                    }
+                    1 if allow_release && gradients[i] > kkt_tol => {
+                        self.active[i] = 0;
+                        changes += 1;
+                    }
+                    _ => {}
                 }
             }
-            if released > 0 {
-                releases += 1;
-                continue;
+            // A handful of late toggles is round-off chatter on a warm start;
+            // clamping them is well within what the outer probe can resolve.
+            let negligible = pass >= 2 && changes <= (ne / 200).max(2);
+            if changes == 0 || negligible {
+                for i in 0..ne {
+                    step[i] = step[i].clamp(step_bounds.lower[i], step_bounds.upper[i]);
+                }
+                return Ok(step);
             }
-            for i in 0..ne {
-                step[i] = step[i].clamp(step_bounds.lower[i], step_bounds.upper[i]);
-            }
-            return Ok(step);
         }
         Err(TheseusError::Solver(format!(
             "active set did not settle within {ACTIVE_SET_MAX_PASSES} passes"
@@ -2036,6 +2090,9 @@ fn solve_geometric_outer(
     }
     let mut x = seed.to_vec();
     clip_to_box(&mut x, bounds);
+    if ctx.kind == Stage2Kind::ActiveSet {
+        ctx.seed_active_set(&x);
+    }
 
     let mut probe = probe_geometry(problem, system, &x, true)?;
     let mut best_x = x.clone();
@@ -2088,6 +2145,7 @@ fn solve_geometric_outer(
         let scale = ctx.lm_scale(jacobian, &probe.weight);
 
         let mut accepted = false;
+        let mut growth = 10.0;
         let mut failed_probes = 0usize;
         let mut total_probes = 0usize;
         let mut last_probe_error = None;
@@ -2144,7 +2202,9 @@ fn solve_geometric_outer(
                 length *= 0.5;
             }
             if ctx.lm > 0.0 {
-                ctx.lm *= 10.0;
+                // Nielsen-style growth: 10, then 100, then 1000 per rejection.
+                ctx.lm *= growth;
+                growth *= 10.0;
             }
         }
 
@@ -2155,7 +2215,10 @@ fn solve_geometric_outer(
                 InverseMetric::Force => {}
             }
             if ctx.lm > 0.0 {
-                ctx.lm = (ctx.lm / 10.0).max(1e-15);
+                // Never decay below the configured value: the frozen phase
+                // accepts easily and says nothing about what Gauss--Newton
+                // will need.
+                ctx.lm = (ctx.lm / 10.0).max(opts.lm_damping);
             }
         } else {
             if failed_probes > 0 && failed_probes == total_probes {
