@@ -1496,22 +1496,44 @@ pub fn solve_inverse_fdm(
         let stage1_error = ctx.probe_error(&seed);
         ctx.diagnostics.stage1_error = stage1_error;
         ctx.diagnostics.uniform_seed_error = f64::NAN;
+        // A suspicious Stage-1 seed is not discarded outright: when a frozen
+        // phase follows, both seeds take the frozen step and the lower
+        // measured error wins. Only without a frozen phase does the seed
+        // error alone decide.
+        let mut challenger: Option<Vec<f64>> = None;
         if opts.seed_guard_margin > 0.0 && opts.q_ref.is_empty() {
             let (uniform, uniform_error) = ctx.scaled_uniform_seed(&seed);
             ctx.diagnostics.uniform_seed_error = uniform_error;
-            let stage1_collapsed = !stage1_error.is_finite()
+            let suspicious = !stage1_error.is_finite()
                 || (uniform_error.is_finite()
                     && uniform_error * opts.seed_guard_margin < stage1_error);
-            if stage1_collapsed && uniform_error.is_finite() {
-                seed = uniform;
-                ctx.diagnostics.used_uniform_seed = true;
+            if suspicious && uniform_error.is_finite() {
+                if frozen_budget > 0 && stage1_error.is_finite() {
+                    challenger = Some(uniform);
+                } else {
+                    seed = uniform;
+                    ctx.diagnostics.used_uniform_seed = true;
+                }
             }
         }
 
         let mut result = None;
         let mut total_iterations = 0usize;
         if frozen_budget > 0 {
-            let frozen = solve_geometric_outer(&mut ctx, InverseMetric::Geometry, &seed, frozen_budget)?;
+            let mut frozen =
+                solve_geometric_outer(&mut ctx, InverseMetric::Geometry, &seed, frozen_budget)?;
+            if let Some(uniform) = challenger {
+                let alternative = solve_geometric_outer(
+                    &mut ctx,
+                    InverseMetric::Geometry,
+                    &uniform,
+                    frozen_budget,
+                )?;
+                if alternative.geometric_error < frozen.geometric_error {
+                    frozen = alternative;
+                    ctx.diagnostics.used_uniform_seed = true;
+                }
+            }
             total_iterations += frozen.iterations;
             seed = frozen.q.clone();
             result = Some(frozen);

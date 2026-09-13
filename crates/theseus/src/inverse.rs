@@ -196,8 +196,10 @@ pub struct InverseFdmOptions {
     /// accepted one. `0` restores plain step-halving backtracking.
     pub lm_damping: f64,
     /// Stage-1 collapse guard. After Stage 1, a scaled uniform sign seed is
-    /// scored on the same geometric error; when Stage 1 is worse by more than
-    /// this factor the uniform seed initialises Stage 2 instead. `0` disables.
+    /// scored on the same geometric error. When Stage 1 is worse by more than
+    /// this factor it is suspect: both seeds then take the frozen step and the
+    /// lower measured error continues (or, without a frozen phase, the uniform
+    /// seed is used directly). `0` disables.
     pub seed_guard_margin: f64,
     /// Scale positions by the target extent and loads by their magnitude
     /// before assembling, so that Stage 2 is solved in dimensionless form.

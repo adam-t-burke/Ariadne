@@ -607,6 +607,7 @@ pub fn oculus(side: usize, hole: usize) -> Net {
         .collect();
     let free: Vec<usize> = g.free.iter().cloned().filter(|&n| !in_hole(n)).collect();
     let ne = edges.len();
+    let extent = g.length();
     Net {
         name: format!("oculus{side}h{hole}"),
         edges,
@@ -615,7 +616,7 @@ pub fn oculus(side: usize, hole: usize) -> Net {
         fixed: g.fixed,
         plan: g.plan,
         q_true: assign_q(ne, 0.75, 0x5eed, 1.0),
-        extent: g.length(),
+        extent,
         tie_edges: Vec::new(),
     }
 }
@@ -654,9 +655,10 @@ pub fn crease_diag(n: usize) -> Net {
 /// Saddle (hypar) net anchored at the four corners only, with corner heights
 /// ±0.15·extent. Interior edges are tension cables (q>0); the four boundary
 /// chains are compression "edge arches" (q<0) that push outwards against the
-/// inward pull of the net. Loads are vertical; the compression magnitude is
-/// kept below the level at which D(q) becomes singular. Not normalised: the
-/// corner heights dominate the depth.
+/// inward pull of the net. Loads are vertical (0.05 per node); the compression
+/// magnitude sits well above the last value at which D(q) is singular, so the
+/// funicular is a saddle with mildly bulging edges. Not normalised: the corner
+/// heights dominate the depth.
 pub fn hypar_mixed(n: usize) -> Net {
     let mut g = grid(n, Anchoring::Corners);
     let l = g.length();
@@ -670,12 +672,15 @@ pub fn hypar_mixed(n: usize) -> Net {
         let (r, c) = (k / n, k % n);
         r == 0 || r == n - 1 || c == 0 || c == n - 1
     };
+    // Boundary compression magnitude. D(q) has its last zero crossing near
+    // 9× the interior scale; 24× gives an edge-arch bulge of ≈15% of the span.
+    let kb = 24.0;
     let q: Vec<f64> = g
         .edges
         .iter()
         .map(|&(a, b)| {
             if on_boundary(a) && on_boundary(b) {
-                -logu(&mut state, 1.5, 2.5)
+                -kb * logu(&mut state, 0.8, 1.25)
             } else {
                 logu(&mut state, 0.6, 1.6)
             }
@@ -683,7 +688,7 @@ pub fn hypar_mixed(n: usize) -> Net {
         .collect();
     let mut net = g.into_net(format!("hypar{n}m"), q);
     for l in &mut net.loads {
-        *l = 0.02;
+        *l = 0.05;
     }
     net
 }
@@ -783,7 +788,7 @@ pub fn cable_truss(n: usize) -> Net {
     let mut edges = Vec::new();
     let mut q = Vec::new();
     let mut tie_edges = Vec::new();
-    let mut state = 0x7ru55_u64;
+    let mut state = 0x7a55_u64;
     for i in 0..n {
         edges.push((top(i), top(i + 1))); // top chord: tension
         q.push(logu(&mut state, 3.0, 5.0));
