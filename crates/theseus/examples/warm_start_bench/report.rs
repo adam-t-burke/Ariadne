@@ -82,14 +82,35 @@ pub fn print_case(net: &Net, case: &str, rows: &[Row], l: f64) {
             Some(run) => {
                 let ev: Vec<String> = thresholds
                     .iter()
-                    .map(|&t| evals_to(run, best, t).map(|p| p.to_string()).unwrap_or_else(|| "-".into()))
+                    .map(|&t| {
+                        evals_to(run, best, t)
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "-".into())
+                    })
                     .collect();
                 let ms_to = evals_to(run, best, 1.05)
-                    .map(|p| format!("{:.1}", r.warm_ms + run.ms * p as f64 / run.trace.len().max(1) as f64))
+                    .map(|p| {
+                        format!(
+                            "{:.1}",
+                            r.warm_ms + run.ms * p as f64 / run.trace.len().max(1) as f64
+                        )
+                    })
                     .unwrap_or_else(|| "-".into());
-                (run.iters.to_string(), format!("{:.0}", run.ms), run.final_err, ev, ms_to)
+                (
+                    run.iters.to_string(),
+                    format!("{:.0}", run.ms),
+                    run.final_err,
+                    ev,
+                    ms_to,
+                )
             }
-            None => ("-".into(), "-".into(), f64::NAN, vec!["-".into(); 3], "-".into()),
+            None => (
+                "-".into(),
+                "-".into(),
+                f64::NAN,
+                vec!["-".into(); 3],
+                "-".into(),
+            ),
         };
         println!(
             "{:<18}{:>9.1}{:>11}{:>11}{:>6}{:>7}{:>9}{:>11}{:>9}{:>10}{:>11}{:>10}  {}",

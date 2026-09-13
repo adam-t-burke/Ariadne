@@ -198,8 +198,8 @@ pub struct InverseFdmOptions {
     /// Stage-1 collapse guard. After Stage 1, a scaled uniform sign seed is
     /// scored on the same geometric error. When Stage 1 is worse by more than
     /// this factor it is suspect: both seeds then take the frozen step and the
-    /// lower measured error continues (or, without a frozen phase, the uniform
-    /// seed is used directly). `0` disables.
+    /// lower measured error continues. Beyond the square of the margin (or
+    /// without a frozen phase) the uniform seed is used directly. `0` disables.
     pub seed_guard_margin: f64,
     /// Scale positions by the target extent and loads by their magnitude
     /// before assembling, so that Stage 2 is solved in dimensionless form.

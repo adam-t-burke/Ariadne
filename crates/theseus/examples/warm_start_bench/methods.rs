@@ -81,22 +81,12 @@ impl Method {
     pub fn from_name(name: &str) -> Option<Method> {
         Method::ALL.iter().copied().find(|m| m.name() == name)
     }
-
-    /// True for methods that go through `solve_inverse_fdm`.
-    pub fn is_library(self) -> bool {
-        !matches!(
-            self,
-            Method::Uniform | Method::GramDense | Method::LengthRatio
-        )
-    }
 }
 
 pub struct WarmOut {
     pub q: Vec<f64>,
     pub ms: f64,
     pub note: String,
-    /// Diagnostics of the library solve, when there was one.
-    pub result: Option<InverseFdmResult>,
 }
 
 /// Common `solve_inverse_fdm` options for the boxed library methods.
@@ -125,11 +115,17 @@ pub fn base_options(lo: &[f64], hi: &[f64]) -> InverseFdmOptions {
         lm_damping: DEFAULT_LM_DAMPING,
         seed_guard_margin: DEFAULT_SEED_GUARD_MARGIN,
         nondimensionalize: true,
+        reaction_weight: 1.0,
     }
 }
 
 /// Library options for a method, or `None` for methods that do not call the library.
-pub fn library_options(method: Method, lo: &[f64], hi: &[f64], gram_shift: f64) -> Option<InverseFdmOptions> {
+pub fn library_options(
+    method: Method,
+    lo: &[f64],
+    hi: &[f64],
+    gram_shift: f64,
+) -> Option<InverseFdmOptions> {
     let base = base_options(lo, hi);
     Some(match method {
         Method::S1 => base,
@@ -174,9 +170,8 @@ pub fn library_options(method: Method, lo: &[f64], hi: &[f64], gram_shift: f64) 
     })
 }
 
-/// Shorten a library error to a single readable line.
-pub fn short_error(e: &dyn std::fmt::Display) -> String {
-    let s = e.to_string();
+/// Shorten an error message to a single table-friendly line.
+pub fn short_error(s: &str) -> String {
     let first = s.split(';').next().unwrap_or("").trim().to_string();
     if first.chars().count() > 90 {
         let cut: String = first.chars().take(87).collect();
@@ -186,37 +181,49 @@ pub fn short_error(e: &dyn std::fmt::Display) -> String {
     }
 }
 
-/// Run `solve_inverse_fdm`, catching both `Err` and panics.
-pub fn run_library(problem: &Problem, target: &Array2<f64>, opts: InverseFdmOptions) -> Result<(InverseFdmResult, f64), String> {
+/// Run `solve_inverse_fdm`, catching both `Err` and panics. The error text is
+/// returned in full; use [`short_error`] for table notes.
+pub fn run_library(
+    problem: &Problem,
+    target: &Array2<f64>,
+    opts: InverseFdmOptions,
+) -> Result<(InverseFdmResult, f64), String> {
     let started = Instant::now();
-    let out = catch_unwind(AssertUnwindSafe(|| solve_inverse_fdm(problem, target, opts)));
+    let out = catch_unwind(AssertUnwindSafe(|| {
+        solve_inverse_fdm(problem, target, opts)
+    }));
     let ms = started.elapsed().as_secs_f64() * 1e3;
     match out {
         Ok(Ok(r)) => Ok((r, ms)),
-        Ok(Err(e)) => Err(format!("ERR {}", short_error(&e))),
+        Ok(Err(e)) => Err(format!("ERR {e}")),
         Err(p) => Err(format!("PANIC {}", panic_message(&p))),
     }
 }
 
 pub fn panic_message(p: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = p.downcast_ref::<&str>() {
-        short_error(s)
+        s.to_string()
     } else if let Some(s) = p.downcast_ref::<String>() {
-        short_error(s)
+        s.clone()
     } else {
         "unknown panic".into()
     }
 }
 
-/// Compact rendering of `InverseDiagnostics` for the note column.
-pub fn diag_note(r: &InverseFdmResult) -> String {
+/// Compact rendering of `InverseDiagnostics` for the note column. Stage-2
+/// fields are only shown for geometric solves (`stage2 = true`).
+pub fn diag_note(r: &InverseFdmResult, stage2: bool) -> String {
     let d = &r.diagnostics;
     let mut s = format!(
-        "it={}{} s1e={:.2e}",
+        "it={}{} lib_err={:.2e}",
         r.iterations,
         if r.converged { "" } else { "!" },
-        d.stage1_error
+        r.geometric_error
     );
+    if !stage2 {
+        return s;
+    }
+    s.push_str(&format!(" s1e={:.2e}", d.stage1_error));
     if d.uniform_seed_error.is_finite() {
         s.push_str(&format!(" u={:.2e}", d.uniform_seed_error));
     }
@@ -227,12 +234,18 @@ pub fn diag_note(r: &InverseFdmResult) -> String {
         " fr{} gn{} fac={} fb={}",
         d.frozen_steps, d.newton_steps, d.stage2_factorizations, d.clarabel_fallbacks
     ));
+    if d.reaction_residual != 0.0 {
+        s.push_str(&format!(" R*={:.2e}", d.reaction_residual));
+    }
     s
 }
 
 /// Force-density-form equilibrium matrix `E` at the target and the mean
 /// squared column norm used to scale the Gram shift.
-pub fn equilibrium_e(problem: &Problem, target: &Array2<f64>) -> Result<(SparseColMatOwned, Vec<f64>, f64), String> {
+pub fn equilibrium_e(
+    problem: &Problem,
+    target: &Array2<f64>,
+) -> Result<(SparseColMatOwned, Vec<f64>, f64), String> {
     let sys = EquilibriumSystem::assemble(
         problem,
         target,
@@ -241,21 +254,38 @@ pub fn equilibrium_e(problem: &Problem, target: &Array2<f64>) -> Result<(SparseC
         false,
         false,
     )
-    .map_err(|e| format!("ERR {}", short_error(&e)))?;
+    .map_err(|e| format!("ERR {e}"))?;
     let ne = sys.a.ncols.max(1) as f64;
     let scale = sys.a.values.iter().map(|v| v * v).sum::<f64>() / ne;
     Ok((sys.a, sys.p, scale))
 }
 
 /// Dispatch a warm-start method. `lo`/`hi` is the L-BFGS-B box (also the
-/// inverse-solve box for the boxed methods).
-pub fn run_method(method: Method, net: &Net, problem: &Problem, target: &Array2<f64>, lo: &[f64], hi: &[f64]) -> Result<WarmOut, String> {
+/// inverse-solve box for the boxed methods). Errors are shortened to one line.
+pub fn run_method(
+    method: Method,
+    net: &Net,
+    problem: &Problem,
+    target: &Array2<f64>,
+    lo: &[f64],
+    hi: &[f64],
+) -> Result<WarmOut, String> {
+    run_method_inner(method, net, problem, target, lo, hi).map_err(|e| short_error(&e))
+}
+
+fn run_method_inner(
+    method: Method,
+    net: &Net,
+    problem: &Problem,
+    target: &Array2<f64>,
+    lo: &[f64],
+    hi: &[f64],
+) -> Result<WarmOut, String> {
     match method {
         Method::Uniform => Ok(WarmOut {
             q: net.sign_seed(),
             ms: 0.0,
             note: String::new(),
-            result: None,
         }),
         Method::GramDense => gram_dense(problem, target),
         Method::LengthRatio => length_ratio(net, problem, target, lo, hi),
@@ -266,20 +296,19 @@ pub fn run_method(method: Method, net: &Net, problem: &Problem, target: &Array2<
             let opts = library_options(method, lo, hi, shift).unwrap();
             let (r, _) = run_library(problem, target, opts)?;
             Ok(WarmOut {
-                note: format!("λ={shift:.1e} {}", diag_note(&r)),
-                q: r.q.clone(),
+                note: format!("λ={shift:.1e} {}", diag_note(&r, false)),
+                q: r.q,
                 ms: started.elapsed().as_secs_f64() * 1e3,
-                result: Some(r),
             })
         }
         _ => {
             let opts = library_options(method, lo, hi, 0.0).unwrap();
+            let stage2 = opts.metric.is_geometric();
             let (r, ms) = run_library(problem, target, opts)?;
             Ok(WarmOut {
-                note: diag_note(&r),
-                q: r.q.clone(),
+                note: diag_note(&r, stage2),
+                q: r.q,
                 ms,
-                result: Some(r),
             })
         }
     }
@@ -342,7 +371,11 @@ fn dense_cholesky_in_place(g: &mut [f64], n: usize) -> Result<(), String> {
         for j in 0..=i {
             let (head, tail) = g.split_at_mut(i * n);
             let row_i = &mut tail[..n];
-            let row_j: &[f64] = if j == i { &row_i[..j] } else { &head[j * n..j * n + j] };
+            let row_j: &[f64] = if j == i {
+                &row_i[..j]
+            } else {
+                &head[j * n..j * n + j]
+            };
             let dot: f64 = row_i[..j].iter().zip(row_j).map(|(a, b)| a * b).sum();
             let s = row_i[j] - dot;
             if j == i {
@@ -392,7 +425,6 @@ fn gram_dense(problem: &Problem, target: &Array2<f64>) -> Result<WarmOut, String
             dg.assemble_ms,
             dg.factor_ms
         ),
-        result: None,
     })
 }
 
@@ -413,7 +445,13 @@ pub fn human_bytes(b: usize) -> String {
 
 /// `q_i ← q_i · ℓ_i(q)/ℓ_i*` from the clipped uniform seed, clipping to the
 /// box after every sweep and stopping when the error stops improving.
-fn length_ratio(net: &Net, problem: &Problem, target: &Array2<f64>, lo: &[f64], hi: &[f64]) -> Result<WarmOut, String> {
+fn length_ratio(
+    net: &Net,
+    problem: &Problem,
+    target: &Array2<f64>,
+    lo: &[f64],
+    hi: &[f64],
+) -> Result<WarmOut, String> {
     let started = Instant::now();
     let target_len = net.edge_lengths(target);
     let (mut q, _, _) = clip(&net.sign_seed(), lo, hi);
@@ -450,7 +488,6 @@ fn length_ratio(net: &Net, problem: &Problem, target: &Array2<f64>, lo: &[f64], 
         q: best,
         ms: started.elapsed().as_secs_f64() * 1e3,
         note: format!("sweeps={sweeps} best@{best_k}"),
-        result: None,
     })
 }
 
@@ -465,11 +502,17 @@ pub fn clip(q: &[f64], lo: &[f64], hi: &[f64]) -> (Vec<f64>, usize, usize) {
         .zip(lo)
         .zip(hi)
         .map(|((&v, &a), &b)| {
-            let c = if v.is_finite() { v.clamp(a, b) } else { 0.5 * (a + b) };
+            let c = if v.is_finite() {
+                v.clamp(a, b)
+            } else {
+                0.5 * (a + b)
+            };
             if c != v {
                 clipped += 1;
             }
-            if (c - a).abs() <= 1e-9 * a.abs().max(1e-12) || (c - b).abs() <= 1e-9 * b.abs().max(1e-12) {
+            if (c - a).abs() <= 1e-9 * a.abs().max(1e-12)
+                || (c - b).abs() <= 1e-9 * b.abs().max(1e-12)
+            {
                 active += 1;
             }
             c
@@ -485,7 +528,6 @@ pub struct Run {
     pub iters: usize,
     pub ms: f64,
     pub final_err: f64,
-    pub reason: String,
 }
 
 fn target_objective(net: &Net, target: &Array2<f64>) -> Box<dyn ObjectiveTrait> {
@@ -498,7 +540,15 @@ fn target_objective(net: &Net, target: &Array2<f64>) -> Box<dyn ObjectiveTrait> 
 }
 
 /// Box-constrained L-BFGS-B on the SSE target objective from `q0`.
-pub fn lbfgsb(net: &Net, fixed: &Array2<f64>, target: &Array2<f64>, q0: &[f64], lo: &[f64], hi: &[f64], max_iters: usize) -> Result<Run, String> {
+pub fn lbfgsb(
+    net: &Net,
+    fixed: &Array2<f64>,
+    target: &Array2<f64>,
+    q0: &[f64],
+    lo: &[f64],
+    hi: &[f64],
+    max_iters: usize,
+) -> Result<Run, String> {
     let problem = net.problem(
         fixed,
         vec![target_objective(net, target)],
@@ -521,8 +571,8 @@ pub fn lbfgsb(net: &Net, fixed: &Array2<f64>, target: &Array2<f64>, q0: &[f64], 
     let ms = started.elapsed().as_secs_f64() * 1e3;
     let result = match out {
         Ok(Ok(r)) => r,
-        Ok(Err(e)) => return Err(format!("lbfgsb ERR {}", short_error(&e))),
-        Err(p) => return Err(format!("lbfgsb PANIC {}", panic_message(&p))),
+        Ok(Err(e)) => return Err(short_error(&format!("lbfgsb ERR {e}"))),
+        Err(p) => return Err(short_error(&format!("lbfgsb PANIC {}", panic_message(&p)))),
     };
     let final_err = safe_err(&problem, target, &result.q);
     Ok(Run {
@@ -530,7 +580,6 @@ pub fn lbfgsb(net: &Net, fixed: &Array2<f64>, target: &Array2<f64>, q0: &[f64], 
         iters: result.iterations,
         ms,
         final_err,
-        reason: result.termination_reason,
     })
 }
 
@@ -543,7 +592,14 @@ pub fn time_forward(problem: &Problem, q: &[f64]) -> f64 {
 }
 
 /// Wall time of one L-BFGS-B evaluation (loss + adjoint gradient).
-pub fn time_eval(net: &Net, fixed: &Array2<f64>, target: &Array2<f64>, q: &[f64], lo: &[f64], hi: &[f64]) -> f64 {
+pub fn time_eval(
+    net: &Net,
+    fixed: &Array2<f64>,
+    target: &Array2<f64>,
+    q: &[f64],
+    lo: &[f64],
+    hi: &[f64],
+) -> f64 {
     let problem = net.problem(
         fixed,
         vec![target_objective(net, target)],
@@ -557,6 +613,7 @@ pub fn time_eval(net: &Net, fixed: &Array2<f64>, target: &Array2<f64>, q: &[f64]
     let mut cache = FdmCache::new(&problem).expect("cache");
     let mut grad = vec![0.0; q.len()];
     let started = Instant::now();
-    theseus::gradients::value_and_gradient(&mut cache, &problem, q, &mut grad, lo, hi, &[], &[]).expect("eval");
+    theseus::gradients::value_and_gradient(&mut cache, &problem, q, &mut grad, lo, hi, &[], &[])
+        .expect("eval");
     started.elapsed().as_secs_f64() * 1e3
 }

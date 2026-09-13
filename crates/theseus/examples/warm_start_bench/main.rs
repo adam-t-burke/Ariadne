@@ -11,7 +11,8 @@
 //!
 //! Subcommands
 //! - `nets`               sanity check of every generator (funicular finite,
-//!                        sign counts, depth/extent, max support reaction).
+//!                        sign counts, depth/extent, max support reaction);
+//!                        `BENCH_VERBOSE=1` adds coordinate ranges per net.
 //! - `suite [max_iters]`  all nets × {jit2%d, bump10%d} × {loose, snug} × all
 //!                        methods. `BENCH_NETS=a,b` and `BENCH_METHODS=x,y`
 //!                        restrict the run.
@@ -36,7 +37,7 @@ use methods::{
 use ndarray::Array2;
 use nets::{
     all_nets, cable_truss, net_reaction, quad, safe_err, suite_nets, support_reactions, tied_arch,
-    try_forward, Net,
+    tied_arch_straight, try_forward, Net,
 };
 use report::{fmt_e, print_case, Row};
 use std::time::Instant;
@@ -74,16 +75,22 @@ fn selected_methods(default: &[Method]) -> Vec<Method> {
 
 /// Nets to run: `BENCH_NETS` if set, else `default` (or all when `None`).
 fn selected_nets(nets: Vec<Net>, default: Option<&[&str]>) -> Vec<Net> {
-    let filter: Option<Vec<String>> =
-        env_list("BENCH_NETS").or_else(|| default.map(|d| d.iter().map(|s| s.to_string()).collect()));
+    let filter: Option<Vec<String>> = env_list("BENCH_NETS")
+        .or_else(|| default.map(|d| d.iter().map(|s| s.to_string()).collect()));
     match filter {
-        Some(names) => nets.into_iter().filter(|n| names.iter().any(|f| *f == n.name)).collect(),
+        Some(names) => nets
+            .into_iter()
+            .filter(|n| names.iter().any(|f| *f == n.name))
+            .collect(),
         None => nets,
     }
 }
 
 fn targets(net: &Net) -> Vec<(&'static str, Array2<f64>)> {
-    vec![("jit2%d", net.target(0.02, 0.0)), ("bump10%d", net.target(0.0, 0.10))]
+    vec![
+        ("jit2%d", net.target(0.02, 0.0)),
+        ("bump10%d", net.target(0.0, 0.10)),
+    ]
 }
 
 fn boxes(net: &Net) -> Vec<(&'static str, Vec<f64>, Vec<f64>)> {
@@ -93,7 +100,14 @@ fn boxes(net: &Net) -> Vec<(&'static str, Vec<f64>, Vec<f64>)> {
 }
 
 /// Warm start → clip → score → L-BFGS-B for every method; one row each.
-fn run_case(net: &Net, target: &Array2<f64>, lo: &[f64], hi: &[f64], methods: &[Method], max_iters: usize) -> Vec<Row> {
+fn run_case(
+    net: &Net,
+    target: &Array2<f64>,
+    lo: &[f64],
+    hi: &[f64],
+    methods: &[Method],
+    max_iters: usize,
+) -> Vec<Row> {
     let fixed = net.fixed_positions();
     let problem = net.problem(&fixed, Vec::new(), lo, hi, SolverOptions::default());
     methods
@@ -143,12 +157,17 @@ fn join_note(a: &str, b: &str) -> String {
 /// nodes (e.g. ridge vs hoop nodes of the cable dome), plus the anchor box.
 fn describe_shape(net: &Net, x: &Array2<f64>) {
     let range = |rows: &[usize], d: usize| -> (f64, f64) {
-        rows.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &i| {
-            (lo.min(x[[i, d]]), hi.max(x[[i, d]]))
-        })
+        rows.iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &i| {
+                (lo.min(x[[i, d]]), hi.max(x[[i, d]]))
+            })
     };
-    let loaded: Vec<usize> = (0..net.free.len()).filter(|&i| net.loads[i] != 0.0).collect();
-    let unloaded: Vec<usize> = (0..net.free.len()).filter(|&i| net.loads[i] == 0.0).collect();
+    let loaded: Vec<usize> = (0..net.free.len())
+        .filter(|&i| net.loads[i] != 0.0)
+        .collect();
+    let unloaded: Vec<usize> = (0..net.free.len())
+        .filter(|&i| net.loads[i] == 0.0)
+        .collect();
     let fixed = net.fixed_positions();
     let frange = |d: usize| {
         let c = fixed.column(d);
@@ -177,10 +196,19 @@ fn describe_shape(net: &Net, x: &Array2<f64>) {
         );
     }
     let lengths = net.edge_lengths(x);
+    let (shortest, _) =
+        lengths.iter().enumerate().fold(
+            (0, f64::INFINITY),
+            |acc, (e, &l)| if l < acc.1 { (e, l) } else { acc },
+        );
+    let (a, b) = net.edges[shortest];
     println!(
-        "    edge length [{:.3}, {:.3}]  |q| [{:.3}, {:.3}]  load [{:.4}, {:.4}]",
+        "    edge length [{:.3}, {:.3}] (shortest: edge {shortest} = {a}-{b}, plan {:?} {:?}, q {:.3})  |q| [{:.3}, {:.3}]  load [{:.4}, {:.4}]",
         lengths.iter().cloned().fold(f64::INFINITY, f64::min),
         lengths.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+        net.plan[a],
+        net.plan[b],
+        net.q_true[shortest],
         net.q_true.iter().map(|q| q.abs()).fold(f64::INFINITY, f64::min),
         net.q_true.iter().map(|q| q.abs()).fold(f64::NEG_INFINITY, f64::max),
         net.loads.iter().cloned().fold(f64::INFINITY, f64::min),
@@ -189,12 +217,14 @@ fn describe_shape(net: &Net, x: &Array2<f64>) {
 }
 
 fn cmd_nets() {
-    let verbose = std::env::var("BENCH_VERBOSE").map(|v| v != "0").unwrap_or(false);
+    let verbose = std::env::var("BENCH_VERBOSE")
+        .map(|v| v != "0")
+        .unwrap_or(false);
     println!(
         "{:<18}{:>7}{:>7}{:>7}{:>6}{:>6}{:>10}{:>12}{:>12}  {}",
         "net", "ne", "nfree", "nfix", "q>0", "q<0", "depth/L", "|R|max", "|R|net", "status"
     );
-    for net in all_nets() {
+    for net in selected_nets(all_nets(), None) {
         let pos = net.q_true.iter().filter(|&&q| q > 0.0).count();
         let neg = net.q_true.len() - pos;
         match net.try_funicular() {
@@ -251,7 +281,8 @@ fn plan_span(x: &Array2<f64>) -> f64 {
     (0..2)
         .map(|d| {
             let c = x.column(d);
-            c.iter().cloned().fold(f64::NEG_INFINITY, f64::max) - c.iter().cloned().fold(f64::INFINITY, f64::min)
+            c.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                - c.iter().cloned().fold(f64::INFINITY, f64::min)
         })
         .fold(0.0, f64::max)
 }
@@ -267,8 +298,15 @@ fn cmd_suite(max_iters: usize, default_nets: Option<&[&str]>, default_methods: &
     }
     println!(
         "# suite: max_iters={max_iters} methods=[{}] nets=[{}]",
-        methods.iter().map(|m| m.name()).collect::<Vec<_>>().join(","),
-        nets.iter().map(|n| n.name.as_str()).collect::<Vec<_>>().join(",")
+        methods
+            .iter()
+            .map(|m| m.name())
+            .collect::<Vec<_>>()
+            .join(","),
+        nets.iter()
+            .map(|n| n.name.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
     );
     for net in &nets {
         for (case, target) in targets(net) {
@@ -302,9 +340,23 @@ fn cmd_scale() {
     let methods = selected_methods(&Method::ALL);
     println!(
         "{:>5}{:>7}{:>7}  {:<18}{:>10}{:>11}{:>6}{:>7}{:>9}{:>11}  {}",
-        "side", "ne", "nfree", "method", "warm_ms", "err_clip/L", "clip", "lb_it", "lb_ms", "final/L", "note"
+        "side",
+        "ne",
+        "nfree",
+        "method",
+        "warm_ms",
+        "err_clip/L",
+        "clip",
+        "lb_it",
+        "lb_ms",
+        "final/L",
+        "note"
     );
-    for side in [23usize, 46, 91, 181] {
+    let sides: Vec<usize> = std::env::var("BENCH_SIDES")
+        .ok()
+        .map(|v| v.split(',').filter_map(|s| s.trim().parse().ok()).collect())
+        .unwrap_or_else(|| vec![23, 46, 91, 181]);
+    for side in sides {
         let size_started = Instant::now();
         let net = quad(side, true, 1.0).normalized(0.25);
         let ne = net.edges.len();
@@ -325,26 +377,54 @@ fn cmd_scale() {
         );
         for &m in &methods {
             if size_started.elapsed().as_secs_f64() > SCALE_TIME_BUDGET_S {
-                println!("{prefix}{:<18}  skipped (size exceeded {SCALE_TIME_BUDGET_S:.0}s budget)", m.name());
+                println!(
+                    "{prefix}{:<18}  skipped (size exceeded {SCALE_TIME_BUDGET_S:.0}s budget)",
+                    m.name()
+                );
                 continue;
             }
             let w = match run_method(m, &net, &problem, &target, &lo, &hi) {
                 Ok(w) => w,
                 Err(e) => {
-                    println!("{prefix}{:<18}{:>10}{:>11}{:>6}{:>7}{:>9}{:>11}  {e}", m.name(), "-", "-", "-", "-", "-", "-");
+                    println!(
+                        "{prefix}{:<18}{:>10}{:>11}{:>6}{:>7}{:>9}{:>11}  {e}",
+                        m.name(),
+                        "-",
+                        "-",
+                        "-",
+                        "-",
+                        "-",
+                        "-"
+                    );
                     continue;
                 }
             };
             let (q, n_clipped, _) = clip(&w.q, &lo, &hi);
             let err_clip = safe_err(&problem, &target, &q);
-            let (lb_it, lb_ms, final_err, note) = if ne > SCALE_LBFGSB_EDGE_CAP || !err_clip.is_finite() {
-                ("-".to_string(), "-".to_string(), f64::NAN, join_note(&w.note, "lbfgsb skipped"))
-            } else {
-                match lbfgsb(&net, &fixed, &target, &q, &lo, &hi, SCALE_LBFGSB_ITERS) {
-                    Ok(run) => (run.iters.to_string(), format!("{:.0}", run.ms), run.final_err, w.note.clone()),
-                    Err(e) => ("-".to_string(), "-".to_string(), f64::NAN, join_note(&w.note, &e)),
-                }
-            };
+            let (lb_it, lb_ms, final_err, note) =
+                if ne > SCALE_LBFGSB_EDGE_CAP || !err_clip.is_finite() {
+                    (
+                        "-".to_string(),
+                        "-".to_string(),
+                        f64::NAN,
+                        join_note(&w.note, "lbfgsb skipped"),
+                    )
+                } else {
+                    match lbfgsb(&net, &fixed, &target, &q, &lo, &hi, SCALE_LBFGSB_ITERS) {
+                        Ok(run) => (
+                            run.iters.to_string(),
+                            format!("{:.0}", run.ms),
+                            run.final_err,
+                            w.note.clone(),
+                        ),
+                        Err(e) => (
+                            "-".to_string(),
+                            "-".to_string(),
+                            f64::NAN,
+                            join_note(&w.note, &e),
+                        ),
+                    }
+                };
             println!(
                 "{prefix}{:<18}{:>10.1}{:>11}{:>6}{:>7}{:>9}{:>11}  {note}",
                 m.name(),
@@ -378,7 +458,13 @@ fn cmd_dense() {
         let ne = net.edges.len();
         let target = net.target(0.02, 0.0);
         let (lo, hi) = net.box_from_true(1.0, 1.0);
-        let problem = net.problem(&net.fixed_positions(), Vec::new(), &lo, &hi, SolverOptions::default());
+        let problem = net.problem(
+            &net.fixed_positions(),
+            Vec::new(),
+            &lo,
+            &hi,
+            SolverOptions::default(),
+        );
         let sparse = match run_method(Method::GramSparse, &net, &problem, &target, &lo, &hi) {
             Ok(w) => w,
             Err(e) => {
@@ -387,7 +473,10 @@ fn cmd_dense() {
             }
         };
         if ne > DENSE_EDGE_CAP {
-            println!("{side:>5}{ne:>7}{:>10}{:>12}{:>12.1}  skipped (ne > cap {DENSE_EDGE_CAP})", "-", "-", sparse.ms);
+            println!(
+                "{side:>5}{ne:>7}{:>10}{:>12}{:>12.1}  skipped (ne > cap {DENSE_EDGE_CAP})",
+                "-", "-", sparse.ms
+            );
             continue;
         }
         let (e, p, scale) = match equilibrium_e(&problem, &target) {
@@ -417,7 +506,13 @@ fn cmd_dense() {
             .map(|(a, b)| (a - b).powi(2))
             .sum::<f64>()
             .sqrt()
-            / sparse.q.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-300);
+            / sparse
+                .q
+                .iter()
+                .map(|v| v * v)
+                .sum::<f64>()
+                .sqrt()
+                .max(1e-300);
         println!(
             "{side:>5}{ne:>7}{:>10}{:>12.1}{:>12.1}{:>9.1}{:>9}{:>12.2e}",
             human_bytes(dense.bytes),
@@ -463,18 +558,38 @@ fn print_reactions(net: &Net, q: &[f64], x: &Array2<f64>) {
 }
 
 fn cmd_reactions() {
-    for net in [tied_arch(16).normalized(0.25), cable_truss(16).normalized(0.25)] {
+    for net in [
+        tied_arch_straight(16),
+        tied_arch(16).normalized(0.25),
+        cable_truss(16).normalized(0.25),
+    ] {
         let (lo, hi) = net.box_from_true(100.0, 100.0);
         let fixed = net.fixed_positions();
         let problem = net.problem(&fixed, Vec::new(), &lo, &hi, SolverOptions::default());
-        println!("\n##### {} (ne={}, nfree={}, span along x)", net.name, net.edges.len(), net.free.len());
+        println!(
+            "\n##### {} (ne={}, nfree={}, span along x)",
+            net.name,
+            net.edges.len(),
+            net.free.len()
+        );
         println!("  reference: q_true");
         print_reactions(&net, &net.q_true, &net.funicular());
-        for (case, target) in [("jit2%d", net.target(0.02, 0.0)), ("exact", net.funicular())] {
-            for (label, rx, rz) in [("rx free", false, false), ("rx=0", true, false), ("rz=0", false, true)] {
+        for (case, target) in [
+            ("jit2%d", net.target(0.02, 0.0)),
+            ("exact", net.funicular()),
+        ] {
+            for (label, rx, rz, weight, outer) in [
+                ("rx free", false, false, 1.0, 2),
+                ("rx=0", true, false, 1.0, 2),
+                ("rx=0, 6 GN steps", true, false, 1.0, 6),
+                ("rx=0, weight 10", true, false, 10.0, 2),
+                ("rz=0", false, true, 1.0, 2),
+            ] {
                 let mut opts = library_options(Method::Pipeline, &lo, &hi, 0.0).unwrap();
                 opts.enforce_zero_rx = rx;
                 opts.enforce_zero_rz = rz;
+                opts.reaction_weight = weight;
+                opts.max_outer = outer;
                 println!("  --- target {case}, pipeline, {label} ---");
                 match run_library(&problem, &target, opts) {
                     Ok((r, ms)) => {
@@ -484,7 +599,7 @@ fn cmd_reactions() {
                             ms,
                             fmt_e(safe_err(&problem, &target, &q) / net.extent),
                             fmt_e(r.geometric_error / net.extent),
-                            diag_note(&r)
+                            diag_note(&r, true)
                         );
                         match try_forward(&problem, &q) {
                             Some(x) => print_reactions(&net, &q, &x),
@@ -501,8 +616,10 @@ fn cmd_reactions() {
 // ───────────────────────── main ─────────────────────────
 
 fn usage() {
-    eprintln!("usage: warm_start_bench <nets|suite [max_iters]|alt [max_iters]|scale|dense|reactions>");
-    eprintln!("  env: BENCH_NETS=name1,name2  BENCH_METHODS=uniform,s1,...");
+    eprintln!(
+        "usage: warm_start_bench <nets|suite [max_iters]|alt [max_iters]|scale|dense|reactions>"
+    );
+    eprintln!("  env: BENCH_NETS=name1,name2  BENCH_METHODS=uniform,s1,...  BENCH_SIDES=23,46");
 }
 
 fn main() {
@@ -510,7 +627,11 @@ fn main() {
         eprintln!("[caught panic] {}", info);
     }));
     let args: Vec<String> = std::env::args().collect();
-    let max_iters = |i: usize| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_MAX_ITERS);
+    let max_iters = |i: usize| {
+        args.get(i)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_MAX_ITERS)
+    };
     match args.get(1).map(String::as_str) {
         Some("nets") => cmd_nets(),
         Some("suite") => cmd_suite(max_iters(2), None, &Method::ALL),

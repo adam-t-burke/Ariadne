@@ -1553,11 +1553,14 @@ pub fn solve_inverse_fdm(
         if opts.seed_guard_margin > 0.0 && opts.q_ref.is_empty() {
             let (uniform, uniform_error) = ctx.scaled_uniform_seed(&seed);
             ctx.diagnostics.uniform_seed_error = uniform_error;
+            let ratio = stage1_error / uniform_error;
             let suspicious = !stage1_error.is_finite()
-                || (uniform_error.is_finite()
-                    && uniform_error * opts.seed_guard_margin < stage1_error);
+                || (uniform_error.is_finite() && ratio > opts.seed_guard_margin);
+            // Beyond the square of the margin Stage 1 has clearly collapsed
+            // and the race is not worth its frozen solve.
+            let clear_cut = !ratio.is_finite() || ratio > opts.seed_guard_margin.powi(2);
             if suspicious && uniform_error.is_finite() {
-                if frozen_budget > 0 && stage1_error.is_finite() {
+                if frozen_budget > 0 && !clear_cut {
                     challenger = Some(uniform);
                 } else {
                     seed = uniform;

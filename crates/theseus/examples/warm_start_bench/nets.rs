@@ -76,12 +76,6 @@ pub fn try_forward(problem: &Problem, q: &[f64]) -> Option<Array2<f64>> {
     }
 }
 
-/// `‖x(q) − x*‖₂` over the free nodes. Panics on a failed forward solve.
-pub fn geom_err(problem: &Problem, target: &Array2<f64>, q: &[f64]) -> f64 {
-    let x = forward(problem, q);
-    (x - target).iter().map(|v| v * v).sum::<f64>().sqrt()
-}
-
 /// Geometric error, NaN when the forward solve fails (singular D for
 /// out-of-box q) or panics.
 pub fn safe_err(problem: &Problem, target: &Array2<f64>, q: &[f64]) -> f64 {
@@ -320,7 +314,11 @@ impl Net {
 
 pub fn depth_of(x: &Array2<f64>) -> f64 {
     let zmin = x.column(2).iter().cloned().fold(f64::INFINITY, f64::min);
-    let zmax = x.column(2).iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let zmax = x
+        .column(2)
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
     zmax - zmin
 }
 
@@ -644,7 +642,8 @@ pub fn crease_diag(n: usize) -> Net {
     for (e, &(a, b)) in g.edges.iter().enumerate() {
         let (ra, ca) = (a / n, a % n);
         let (rb, cb) = (b / n, b % n);
-        let on_stair = (ra == ca && rb == ra && cb == ca + 1) || (cb == rb && ca == cb && rb == ra + 1);
+        let on_stair =
+            (ra == ca && rb == ra && cb == ca + 1) || (cb == rb && ca == cb && rb == ra + 1);
         if on_stair {
             q[e] *= 8.0;
         }
@@ -700,46 +699,87 @@ pub fn hypar_mixed(n: usize) -> Net {
 /// lower node to the next-outer upper node, struts (compression, q<0) join the
 /// upper and lower node of a ring, and tension hoops link the lower nodes; the
 /// innermost upper nodes form a central tension ring. Loads act downward on
-/// the upper nodes only; the struts make D(q) indefinite so the ridge rises
-/// above the ring while the hoops hang below it. No triangulation between spokes.
+/// the upper nodes only. No triangulation between spokes.
+///
+/// `q_true` comes from the classical ring-by-ring design: the geometry (a
+/// paraboloid ridge with vertical struts) and the central-ring prestress are
+/// prescribed, and member forces are marched outward from the centre so that
+/// every node is in equilibrium under the loads. The design geometry is stored
+/// in `plan`, so the funicular reproduces it (up to the ±3% per-edge jitter).
 pub fn cable_dome(rings: usize, spokes: usize) -> Net {
     let r_out = 10.0;
+    let rise = 2.5;
+    let strut_len = 1.5;
+    let load = 1.0;
+    let ring_prestress = 3.0 * load * spokes as f64;
+    let half = std::f64::consts::PI / spokes as f64; // θ/2
     let outer = |s: usize| s;
     let upper = |i: usize, s: usize| spokes + 2 * ((i - 1) * spokes + s);
     let lower = |i: usize, s: usize| upper(i, s) + 1;
+    // axisymmetric design geometry: (radius, z_upper, z_lower) per ring, index 0 = outer ring
+    let radius = |i: usize| r_out * (1.0 - i as f64 / (rings as f64 + 1.0));
+    let z_up = |i: usize| rise * (1.0 - (radius(i) / r_out).powi(2));
+    let z_lo = |i: usize| z_up(i) - strut_len;
     let mut plan = Vec::new();
     for s in 0..spokes {
         let a = 2.0 * std::f64::consts::PI * s as f64 / spokes as f64;
         plan.push([r_out * a.cos(), r_out * a.sin(), 0.0]);
     }
     for i in 1..=rings {
-        let r = r_out * (1.0 - i as f64 / (rings as f64 + 1.0));
         for s in 0..spokes {
             let a = 2.0 * std::f64::consts::PI * s as f64 / spokes as f64;
-            plan.push([r * a.cos(), r * a.sin(), 1.0]);
-            plan.push([r * a.cos(), r * a.sin(), -1.0]);
+            plan.push([radius(i) * a.cos(), radius(i) * a.sin(), z_up(i)]);
+            plan.push([radius(i) * a.cos(), radius(i) * a.sin(), z_lo(i)]);
         }
+    }
+    // unit vector (radial, vertical) and length from (r0,z0) to (r1,z1)
+    let dir = |r0: f64, z0: f64, r1: f64, z1: f64| {
+        let (dr, dz) = (r1 - r0, z1 - z0);
+        let len = (dr * dr + dz * dz).sqrt();
+        (dr / len, dz / len, len)
+    };
+    // member forces per ring (tension positive), marched from the centre outward
+    let mut f_ridge = vec![0.0; rings + 1]; // ridge from ring i to ring i-1
+    let mut f_diag = vec![0.0; rings + 1]; // diagonal from lower(i) to upper(i-1)
+    let mut f_strut = vec![0.0; rings + 1];
+    let mut f_hoop = vec![0.0; rings + 1];
+    let mut inward_r = 2.0 * ring_prestress * half.sin(); // radial pull toward the centre at upper(i)
+    let mut inward_z = 0.0; // vertical component of the known (inner) members at upper(i)
+    for i in (1..=rings).rev() {
+        let (dr, dz, _) = dir(radius(i), z_up(i), radius(i - 1), z_up(i - 1));
+        f_ridge[i] = inward_r / dr;
+        f_strut[i] = f_ridge[i] * dz + inward_z - load; // strut pushes up when negative
+        let (ddr, ddz, _) = dir(radius(i), z_lo(i), radius(i - 1), z_up(i - 1));
+        f_diag[i] = -f_strut[i] / ddz;
+        f_hoop[i] = f_diag[i] * ddr / (2.0 * half.sin());
+        // known inner members at upper(i-1): ridge from upper(i) and diagonal from lower(i)
+        inward_r = f_ridge[i] * dr + f_diag[i] * ddr;
+        inward_z = -(f_ridge[i] * dz + f_diag[i] * ddz);
     }
     let mut edges = Vec::new();
     let mut q = Vec::new();
     let mut state = 0xd0e_u64;
-    let jitter = |state: &mut u64| logu(state, 0.85, 1.15);
+    let mut jitter = |q: f64| q * logu(&mut state, 0.97, 1.03);
     for i in 1..=rings {
+        let ridge_len = dir(radius(i), z_up(i), radius(i - 1), z_up(i - 1)).2;
+        let diag_len = dir(radius(i), z_lo(i), radius(i - 1), z_up(i - 1)).2;
+        let hoop_len = 2.0 * radius(i) * half.sin();
         for s in 0..spokes {
             let up_outer = if i == 1 { outer(s) } else { upper(i - 1, s) };
             edges.push((up_outer, upper(i, s))); // ridge cable
-            q.push(1.0 * jitter(&mut state));
+            q.push(jitter(f_ridge[i] / ridge_len));
             edges.push((lower(i, s), up_outer)); // diagonal cable
-            q.push(2.0 * jitter(&mut state));
+            q.push(jitter(f_diag[i] / diag_len));
             edges.push((upper(i, s), lower(i, s))); // strut
-            q.push(-1.0 * jitter(&mut state));
+            q.push(jitter(f_strut[i] / strut_len));
             edges.push((lower(i, s), lower(i, (s + 1) % spokes))); // hoop
-            q.push(3.0 * jitter(&mut state));
+            q.push(jitter(f_hoop[i] / hoop_len));
         }
     }
+    let ring_len = 2.0 * radius(rings) * half.sin();
     for s in 0..spokes {
         edges.push((upper(rings, s), upper(rings, (s + 1) % spokes))); // central tension ring
-        q.push(3.0 * jitter(&mut state));
+        q.push(jitter(ring_prestress / ring_len));
     }
     let fixed: Vec<usize> = (0..spokes).collect();
     let mut free = Vec::new();
@@ -800,12 +840,15 @@ pub fn cable_truss(n: usize) -> Net {
     }
     for i in 1..n {
         edges.push((top(i), bottom(i))); // posts: compression
-        q.push(-logu(&mut state, 0.8, 1.2));
+        q.push(-logu(&mut state, 0.18, 0.22));
     }
     let fixed = vec![0, n];
     let mut free: Vec<usize> = (1..n).collect();
     free.extend(n + 1..2 * n);
-    let loads = free.iter().map(|&k| if k <= n { 1.0 } else { 0.0 }).collect();
+    let loads = free
+        .iter()
+        .map(|&k| if k <= n { 1.0 } else { 0.0 })
+        .collect();
     Net {
         name: format!("cabletruss{n}"),
         edges,
@@ -846,11 +889,11 @@ pub fn barrel_vault(n: usize, m: usize) -> Net {
         for i in 0..n {
             if i + 1 < n {
                 edges.push((node(i, j), node(i + 1, j)));
-                q.push(-logu(&mut state, 0.6, 1.6));
+                q.push(-logu(&mut state, 0.7, 1.4));
             }
             if j + 1 < m {
                 edges.push((node(i, j), node(i, j + 1)));
-                q.push(-logu(&mut state, 0.6, 1.6));
+                q.push(-logu(&mut state, 0.7, 1.4));
             }
         }
     }
@@ -937,6 +980,69 @@ pub fn wheel(spokes: usize, anchor_every: usize) -> Net {
 /// Tied arch spanning along x: compression arch polyline over a tension tie,
 /// vertical tension hangers; the two abutments are the only anchors and hanger
 /// bays are un-triangulated quads. `tie_edges` lists the tie segments.
+/// Tied arch whose target geometry is compatible with zero horizontal
+/// reaction: parabolic arch under uniform node load, straight horizontal tie,
+/// vertical hangers sized to carry the tie-node loads. The reference `q_true`
+/// puts only half of the arch thrust into the tie (the rest goes to the
+/// supports), so `enforce_zero_rx` has a self-stress mode to work with and an
+/// exact solution exists (uniform tie q equal to the arch thrust per bay).
+pub fn tied_arch_straight(bays: usize) -> Net {
+    let span = 20.0;
+    let rise = 5.0;
+    let bay = span / bays as f64;
+    let arch_load = 0.1;
+    let tie_load = 1.0;
+    let mut plan = Vec::new();
+    for i in 0..=bays {
+        let x = bay * i as f64;
+        let z = 4.0 * rise * (x / span) * (1.0 - x / span);
+        plan.push([x, 0.0, z]);
+    }
+    for i in 1..bays {
+        plan.push([bay * i as f64, 0.0, 0.0]);
+    }
+    let tie = |i: usize| if i == 0 || i == bays { i } else { bays + i };
+    // Uniform arch q reproduces the parabola under the uniform node load
+    // w = arch_load + tie_load: q_a · Δ²z = w with Δ²z = −8·rise/bays².
+    let q_arch = -(arch_load + tie_load) * (bays * bays) as f64 / (8.0 * rise);
+    let thrust = -q_arch * bay;
+    let q_tie = 0.5 * thrust / bay;
+    let mut edges = Vec::new();
+    let mut q = Vec::new();
+    let mut tie_edges = Vec::new();
+    for i in 0..bays {
+        edges.push((i, i + 1));
+        q.push(q_arch);
+    }
+    for i in 0..bays {
+        tie_edges.push(edges.len());
+        edges.push((tie(i), tie(i + 1)));
+        q.push(q_tie);
+    }
+    for i in 1..bays {
+        edges.push((i, tie(i)));
+        q.push(tie_load / plan[i][2]);
+    }
+    let fixed = vec![0, bays];
+    let mut free: Vec<usize> = (1..bays).collect();
+    free.extend(bays + 1..2 * bays);
+    let loads = free
+        .iter()
+        .map(|&n| if n <= bays { arch_load } else { tie_load })
+        .collect();
+    Net {
+        name: format!("tiedarch{bays}s"),
+        edges,
+        free,
+        fixed,
+        plan,
+        loads,
+        q_true: q,
+        extent: span,
+        tie_edges,
+    }
+}
+
 pub fn tied_arch(bays: usize) -> Net {
     let span = 20.0;
     let rise = 5.0;
@@ -1005,6 +1111,7 @@ pub fn suite_nets() -> Vec<Net> {
         hypar_mixed(21),
         wheel(24, 4).normalized(0.25),
         tied_arch(16).normalized(0.25),
+        tied_arch_straight(16),
         cable_truss(16).normalized(0.25),
         cable_dome(4, 16).normalized(0.25),
         barrel_vault(16, 12).normalized(0.25),
