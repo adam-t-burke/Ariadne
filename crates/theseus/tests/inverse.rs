@@ -373,7 +373,7 @@ fn pseudoinverse_reaction_constraints_reduce_reaction_norm() {
         ParticularMethod::Gram,
         true,
         true,
-        true,
+        false,
         true,
     )
     .unwrap();
@@ -751,7 +751,6 @@ fn reaction_rows_reduce_reaction_norm_on_clarabel_and_spg() {
         let mut pinned = free.clone();
         pinned.enforce_zero_rx = true;
         pinned.enforce_zero_ry = true;
-        pinned.enforce_zero_rz = true;
         let unconstrained = solve_inverse_fdm(&problem, &target, free).unwrap();
         let constrained = solve_inverse_fdm(&problem, &target, pinned).unwrap();
         let unconstrained_reaction =
@@ -763,6 +762,20 @@ fn reaction_rows_reduce_reaction_norm_on_clarabel_and_spg() {
              constrained={constrained_reaction}, unconstrained={unconstrained_reaction}"
         );
     }
+}
+
+#[test]
+fn reaction_rows_inconsistent_with_the_load_are_rejected() {
+    let (problem, _) = arch_problem(false);
+    let (target, _) = forward_target(&problem, &[1.0; 8]);
+    let mut opts = inverse_opts(1e-8, true, ParticularMethod::Clarabel, LinearAlgebra::Direct, true);
+    opts.enforce_zero_rz = true;
+    let error = solve_inverse_fdm(&problem, &target, opts)
+        .expect_err("zero vertical reactions under vertical load must be rejected");
+    assert!(
+        error.to_string().contains("enforce_zero_rz is inconsistent"),
+        "unexpected message: {error}"
+    );
 }
 
 #[test]

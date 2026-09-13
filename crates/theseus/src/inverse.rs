@@ -5,6 +5,43 @@
 //! Stage 2 in force-density coordinates, weighted by the FDM compliance.
 //! Public signs and bounds always constrain force density, including when
 //! Stage 1 uses member force.
+//!
+//! # Warm-start pipeline
+//!
+//! The geometric metrics are a warm start for a downstream nonlinear optimiser
+//! (L-BFGS-B on the forward solve). The pipeline is
+//!
+//! 1. **Non-dimensionalise** (`nondimensionalize`): positions are divided by the
+//!    target extent and loads by their largest component, so Stage 2 is
+//!    assembled in dimensionless form. Results are identical in exact
+//!    arithmetic; the conditioning of the assembled systems is not.
+//! 2. **Stage 1**: force residual at the target geometry, `min ‖E(x*)q − p‖²`
+//!    in the box. This recovers the *pattern* of `q` (and the self-stress
+//!    distribution of self-tied systems), but it is blind to the scale of `q`
+//!    and its vertical rows are down-weighted on shallow targets.
+//! 3. **Seed guard** (`seed_guard_margin`): the Stage-1 seed is scored on the
+//!    exact geometric error against a uniform-magnitude sign seed scaled per
+//!    sign group. When Stage 1 is worse by more than the margin it has
+//!    collapsed and the uniform seed initialises Stage 2 instead.
+//! 4. **Frozen compliance-weighted step(s)** (`max_frozen_outer`):
+//!    `min ‖D(q_k)⁻¹(E(x*)q − p)‖²`. Because `x(q) − x* = −D(q)⁻¹(E(x*)q − p)`,
+//!    this is Gauss--Newton on the geometric error with the Jacobian taken at
+//!    the target geometry; it cannot overshoot the way the current-geometry
+//!    Jacobian can.
+//! 5. **Damped Gauss--Newton step(s)** (`max_outer`, `lm_damping`): the same
+//!    weighted least squares with the Jacobian re-assembled at `x(q_k)` and a
+//!    Levenberg--Marquardt diagonal that grows on rejected steps and shrinks on
+//!    accepted ones. Steps are accepted only if the measured error decreases.
+//!
+//! Bounds inside Stage 2 are handled by an exact active-set bounded-variable
+//! least squares on the sparse weighted saddle system (`Stage2Method`), warm
+//! started across steps; Clarabel remains available as the interior-point
+//! alternative and as the fallback.
+//!
+//! Two facts worth keeping in mind: the compliance weighting is invariant to a
+//! common scale of the metric seed, `D(s·q) = s·D(q)`, so only the pattern of
+//! the seed matters; and the frozen step and the Gauss--Newton step share the
+//! same fixed point, since `E(x(q)) = E(x*)` once `x(q) = x*`.
 
 use crate::nullspace::{
     apply_pseudoinverse, solve_lsqr, solve_saddle_pseudoinverse, EquilibriumSystem,
@@ -134,6 +171,9 @@ pub struct InverseFdmOptions {
     pub lower: Vec<f64>,
     pub upper: Vec<f64>,
     pub max_iter: usize,
+    /// Inner-solver tolerance and Stage-2 geometric convergence tolerance. Not
+    /// rescaled by `nondimensionalize`; the geometric test is then applied to
+    /// the dimensionless error.
     pub tol: f64,
     /// Residual metric. `Force` reproduces the historical solve exactly.
     pub metric: InverseMetric,
@@ -143,9 +183,11 @@ pub struct InverseFdmOptions {
     pub q_ref: Vec<f64>,
     /// Frozen-target CWLS update count before Gauss--Newton.
     pub max_frozen_outer: usize,
-    /// Gauss--Newton CWLS update count. Geometric solves stop earlier at tolerance.
+    /// Gauss--Newton CWLS update count (accepted steps). Geometric solves stop
+    /// earlier at tolerance.
     pub max_outer: usize,
-    /// Stage-2 damping in force-density coordinates.
+    /// Fixed Stage-2 Tikhonov floor on `Δq`, in force-density coordinates.
+    /// The adaptive Levenberg--Marquardt term (`lm_damping`) is added on top.
     pub cwls_damping: f64,
     /// Bound handling for the Stage-2 steps under `LinearAlgebra::Direct`.
     pub stage2_method: Stage2Method,
