@@ -580,12 +580,13 @@ geometry <code>x*</code>, then forward-solves the network with the recovered
 <code>q</code>. The pipeline is:
 </p>
 <p>
-<b>Stage-1 particular → Frozen CWLS → CWLS-GN → forward FDM.</b>
+<b>Stage-1 particular → seed guard → Frozen CWLS → CWLS-GN → forward FDM.</b>
 </p>
 <p>
 The two CWLS phases are optional and independently budgeted. This is an inverse
 equilibrium solve at a frozen geometry, not an algebraic inverse of the square
-forward matrix <code>D(q)</code>.
+forward matrix <code>D(q)</code>. Every option of the warm-start study is
+reachable from this component; see <i>Reproducing the benchmark</i> below.
 </p>
 
 <h2>Stage 1: equilibrium particular</h2>
@@ -596,23 +597,49 @@ forces <code>t</code> using target unit directions, then converts
 <code>q = t/L*</code>. <b>SolveQ = true</b> solves force densities directly.
 The choice affects only this initializer; all CWLS updates use q.
 </p>
+<p>
+The <b>Direct solver</b> menu selects the unboxed particular. Whenever any
+Sign, Lower, or Upper is finite, the Direct path is Clarabel regardless of the
+menu, since only Clarabel and SPG handle the box exactly.
+</p>
 <ul>
-<li><b>Clarabel (default)</b> — convex quadratic least squares with optional
-q bounds and reaction equalities.</li>
-<li><b>Moore–Penrose</b> — augmented saddle solve at λ = 0 for a minimum-norm
-unconstrained particular.</li>
-<li><b>Tikhonov</b> — solves
-<code>min ½‖Mz−p‖² + ½λ‖z‖²</code>; λ must be positive.</li>
+<li><b>Tikhonov (default when unboxed)</b> — one sparse LDLᵀ of the augmented
+saddle <code>[I M; Mᵀ −λI]</code>, solving
+<code>min ½‖Mz−p‖² + ½λ‖z‖²</code>; λ must be positive. Same minimiser as
+Clarabel without bounds, at a fraction of the cost.</li>
+<li><b>Clarabel</b> — convex quadratic least squares with optional q bounds and
+reaction equalities. Forced whenever a box is present.</li>
+<li><b>Moore–Penrose</b> — the same augmented saddle at λ = 0 for a minimum-norm
+unconstrained particular. Fails on rank-deficient systems.</li>
 <li><b>QR least squares</b> — sparse QR for tall, full-column-rank systems;
 rank-deficient or wide systems report an error.</li>
-<li><b>Gram</b> — solves
-<code>(MᵀM + λI)z = Mᵀp</code>; it may be less well-conditioned than QR or
-the augmented formulations.</li>
+<li><b>Gram (sparse)</b> — forms <code>MᵀM + λI</code> sparsely and factors it
+with sparse LDLᵀ. Algebraically identical to Tikhonov, but the Gram product
+squares the condition number and fills in; the saddle factors <code>M</code>
+itself. The benchmark's <code>gram_sparse</code>.</li>
+<li><b>Gram (dense)</b> — forms <code>MᵀM + λI</code> as a full
+<code>ne × ne</code> matrix and factors it with dense Cholesky: O(ne²) memory
+and O(ne³) time. Same minimiser as Gram (sparse); kept as the "dense trap"
+reference of the talk (<code>gram_dense</code>). Refused above 6000 edges.</li>
 </ul>
 <p>
 With <b>Iterative</b> linear algebra, unconstrained problems use LSQR and
 bounded problems use SPG. <b>MaxIter</b> is the per-inner-solve iteration
-budget for Clarabel, LSQR, and SPG; it is not a CWLS phase budget.
+budget for Clarabel, LSQR, SPG, and the Stage-2 solvers; it is not a CWLS phase
+budget.
+</p>
+
+<h2>Seed guard</h2>
+<p>
+Stage 1 minimises the force residual at <code>x*</code>. On unbalanced or
+weakly loaded nets a small force residual can hide a collapsed geometry, and
+the mechanism: <code>x(q) − x* = −D(q)⁻¹r(q)</code>, a near-singular
+<code>D(q)</code> amplifies a tiny <code>r</code>. After Stage 1 the guard
+therefore scores a scaled uniform sign seed (one density per sign, scaled so
+the reaction magnitude matches the load) on the exact geometric error. When the
+clipped Stage-1 seed is worse by more than <b>Guard</b>× both seeds run Stage 2
+and the better result continues; <b>Guard Used</b> reports which one. Guard = 0
+disables the race (<code>pipeline_noguard</code>, <code>legacy</code>).
 </p>
 
 <h2>Metric and compliance weighting</h2>
@@ -665,17 +692,57 @@ with respect to q, so the CWLS-GN step is a true Gauss–Newton model of
 <p>
 Both phases backtrack against the exact <b>GeomErr</b>, accept only improving
 trials, stop early at Tol, and retain the best point across the whole sequence.
-Thus a GN phase cannot replace a better frozen result. λcwls is q-space
-Levenberg–Marquardt damping; it does not regularize or shift <code>D(q)</code>.
+Thus a GN phase cannot replace a better frozen result. λcwls is a fixed q-space
+Tikhonov floor on every step; it does not regularize or shift <code>D(q)</code>.
+<b>λLM</b> adds Levenberg–Marquardt damping relative to the curvature diagonal
+of the Gauss–Newton steps; 0 (default) takes the undamped direction and halves
+the step length on the exact merit instead, positive values damp the direction
+and grow tenfold on rejected steps. If a Gauss–Newton linearisation point has a
+collapsed edge, that step reuses the frozen target Jacobian and the
+<b>Diagnostics</b> output counts it as a degenerate linearisation.
+</p>
+
+<h2>Stage 2 bounds</h2>
+<p>
+Each CWLS step is a bounded sparse least-squares problem. The <b>Stage 2
+bounds</b> menu picks the bound handling:
+</p>
+<ul>
+<li><b>Active set (BVLS, default)</b> — bounded-variable least squares on the
+sparse weighted saddle. A pass fixes the active bounds, factors once, frees or
+binds variables from the KKT sign test and repeats; each pass is one LDLᵀ. A
+numerical failure falls back to Clarabel for that step (counted in
+<b>Diagnostics</b>), and the pass limit returns a feasible partial descent
+step (also counted).</li>
+<li><b>Clarabel (interior point)</b> — the QP solver from the previous release
+on the same step. Same optimum; each interior-point iteration is one
+factorisation, so it costs the same as the active set at a few thousand edges
+and 2.7–3.9× at 16 k–65 k. This is the <code>legacy</code> Stage 2 of the
+benchmark.</li>
+</ul>
+
+<h2>Non-dimensionalisation</h2>
+<p>
+With <b>Non-dimensionalise</b> checked (default), positions are scaled by the
+target extent and loads by their norm before anything is assembled, and q,
+λ, λcwls and the guard errors are transformed exactly so the same problem is
+solved in unit-free coordinates; results are mapped back. This is an exact
+change of variables, not a rescaling of the answer. It makes Tol, λcwls,
+λLM and the guard margin mean the same thing in metres and millimetres and
+improves conditioning of the saddle factors. Uncheck it to reproduce the
+benchmark's <code>legacy</code> row or to see the raw-unit behaviour.
 </p>
 
 <h2>Phase controls</h2>
 <ul>
-<li><b>FrozenIter = 0, GNiter = 3</b> — default, Gauss–Newton only.</li>
-<li><b>FrozenIter = 3, GNiter = 0</b> — frozen-target CWLS only.</li>
-<li><b>FrozenIter = 1, GNiter = 0</b> — one compliance reweight.</li>
+<li><b>FrozenIter = 1, GNiter = 2</b> — default; the benchmark's
+<code>pipeline</code>.</li>
+<li><b>FrozenIter = 1, GNiter = 0</b> — one compliance reweight; the
+benchmark's <code>frozen</code>.</li>
+<li><b>FrozenIter = 0, GNiter = 3</b> — Gauss–Newton only (previous default).</li>
 <li><b>FrozenIter = 3, GNiter = 3</b> — frozen warm-up followed by GN.</li>
-<li><b>FrozenIter = 0, GNiter = 0</b> — Stage 1 only.</li>
+<li><b>FrozenIter = 0, GNiter = 0</b> — Stage 1 only (<code>s1</code>); the
+guard is skipped.</li>
 </ul>
 <p>
 Budgets are nonnegative and have no hard upper cap. Tol stops a phase when
@@ -686,6 +753,50 @@ trying its different Jacobian.
 <p>
 Migration note: the former experimental <b>L2</b> input slot is now
 <b>FrozenIter</b>. Remove any old Boolean wire and supply a nonnegative integer.
+</p>
+
+<h2>Reproducing the benchmark</h2>
+<p>
+The warm-start study (<code>crates/theseus/examples/warm_start_bench</code>)
+reports every method as the clipped warm start, then after 1000 L-BFGS-B
+iterations on <code>½‖x(q) − x*‖²</code> with direct box bounds. The
+component's settings for each method row, with <b>Metric = Geometric</b>
+unless noted, SolveQ = false, Rx0/Ry0/Rz0 off, λcwls = 1e-6, MaxIter = 4000,
+Tol = 1e-8, and the same Lower / Upper box as the case:
+</p>
+<table border="1" cellpadding="3" cellspacing="0">
+<tr><th>Bench method</th><th>Component settings</th></tr>
+<tr><td><code>s1</code></td>
+<td>Metric Force (or Geometric with FrozenIter = 0, GNiter = 0); Direct solver
+Clarabel forced by the box; λ = 0.</td></tr>
+<tr><td><code>gram_sparse</code></td>
+<td>No box, SolveQ = true, Direct solver Gram (sparse), FrozenIter = GNiter = 0,
+λ = 1e-8 × mean squared entry of <code>E</code>. Clip to the box afterwards.</td></tr>
+<tr><td><code>gram_dense</code></td>
+<td>As <code>gram_sparse</code> with Direct solver Gram (dense).</td></tr>
+<tr><td><code>frozen</code></td>
+<td>FrozenIter = 1, GNiter = 0, Stage 2 Active set, Guard = 3,
+Non-dimensionalise on.</td></tr>
+<tr><td><code>pipeline</code></td>
+<td>Defaults: FrozenIter = 1, GNiter = 2, Stage 2 Active set, Guard = 3,
+λLM = 0, Non-dimensionalise on, wR = 1.</td></tr>
+<tr><td><code>pipeline_noguard</code></td>
+<td>As <code>pipeline</code> with Guard = 0.</td></tr>
+<tr><td><code>legacy</code></td>
+<td>FrozenIter = 1, GNiter = 2, Stage 2 Clarabel, Guard = 0, λLM = 0,
+Non-dimensionalise off.</td></tr>
+<tr><td><code>uniform</code>, <code>length_ratio</code></td>
+<td>Not library solves; feed the sign seed or the heuristic q directly to the
+optimiser instead of this component.</td></tr>
+</table>
+<p>
+The benchmark's <code>err/L</code> is this component's <b>GeomErr</b> divided by
+the target's bounding-box diagonal. The downstream L-BFGS-B stage is the
+regular Ariadne solver with the <b>Force Densities</b> output as the start,
+direct box bounds, a target-geometry objective, and a 1000-iteration budget.
+The bench's 64 cases are 16 nets × {jittered, bumped target} × {loose, snug
+box}; the nets can be rebuilt in Grasshopper from their generator parameters in
+<code>warm_start_bench/nets.rs</code>.
 </p>
 
 <h2>Bounds, signs, and invertibility</h2>
@@ -700,7 +811,11 @@ Positive q gives a positive-definite D for a connected, properly anchored net.
 Mixed-sign and all-compression systems use sparse LDLᵀ and are valid only when
 D is nonsingular and numerically factorizable. Near-zero q and sign cancellation
 can create mechanisms or failed trial factors. The solver deliberately uses the
-exact compliance: no shifted inverse or pseudoinverse is substituted.
+exact compliance: no shifted inverse or pseudoinverse is substituted. A
+factorisation failure on a trial is not a warning by itself: the step is
+rejected and the best point kept. The component warns only on recorded events
+(guard swap, degenerate linearisation, Clarabel fallback, active-set cap, or a
+realised reaction well above the load along an enforced zero-reaction axis).
 </p>
 
 <h2>Other inputs</h2>
@@ -708,12 +823,16 @@ exact compliance: no shifted inverse or pseudoinverse is substituted.
 <li><b>Loads / Load Nodes</b> — without Load Nodes, loads apply to free nodes
 in order and the final load repeats. With Load Nodes, one load broadcasts or
 one load per listed node is required; unlisted free nodes receive zero.</li>
-<li><b>Rx0 / Ry0 / Rz0</b> — add exact linear zero-reaction constraints to the
-particular and CWLS subproblems.</li>
+<li><b>Rx0 / Ry0 / Rz0</b> — add linear zero-reaction rows to the particular
+and CWLS subproblems, weighted by <b>wR</b> relative to the equilibrium and
+geometric rows. They are least-squares rows, not hard equalities; the realised
+reaction along those axes is reported in <b>Diagnostics</b>.</li>
 <li><b>Regularization λ</b> — Stage 1 only.</li>
 <li><b>CWLS Damping λcwls</b> — both geometric phases only.</li>
-<li><b>MaxIter</b> — each inner Clarabel, SPG, or LSQR solve. Independent of
-FrozenIter and GNiter.</li>
+<li><b>Guard</b> — seed-guard margin; 0 disables.</li>
+<li><b>λLM</b> — Gauss–Newton Levenberg–Marquardt floor; 0 uses step halving.</li>
+<li><b>MaxIter</b> — each inner Clarabel, SPG, LSQR, or Stage-2 solve.
+Independent of FrozenIter and GNiter.</li>
 <li><b>Tol</b> — inner-solver tolerance and geometric phase stopping tolerance.</li>
 </ul>
 
@@ -723,7 +842,11 @@ FrozenIter and GNiter.</li>
 <b>Forces / Residual / RelRes</b> are evaluated at x* using the returned q.
 <b>GeomErr = ‖x(q)−x*‖</b> is a length and directly measures warm-start landing
 error. A small force residual ratio does not imply a small GeomErr when the
-target is not funicular.
+target is not funicular. <b>Guard</b> is true when the uniform seed won the
+race. <b>Diag</b> lists the Stage-2 record as <code>key = value</code> lines:
+the Stage-1 and uniform-seed errors, accepted frozen and Gauss–Newton steps,
+factorisations, Clarabel fallbacks, active-set cap hits, degenerate
+linearisations, and the realised reaction residual.
 </p>
 </body>
 </html>
