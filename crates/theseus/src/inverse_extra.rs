@@ -26,6 +26,7 @@ pub fn solve_inverse_fdm_default(
 #[derive(Clone, Copy)]
 enum InnerKind {
     Gram,
+    GramDense,
     Saddle,
     Qr,
     Lsqr,
@@ -44,6 +45,7 @@ fn pick_inner(opts: &InverseFdmOptions, bounds: &BoxBounds) -> InnerKind {
         LinearAlgebra::Iterative => InnerKind::Lsqr,
         LinearAlgebra::Direct => match opts.particular_method {
             ParticularMethod::Gram => InnerKind::Gram,
+            ParticularMethod::GramDense => InnerKind::GramDense,
             ParticularMethod::Augmented => InnerKind::Saddle,
             ParticularMethod::SparseQr => InnerKind::Qr,
             ParticularMethod::Clarabel => InnerKind::Clarabel,
@@ -313,6 +315,131 @@ fn solve_gram_on(
     }
     let h = m_t.matvec(p);
     ldl_solve_cached(&g, &h, lambda, cache, factor_stack, solve_stack)
+}
+
+// ───────────────────────── dense Gram ─────────────────────────
+
+/// Result of [`dense_gram_solve`], with the cost figures the benchmark plots.
+#[derive(Debug, Clone)]
+pub struct DenseGram {
+    pub q: Vec<f64>,
+    /// Bytes of the dense `ne × ne` Gram matrix.
+    pub bytes: usize,
+    pub assemble_ms: f64,
+    pub factor_ms: f64,
+}
+
+/// Form `MᵀM + λI` as a dense row-major `ne × ne` array from the CSC `M`
+/// and solve `(MᵀM + λI) q = Mᵀp` with an in-place Cholesky.
+///
+/// This is the classic normal-equations inverse written the way a first
+/// implementation writes it, kept as the reference for what sparsity buys:
+/// the minimiser is identical to [`ParticularMethod::Gram`] but memory is
+/// O(ne²) and time O(ne³). Returns an error above [`DENSE_GRAM_EDGE_CAP`]
+/// edges and when the Cholesky meets a non-positive pivot (singular `MᵀM`
+/// at λ = 0).
+pub fn dense_gram_solve(
+    m_mat: &SparseColMatOwned,
+    p: &[f64],
+    lambda: f64,
+) -> Result<DenseGram, TheseusError> {
+    let ne = m_mat.ncols;
+    if ne > DENSE_GRAM_EDGE_CAP {
+        return Err(TheseusError::Solver(format!(
+            "dense Gram refused: {ne} edges exceeds the cap of {DENSE_GRAM_EDGE_CAP} \
+             ({:.1} GB for the dense MᵀM); use the sparse Gram or the augmented saddle",
+            (ne * ne * std::mem::size_of::<f64>()) as f64 / 1e9
+        )));
+    }
+    if p.len() != m_mat.nrows {
+        return Err(TheseusError::Shape(format!(
+            "dense Gram: rhs has {} entries, expected {}",
+            p.len(),
+            m_mat.nrows
+        )));
+    }
+    let started = std::time::Instant::now();
+    // Row lists of M for the pairwise products.
+    let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m_mat.nrows];
+    for col in 0..ne {
+        for nz in m_mat.col_ptrs[col] as usize..m_mat.col_ptrs[col + 1] as usize {
+            rows[m_mat.row_indices[nz] as usize].push((col, m_mat.values[nz]));
+        }
+    }
+    let mut g = vec![0.0f64; ne * ne];
+    let mut rhs = vec![0.0f64; ne];
+    for (i, row) in rows.iter().enumerate() {
+        for &(a, va) in row {
+            rhs[a] += va * p[i];
+            for &(b, vb) in row {
+                g[a * ne + b] += va * vb;
+            }
+        }
+    }
+    if lambda > 0.0 {
+        for i in 0..ne {
+            g[i * ne + i] += lambda;
+        }
+    }
+    let assemble_ms = started.elapsed().as_secs_f64() * 1e3;
+    let started = std::time::Instant::now();
+    dense_cholesky_in_place(&mut g, ne).map_err(|error| {
+        if lambda == 0.0 {
+            TheseusError::Solver(format!("Gram at λ=0: MᵀM is singular ({error})"))
+        } else {
+            TheseusError::Solver(error)
+        }
+    })?;
+    dense_cholesky_solve(&g, ne, &mut rhs);
+    let factor_ms = started.elapsed().as_secs_f64() * 1e3;
+    Ok(DenseGram {
+        q: rhs,
+        bytes: ne * ne * std::mem::size_of::<f64>(),
+        assemble_ms,
+        factor_ms,
+    })
+}
+
+/// Row-major Cholesky–Banachiewicz; the lower triangle is overwritten by `L`.
+fn dense_cholesky_in_place(g: &mut [f64], n: usize) -> Result<(), String> {
+    for i in 0..n {
+        for j in 0..=i {
+            let (head, tail) = g.split_at_mut(i * n);
+            let row_i = &mut tail[..n];
+            let row_j: &[f64] = if j == i {
+                &row_i[..j]
+            } else {
+                &head[j * n..j * n + j]
+            };
+            let dot: f64 = row_i[..j].iter().zip(row_j).map(|(a, b)| a * b).sum();
+            let s = row_i[j] - dot;
+            if j == i {
+                if s <= 0.0 || !s.is_finite() {
+                    return Err(format!("dense Cholesky failed at pivot {i} (s={s:.3e})"));
+                }
+                row_i[i] = s.sqrt();
+            } else {
+                row_i[j] = s / head[j * n + j];
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Solve `L Lᵀ x = b` in place given the row-major lower factor.
+fn dense_cholesky_solve(l: &[f64], n: usize, b: &mut [f64]) {
+    for i in 0..n {
+        let row = &l[i * n..i * n + i];
+        let dot: f64 = row.iter().zip(&b[..i]).map(|(a, x)| a * x).sum();
+        b[i] = (b[i] - dot) / l[i * n + i];
+    }
+    for i in (0..n).rev() {
+        let mut s = b[i];
+        for k in i + 1..n {
+            s -= l[k * n + i] * b[k];
+        }
+        b[i] = s / l[i * n + i];
+    }
 }
 
 /// Build the weighted 3-block KKT system for `min ½‖e‖² + ½λ‖q‖²`
@@ -1503,6 +1630,7 @@ pub fn solve_inverse_fdm(
                 1,
                 true,
             )),
+            InnerKind::GramDense => Ok((dense_gram_solve(m_mat, p, lambda)?.q, 1, true)),
             InnerKind::Saddle => Ok((
                 solve_saddle_on(
                     m_mat,

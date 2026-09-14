@@ -66,7 +66,16 @@ pub enum ParticularMethod {
     SparseQr = 2,
     /// Clarabel quadratic programming, including unconstrained Direct solves.
     Clarabel = 3,
+    /// The Gram normal equations formed as a dense `ne × ne` matrix and
+    /// factorised by dense Cholesky: O(ne²) memory, O(ne³) time. Same
+    /// minimiser as [`Self::Gram`]; kept as the "dense trap" reference and
+    /// refused above [`DENSE_GRAM_EDGE_CAP`] edges.
+    GramDense = 4,
 }
+
+/// Edge count above which [`ParticularMethod::GramDense`] refuses to run
+/// (`ne²` doubles of storage; 6000 edges is 288 MB).
+pub const DENSE_GRAM_EDGE_CAP: usize = 6000;
 
 /// Direct factorization versus iterative matvec linear algebra.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -364,9 +373,10 @@ impl TryFrom<i32> for ParticularMethod {
             1 => Ok(Self::Augmented),
             2 => Ok(Self::SparseQr),
             3 => Ok(Self::Clarabel),
+            4 => Ok(Self::GramDense),
             other => Err(TheseusError::Solver(format!(
                 "unknown InvFDM particular method {other} \
-                 (expected 0=Gram, 1=Augmented, 2=SparseQr, 3=Clarabel)"
+                 (expected 0=Gram, 1=Augmented, 2=SparseQr, 3=Clarabel, 4=GramDense)"
             ))),
         }
     }

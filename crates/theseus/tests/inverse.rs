@@ -797,7 +797,58 @@ fn particular_method_ffi_mapping_includes_clarabel() {
         ParticularMethod::try_from(3).unwrap(),
         ParticularMethod::Clarabel
     );
-    assert!(ParticularMethod::try_from(4).is_err());
+    assert_eq!(
+        ParticularMethod::try_from(4).unwrap(),
+        ParticularMethod::GramDense
+    );
+    assert!(ParticularMethod::try_from(5).is_err());
+}
+
+#[test]
+fn dense_gram_matches_sparse_gram_at_the_same_shift() {
+    let (problem, _) = arch_problem(false);
+    let (target, _) = forward_target(&problem, &[1.5; 8]);
+    let lambda = 1e-8;
+    let sparse = solve_inverse_fdm(
+        &problem,
+        &target,
+        inverse_opts(
+            lambda,
+            true,
+            ParticularMethod::Gram,
+            LinearAlgebra::Direct,
+            true,
+        ),
+    )
+    .unwrap();
+    let dense = solve_inverse_fdm(
+        &problem,
+        &target,
+        inverse_opts(
+            lambda,
+            true,
+            ParticularMethod::GramDense,
+            LinearAlgebra::Direct,
+            true,
+        ),
+    )
+    .unwrap();
+    for (left, right) in sparse.q.iter().zip(&dense.q) {
+        assert!(
+            (left - right).abs() < 1e-9 * left.abs().max(1.0),
+            "sparse {left} vs dense {right}"
+        );
+    }
+}
+
+#[test]
+fn dense_gram_refuses_above_the_edge_cap() {
+    let n = theseus::inverse::DENSE_GRAM_EDGE_CAP + 1;
+    let m = SparseColMatOwned::from_coo(3, n, &[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0]).unwrap();
+    let err = theseus::inverse::dense_gram_solve(&m, &[1.0, 1.0, 1.0], 0.0)
+        .err()
+        .expect("cap must refuse");
+    assert!(err.to_string().contains("exceeds the cap"), "{err}");
 }
 
 #[test]
