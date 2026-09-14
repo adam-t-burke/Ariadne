@@ -34,7 +34,12 @@
 //!                        showcase cases; gallery; tied-arch reactions), read
 //!                        by `bench/figures/render.py`. `BENCH_ITERS` and
 //!                        `BENCH_NETS` apply.
+//! - `export_cases <dir>` one JSON case per suite net in the external-case
+//!                        schema (plus `bounds_snug` and `target_variants`),
+//!                        embedded in the Grasshopper plugin by
+//!                        `Ariadne.csproj` (`bench/synthetic/cases/`).
 
+mod export;
 mod external;
 mod figures;
 mod methods;
@@ -628,7 +633,7 @@ fn cmd_reactions() {
 
 fn usage() {
     eprintln!(
-        "usage: warm_start_bench <nets|suite [max_iters]|alt [max_iters]|scale|dense|reactions|external <file|dir>..|figures <dir>>"
+        "usage: warm_start_bench <nets|suite [max_iters]|alt [max_iters]|scale|dense|reactions|external <file|dir>..|figures <dir>|export_cases <dir>>"
     );
     eprintln!("  env: BENCH_NETS=name1,name2  BENCH_METHODS=uniform,s1,...  BENCH_SIDES=23,46");
     eprintln!("  pipeline ablations: BENCH_LM=1e-4  BENCH_GUARD=3  BENCH_S2=clarabel|activeset  BENCH_NONDIM=0|1  BENCH_CWLS=1e-6");
@@ -671,6 +676,10 @@ fn main() {
                 None => usage(),
             }
         }
+        Some("export_cases") => match args.get(2) {
+            Some(dir) => export::cmd_export_cases(dir),
+            None => usage(),
+        },
         _ => usage(),
     }
 }
