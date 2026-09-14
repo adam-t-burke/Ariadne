@@ -55,8 +55,9 @@
     </EmbeddedResource>
   </ItemGroup>
 
-  <!-- External inverse-FDM benchmark cases, exposed in Grasshopper by the Load Inverse FDM Case component -->
+  <!-- Inverse-FDM benchmark cases (synthetic suite + external), exposed in Grasshopper by the Load Inverse FDM Case component -->
   <ItemGroup>
+    <EmbeddedResource Include="bench\synthetic\cases\*.json" LogicalName="Ariadne.Bench.Cases.%(Filename)%(Extension)" />
     <EmbeddedResource Include="bench\external\cases\*.json" LogicalName="Ariadne.Bench.Cases.%(Filename)%(Extension)" />
   </ItemGroup>
 
