@@ -53,6 +53,11 @@
     </EmbeddedResource>
   </ItemGroup>
 
+  <!-- External inverse-FDM benchmark cases, exposed in Grasshopper by the Load Inverse FDM Case component -->
+  <ItemGroup>
+    <EmbeddedResource Include="bench\external\cases\*.json" LogicalName="Ariadne.Bench.Cases.%(Filename)%(Extension)" />
+  </ItemGroup>
+
   <ItemGroup>
     <Compile Remove="Ariadne.Tests/**" />
   </ItemGroup>
