@@ -10,6 +10,7 @@ use ndarray::Array2;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
+pub use theseus::inverse::{dense_gram_solve, DENSE_GRAM_EDGE_CAP as DENSE_EDGE_CAP};
 use theseus::inverse::{
     solve_inverse_fdm, InverseFdmOptions, InverseFdmResult, InverseMetric, LinearAlgebra,
     ParticularMethod, Stage2Method, DEFAULT_LM_DAMPING, DEFAULT_SEED_GUARD_MARGIN,
@@ -21,8 +22,6 @@ use theseus::types::{
     TargetGeometryReduction, TargetXYZ,
 };
 
-/// Dense Gram assembly is skipped above this many edges (ne² doubles).
-pub const DENSE_EDGE_CAP: usize = 6000;
 /// Relative Tikhonov shift for the unboxed Gram solves, scaled by the mean
 /// squared column norm of the equilibrium matrix.
 pub const GRAM_RELATIVE_SHIFT: f64 = 1e-8;
@@ -351,104 +350,19 @@ fn run_method_inner(
 
 // ───────────────────────── dense Gram ─────────────────────────
 
-pub struct DenseGram {
-    pub q: Vec<f64>,
-    pub bytes: usize,
-    pub assemble_ms: f64,
-    pub factor_ms: f64,
-}
-
-/// Form `EᵀE` as a dense row-major `ne × ne` array from the CSC `E`, add a
-/// Tikhonov shift, and solve with an in-place Cholesky. Returns `Err` above
-/// [`DENSE_EDGE_CAP`] edges.
-pub fn dense_gram_solve(e: &SparseColMatOwned, p: &[f64], shift: f64) -> Result<DenseGram, String> {
-    let ne = e.ncols;
-    if ne > DENSE_EDGE_CAP {
-        return Err(format!("skipped (ne > cap {DENSE_EDGE_CAP})"));
-    }
-    let started = Instant::now();
-    // row lists of E for the pairwise products
-    let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); e.nrows];
-    for col in 0..ne {
-        for nz in e.col_ptrs[col] as usize..e.col_ptrs[col + 1] as usize {
-            rows[e.row_indices[nz] as usize].push((col, e.values[nz]));
-        }
-    }
-    let mut g = vec![0.0f64; ne * ne];
-    let mut rhs = vec![0.0f64; ne];
-    for (i, row) in rows.iter().enumerate() {
-        for &(a, va) in row {
-            rhs[a] += va * p[i];
-            for &(b, vb) in row {
-                g[a * ne + b] += va * vb;
-            }
-        }
-    }
-    for i in 0..ne {
-        g[i * ne + i] += shift;
-    }
-    let assemble_ms = started.elapsed().as_secs_f64() * 1e3;
-    let started = Instant::now();
-    dense_cholesky_in_place(&mut g, ne)?;
-    dense_cholesky_solve(&g, ne, &mut rhs);
-    let factor_ms = started.elapsed().as_secs_f64() * 1e3;
-    Ok(DenseGram {
-        q: rhs,
-        bytes: ne * ne * std::mem::size_of::<f64>(),
-        assemble_ms,
-        factor_ms,
-    })
-}
-
-/// Row-major Cholesky–Banachiewicz; the lower triangle is overwritten by `L`.
-fn dense_cholesky_in_place(g: &mut [f64], n: usize) -> Result<(), String> {
-    for i in 0..n {
-        for j in 0..=i {
-            let (head, tail) = g.split_at_mut(i * n);
-            let row_i = &mut tail[..n];
-            let row_j: &[f64] = if j == i {
-                &row_i[..j]
-            } else {
-                &head[j * n..j * n + j]
-            };
-            let dot: f64 = row_i[..j].iter().zip(row_j).map(|(a, b)| a * b).sum();
-            let s = row_i[j] - dot;
-            if j == i {
-                if s <= 0.0 || !s.is_finite() {
-                    return Err(format!("dense Cholesky failed at pivot {i} (s={s:.3e})"));
-                }
-                row_i[i] = s.sqrt();
-            } else {
-                row_i[j] = s / head[j * n + j];
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Solve `L Lᵀ x = b` in place given the row-major lower factor.
-fn dense_cholesky_solve(l: &[f64], n: usize, b: &mut [f64]) {
-    for i in 0..n {
-        let row = &l[i * n..i * n + i];
-        let dot: f64 = row.iter().zip(&b[..i]).map(|(a, x)| a * x).sum();
-        b[i] = (b[i] - dot) / l[i * n + i];
-    }
-    for i in (0..n).rev() {
-        let mut s = b[i];
-        for k in i + 1..n {
-            s -= l[k * n + i] * b[k];
-        }
-        b[i] = s / l[i * n + i];
-    }
-}
-
+/// The library's dense Gram (`ParticularMethod::GramDense`) called directly so
+/// the bench can report the matrix size and the assembly / Cholesky split.
 fn gram_dense(problem: &Problem, target: &Array2<f64>) -> Result<WarmOut, String> {
     let started = Instant::now();
     let (e, p, scale) = equilibrium_e(problem, target)?;
     let shift = GRAM_RELATIVE_SHIFT * scale;
     let out = catch_unwind(AssertUnwindSafe(|| dense_gram_solve(&e, &p, shift)));
     let dg = match out {
-        Ok(r) => r?,
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) if e.to_string().contains("exceeds the cap") => {
+            return Err(format!("skipped (ne > cap {DENSE_EDGE_CAP})"))
+        }
+        Ok(Err(e)) => return Err(format!("ERR {e}")),
         Err(pnc) => return Err(format!("PANIC {}", panic_message(&pnc))),
     };
     Ok(WarmOut {
