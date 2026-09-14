@@ -11,6 +11,7 @@ using Grasshopper.Kernel.Types;
 using Rhino.Geometry;
 using Ariadne.FDM;
 using Ariadne.Solver;
+using Theseus.Interop;
 
 namespace Ariadne.Solver.Components.Experimental;
 
@@ -22,11 +23,16 @@ public class InverseFdmComponent : GH_Component
     private const string ParticularKey = "InverseFdmParticular";
     private const string LinearAlgebraKey = "InverseFdmLinearAlgebra";
     private const string MetricKey = "InverseFdmMetric";
+    private const string Stage2Key = "InverseFdmStage2";
+    private const string NondimensionalizeKey = "InverseFdmNondimensionalize";
     private ParticularMode _particular = InverseFdmUiState.DefaultParticular;
     private LinearAlgebraMode _linearAlgebra = LinearAlgebraMode.Direct;
     private MetricMode _metric = InverseFdmUiState.DefaultMetric;
+    private Stage2Mode _stage2 = InverseFdmUiState.DefaultStage2;
+    private bool _nondimensionalize = InverseFdmUiState.DefaultNondimensionalize;
     private double _lambda = 1e-6;
     private double _cwlsDamping = 1e-6;
+    private double _seedGuardMargin = InverseFdmUiState.DefaultSeedGuardMargin;
     private int _frozenIterations = InverseFdmUiState.DefaultFrozenIterations;
     private int _gnIterations = InverseFdmUiState.DefaultGnIterations;
     private bool _solveForQ = InverseFdmUiState.DefaultSolveForQ;
@@ -34,7 +40,7 @@ public class InverseFdmComponent : GH_Component
 
     public InverseFdmComponent()
         : base("Inverse FDM", "InvFDM",
-            "Build a q warm start from a target particular, optional frozen CWLS, and optional CWLS-GN, then forward-solve.",
+            "Compliance-weighted warm start for a target geometry: Stage-1 particular, seed guard, frozen CWLS step(s), Gauss–Newton step(s), then forward-solve.",
             "Ariadne", "Experimental")
     {
         UpdateMessage();
@@ -46,9 +52,9 @@ public class InverseFdmComponent : GH_Component
         pManager.AddPointParameter("Target Points", "Target", "Desired free-node positions (one per free node, matching order)", GH_ParamAccess.list);
         pManager.AddVectorParameter("Loads", "Loads", "Loads on free nodes", GH_ParamAccess.list, new Vector3d(0, 0, -1));
         pManager.AddPointParameter("Load Nodes", "LN", "Nodes to apply loads to (optional; if empty, loads apply to all free nodes)", GH_ParamAccess.list);
-        pManager.AddNumberParameter("Regularization", "λ", "Stage-1 particular regularization used by Tikhonov, Gram, LSQR, Clarabel, and SPG. Ignored for Moore–Penrose and QR.", GH_ParamAccess.item, 1e-6);
-        pManager.AddIntegerParameter("Frozen CWLS Iterations", "FrozenIter", "Geometric metric only: maximum frozen-target CWLS updates before Gauss–Newton. 0 skips this phase.", GH_ParamAccess.item, InverseFdmUiState.DefaultFrozenIterations);
-        pManager.AddIntegerParameter("Gauss–Newton Iterations", "GNiter", "Geometric metric only: maximum CWLS-GN updates after the frozen phase. 0 skips this phase. Stops early at Tol.", GH_ParamAccess.item, InverseFdmUiState.DefaultGnIterations);
+        pManager.AddNumberParameter("Regularization", "λ", "Stage-1 particular regularization used by Tikhonov, Gram (sparse/dense), LSQR, Clarabel, and SPG. Ignored for Moore–Penrose and QR.", GH_ParamAccess.item, 1e-6);
+        pManager.AddIntegerParameter("Frozen CWLS Iterations", "FrozenIter", "Geometric metric only: maximum frozen-target CWLS updates before Gauss–Newton. 0 skips this phase. Default 1 (the benchmark pipeline).", GH_ParamAccess.item, InverseFdmUiState.DefaultFrozenIterations);
+        pManager.AddIntegerParameter("Gauss–Newton Iterations", "GNiter", "Geometric metric only: maximum CWLS-GN updates after the frozen phase. 0 skips this phase. Stops early at Tol. Default 2 (the benchmark pipeline).", GH_ParamAccess.item, InverseFdmUiState.DefaultGnIterations);
         pManager.AddBooleanParameter("Enforce Rx=0", "Rx0", "Strictly enforce zero X-reaction at supports", GH_ParamAccess.item, false);
         pManager.AddBooleanParameter("Enforce Ry=0", "Ry0", "Strictly enforce zero Y-reaction at supports", GH_ParamAccess.item, false);
         pManager.AddBooleanParameter("Enforce Rz=0", "Rz0", "Strictly enforce zero Z-reaction at supports", GH_ParamAccess.item, false);
@@ -64,11 +70,23 @@ public class InverseFdmComponent : GH_Component
             GH_ParamAccess.tree);
         pManager.AddIntegerParameter("Max Iterations", "MaxIter", "Iteration budget per inner solve for Clarabel, SPG, and LSQR", GH_ParamAccess.item, 500);
         pManager.AddNumberParameter("Tolerance", "Tol", "Convergence tolerance for Clarabel, SPG, and LSQR", GH_ParamAccess.item, 1e-6);
-        pManager.AddNumberParameter("CWLS Damping", "λcwls", "Stage-2 Levenberg–Marquardt damping λcwls‖Δq‖². Separate from Stage-1 particular regularization.", GH_ParamAccess.item, 1e-6);
+        pManager.AddNumberParameter("CWLS Damping", "λcwls", "Stage-2 Tikhonov floor λcwls‖Δq‖² on every compliance-weighted step. Separate from Stage-1 particular regularization.", GH_ParamAccess.item, 1e-6);
+        pManager.AddNumberParameter("Seed Guard", "Guard",
+            "Stage-1 collapse guard margin. After Stage 1 a scaled uniform sign seed is scored on the same geometric error; when Stage 1 is worse by more than this factor both seeds run Stage 2 and the better result continues. 0 disables the guard (the benchmark's pipeline_noguard / legacy rows).",
+            GH_ParamAccess.item, InverseFdmUiState.DefaultSeedGuardMargin);
+        pManager.AddNumberParameter("LM Damping", "λLM",
+            "Levenberg–Marquardt floor for the Gauss–Newton steps, relative to the curvature diagonal. 0 (default) takes the undamped direction and halves the step on the exact merit; positive values damp the direction and grow ×10 on rejected steps.",
+            GH_ParamAccess.item, InverseFdmUiState.DefaultLmDamping);
+        pManager.AddNumberParameter("Reaction Weight", "wR",
+            "Weight of the Rx0/Ry0/Rz0 rows relative to the equilibrium (Stage 1) and geometric (Stage 2) rows. 1 (default) counts one load unit of reaction like one target extent of geometric error.",
+            GH_ParamAccess.item, InverseFdmUiState.DefaultReactionWeight);
         pManager[3].Optional = true;
         pManager[11].Optional = true;
         pManager[12].Optional = true;
         pManager[13].Optional = true;
+        pManager[17].Optional = true;
+        pManager[18].Optional = true;
+        pManager[19].Optional = true;
     }
 
     protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -81,8 +99,14 @@ public class InverseFdmComponent : GH_Component
         pManager.AddVectorParameter("Residual", "Residual", "Free-node equilibrium residual at the target", GH_ParamAccess.list);
         pManager.AddNumberParameter("Residual Ratio", "RelRes", "Residual norm divided by load norm", GH_ParamAccess.item);
         pManager.AddNumberParameter("Geometric Error", "GeomErr",
-            "‖x(q) − x*‖: distance from the forward-solved geometry to the target. Unlike RelRes this is a length, not a force ratio.",
+            "‖x(q) − x*‖: distance from the forward-solved geometry to the target. Unlike RelRes this is a length, not a force ratio. Divide by the target's bounding-box diagonal to compare with the benchmark's err/L.",
             GH_ParamAccess.item);
+        pManager.AddBooleanParameter("Guard Used", "Guard",
+            "True when the seed guard replaced the Stage-1 particular by the scaled uniform sign seed.",
+            GH_ParamAccess.item);
+        pManager.AddTextParameter("Diagnostics", "Diag",
+            "Stage-2 diagnostics as key = value lines: Stage-1 and uniform-seed errors, accepted frozen / Gauss–Newton steps, factorisations, Clarabel fallbacks, active-set pass-limit hits, degenerate linearisations, realised reaction residual.",
+            GH_ParamAccess.list);
     }
 
     protected override void SolveInstance(IGH_DataAccess DA)
@@ -107,6 +131,9 @@ public class InverseFdmComponent : GH_Component
         int maxIter = 500;
         double tol = 1e-6;
         double cwlsDamping = 1e-6;
+        double seedGuardMargin = InverseFdmUiState.DefaultSeedGuardMargin;
+        double lmDamping = InverseFdmUiState.DefaultLmDamping;
+        double reactionWeight = InverseFdmUiState.DefaultReactionWeight;
 
         if (!DA.GetData(0, ref network)) return;
         if (!DA.GetDataList(1, targetPoints)) return;
@@ -125,9 +152,13 @@ public class InverseFdmComponent : GH_Component
         DA.GetData(14, ref maxIter);
         DA.GetData(15, ref tol);
         DA.GetData(16, ref cwlsDamping);
+        DA.GetData(17, ref seedGuardMargin);
+        DA.GetData(18, ref lmDamping);
+        DA.GetData(19, ref reactionWeight);
 
         _lambda = regularization;
         _cwlsDamping = cwlsDamping;
+        _seedGuardMargin = seedGuardMargin;
         _frozenIterations = Math.Max(0, frozenIterations);
         _gnIterations = Math.Max(0, gnIterations);
         _solveForQ = solveForQ;
@@ -184,15 +215,14 @@ public class InverseFdmComponent : GH_Component
             return;
         }
 
-        if (_metric == MetricMode.Geometric)
+        if (unconstrainedDirect
+            && _particular == ParticularMode.GramDense
+            && network.Graph.Ne > InverseFdmUiState.DenseGramWarnEdges)
         {
-            if (!InverseFdmUiState.HasStrictSignDefiniteBounds(lower, upper))
-            {
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
-                    "CWLS requires a numerically invertible FDM Laplacian. Mixed-sign and "
-                    + "all-compression q are supported through sparse LDLᵀ, but cancellation, zero "
-                    + "densities, or an unstable unpivoted factorization can block a trial.");
-            }
+            AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
+                $"Gram (dense) forms EᵀE as a full {network.Graph.Ne}×{network.Graph.Ne} matrix: "
+                + "O(ne²) memory and O(ne³) time. It is the reference for what sparsity buys; "
+                + "use Gram (sparse) or Tikhonov for the same minimiser at sparse cost.");
         }
 
         double[] targetFreeXyz = new double[numFree * 3];
@@ -238,7 +268,9 @@ public class InverseFdmComponent : GH_Component
                 true, maxL1Iter, particularMethod, (int)_linearAlgebra,
                 enforceZeroRx, enforceZeroRy, enforceZeroRz, solveForQ,
                 [.. signs], [.. lower], [.. upper], maxIter, tol,
-                nativeMetric, gnBudget, cwlsDamping, frozenBudget);
+                nativeMetric, gnBudget, cwlsDamping, frozenBudget,
+                InverseFdmUiState.NativeStage2Method(_stage2),
+                lmDamping, seedGuardMargin, _nondimensionalize, reactionWeight);
 
             if (_metric == MetricMode.Force
                 && _hasBox
@@ -254,6 +286,14 @@ public class InverseFdmComponent : GH_Component
             var (forces, residuals, ratio) = TargetResidual(
                 network, targetPoints, packedLoads, result.ForceDensities);
 
+            var diagnostics = result.InverseDiagnostics ?? new InverseFdmDiagnostics();
+            if (_metric == MetricMode.Geometric)
+            {
+                double loadNorm = Math.Sqrt(packedLoads.Sum(v => v.SquareLength));
+                foreach (string warning in InverseFdmUiState.DiagnosticWarnings(diagnostics, loadNorm))
+                    AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, warning);
+            }
+
             DA.SetData(0, result.Network);
             DA.SetDataList(1, result.NodePositions);
             DA.SetDataList(2, result.EdgeCurves);
@@ -262,6 +302,9 @@ public class InverseFdmComponent : GH_Component
             DA.SetDataList(5, residuals);
             DA.SetData(6, ratio);
             DA.SetData(7, result.GeometricError);
+            DA.SetData(8, diagnostics.UsedUniformSeed);
+            DA.SetDataList(9, InverseFdmUiState.DiagnosticLines(
+                diagnostics, result.Iterations, result.Converged, result.GeometricError));
 
             if (ratio > 0.25 && _metric == MetricMode.Force)
             {
@@ -377,8 +420,45 @@ public class InverseFdmComponent : GH_Component
         AppendDirectSolverItem(directSolverMenu, "Moore–Penrose", ParticularMode.MoorePenrose);
         AppendDirectSolverItem(directSolverMenu, "Tikhonov", ParticularMode.Tikhonov);
         AppendDirectSolverItem(directSolverMenu, "QR least squares", ParticularMode.QrLeastSquares);
-        AppendDirectSolverItem(directSolverMenu, "Gram (normal equations)", ParticularMode.Gram);
+        AppendDirectSolverItem(directSolverMenu, "Gram (sparse)", ParticularMode.Gram);
+        AppendDirectSolverItem(directSolverMenu, "Gram (dense)", ParticularMode.GramDense);
         menu.Items.Add(directSolverMenu);
+        Menu_AppendSeparator(menu);
+        var stage2Menu = new ToolStripMenuItem("Stage 2 bounds")
+        {
+            Enabled = _metric == MetricMode.Geometric,
+        };
+        AppendStage2Item(stage2Menu, "Active set (BVLS)", Stage2Mode.ActiveSet);
+        AppendStage2Item(stage2Menu, "Clarabel (interior point)", Stage2Mode.Clarabel);
+        menu.Items.Add(stage2Menu);
+        Menu_AppendItem(menu, "Non-dimensionalise", (_, _) => ToggleNondimensionalize(), true, _nondimensionalize);
+    }
+
+    private void AppendStage2Item(ToolStripMenuItem parent, string label, Stage2Mode mode)
+    {
+        var item = new ToolStripMenuItem(label)
+        {
+            Checked = _stage2 == mode,
+        };
+        item.Click += (_, _) => SetStage2(mode);
+        parent.DropDownItems.Add(item);
+    }
+
+    private void SetStage2(Stage2Mode mode)
+    {
+        if (_stage2 == mode) return;
+        RecordUndoEvent("Set Inverse FDM Stage 2 Method");
+        _stage2 = mode;
+        UpdateMessage();
+        ExpireSolution(true);
+    }
+
+    private void ToggleNondimensionalize()
+    {
+        RecordUndoEvent("Toggle Inverse FDM Non-dimensionalisation");
+        _nondimensionalize = !_nondimensionalize;
+        UpdateMessage();
+        ExpireSolution(true);
     }
 
     private void AppendDirectSolverItem(
@@ -445,12 +525,14 @@ public class InverseFdmComponent : GH_Component
             ActiveInverseEngine.Tikhonov => $"Tikh λ={FormatLambda(_lambda)}",
             ActiveInverseEngine.QrLeastSquares => "QR",
             ActiveInverseEngine.Gram => $"Gram λ={FormatLambda(_lambda)}",
+            ActiveInverseEngine.GramDense => $"Gram-dense λ={FormatLambda(_lambda)}",
             ActiveInverseEngine.Lsqr when _lambda == 0.0 => "LSQR min-norm",
             ActiveInverseEngine.Lsqr => $"LSQR λ={FormatLambda(_lambda)}",
             _ => $"SPG λ={FormatLambda(_lambda)}",
         };
         string metricLabel = _metric == MetricMode.Geometric
             ? $" · {InverseFdmUiState.PhaseLabel(_frozenIterations, _gnIterations)} λ={FormatLambda(_cwlsDamping)}"
+              + $" · {InverseFdmUiState.Stage2Label(_stage2, _seedGuardMargin, _nondimensionalize)}"
             : "";
         Message = $"{engineLabel} · L2 · {unknown}{metricLabel}";
     }
@@ -466,6 +548,8 @@ public class InverseFdmComponent : GH_Component
         writer.SetInt32(ParticularKey, (int)_particular);
         writer.SetInt32(LinearAlgebraKey, (int)_linearAlgebra);
         writer.SetInt32(MetricKey, (int)_metric);
+        writer.SetInt32(Stage2Key, (int)_stage2);
+        writer.SetBoolean(NondimensionalizeKey, _nondimensionalize);
         return base.Write(writer);
     }
 
@@ -477,6 +561,10 @@ public class InverseFdmComponent : GH_Component
             _linearAlgebra = (LinearAlgebraMode)reader.GetInt32(LinearAlgebraKey);
         if (reader.ItemExists(MetricKey))
             _metric = reader.GetInt32(MetricKey) == 0 ? MetricMode.Force : MetricMode.Geometric;
+        if (reader.ItemExists(Stage2Key))
+            _stage2 = reader.GetInt32(Stage2Key) == 1 ? Stage2Mode.Clarabel : Stage2Mode.ActiveSet;
+        if (reader.ItemExists(NondimensionalizeKey))
+            _nondimensionalize = reader.GetBoolean(NondimensionalizeKey);
         UpdateMessage();
         return base.Read(reader);
     }
@@ -651,11 +739,23 @@ internal enum ParticularMode
     MoorePenrose = 0,
     Tikhonov = 1,
     QrLeastSquares = 2,
+    /// <summary>Sparse normal equations (LDLᵀ of EᵀE + λI).</summary>
     Gram = 3,
     Clarabel = 4,
+    /// <summary>Dense normal equations (dense Cholesky of EᵀE + λI); the "dense trap" reference.</summary>
+    GramDense = 5,
 }
 
 internal enum LinearAlgebraMode { Direct = 0, Iterative = 1 }
+
+/// <summary>Bound handling for the Stage-2 compliance-weighted steps.</summary>
+internal enum Stage2Mode
+{
+    /// <summary>Active-set BVLS on the sparse weighted saddle (default).</summary>
+    ActiveSet = 0,
+    /// <summary>Clarabel interior point (the previous default; the talk's "legacy" pipeline).</summary>
+    Clarabel = 1,
+}
 
 /// <summary>Residual family exposed by the component.</summary>
 internal enum MetricMode
@@ -673,20 +773,94 @@ internal enum ActiveInverseEngine
     Tikhonov,
     QrLeastSquares,
     Gram,
+    GramDense,
     Lsqr,
     Spg,
 }
 
 internal static class InverseFdmUiState
 {
-    internal const ParticularMode DefaultParticular = ParticularMode.Clarabel;
+    /// <summary>
+    /// Unboxed Stage-1 default. Any finite sign or bound routes Direct to
+    /// Clarabel regardless (<see cref="UpdateParticular"/>); without bounds the
+    /// augmented saddle is one sparse LDLᵀ where Clarabel is an interior-point
+    /// iteration for the same minimiser.
+    /// </summary>
+    internal const ParticularMode DefaultParticular = ParticularMode.Tikhonov;
     internal const MetricMode DefaultMetric = MetricMode.Geometric;
-    internal const int DefaultFrozenIterations = 0;
-    internal const int DefaultGnIterations = 3;
+    /// <summary>Talk/benchmark pipeline: one frozen step, two Gauss–Newton steps.</summary>
+    internal const int DefaultFrozenIterations = 1;
+    internal const int DefaultGnIterations = 2;
     internal const bool DefaultSolveForQ = false;
+    internal const Stage2Mode DefaultStage2 = Stage2Mode.ActiveSet;
+    internal const bool DefaultNondimensionalize = true;
+    internal const double DefaultSeedGuardMargin = 3.0;
+    internal const double DefaultLmDamping = 0.0;
+    internal const double DefaultReactionWeight = 1.0;
+    /// <summary>Edge count above which the component warns before a dense Gram solve.</summary>
+    internal const int DenseGramWarnEdges = 2000;
 
     internal static int NativeMetric(MetricMode metric) =>
         metric == MetricMode.Force ? 0 : 2;
+
+    internal static InverseStage2Method NativeStage2Method(Stage2Mode mode) =>
+        mode == Stage2Mode.Clarabel ? InverseStage2Method.Clarabel : InverseStage2Method.ActiveSet;
+
+    /// <summary>Short Stage-2 label for the component message.</summary>
+    internal static string Stage2Label(Stage2Mode stage2, double seedGuardMargin, bool nondimensionalize)
+    {
+        string label = stage2 == Stage2Mode.Clarabel ? "IP" : "AS";
+        if (seedGuardMargin <= 0.0) label += " · guard off";
+        if (!nondimensionalize) label += " · dim";
+        return label;
+    }
+
+    /// <summary>
+    /// Event-driven warnings from the Stage-2 diagnostics. Replaces the former
+    /// bounds-shape warning, which fired on every mixed-sign net regardless of
+    /// what happened.
+    /// </summary>
+    internal static IEnumerable<string> DiagnosticWarnings(InverseFdmDiagnostics d, double loadNorm)
+    {
+        if (d.UsedUniformSeed)
+            yield return "Seed guard: the Stage-1 particular was replaced by a scaled uniform sign seed "
+                + $"(Stage-1 error {d.Stage1Error:0.###e0}, uniform {d.UniformSeedError:0.###e0}).";
+        if (d.DegenerateLinearizations > 0)
+            yield return $"{d.DegenerateLinearizations} Gauss–Newton step(s) met a collapsed edge at the "
+                + "current geometry and used the frozen (target) Jacobian instead.";
+        if (d.ClarabelFallbacks > 0)
+            yield return $"{d.ClarabelFallbacks} Stage-2 step(s) fell back from the active set to Clarabel "
+                + "after a numerical failure of the sparse saddle solve.";
+        if (d.ActiveSetCapped > 0)
+            yield return $"{d.ActiveSetCapped} Stage-2 step(s) hit the active-set pass limit and returned a "
+                + "partial (feasible descent) step; the warm start may be further from the QP optimum.";
+        if (d.ReactionResidual > 0.0 && loadNorm > 0.0 && d.ReactionResidual > 0.1 * loadNorm)
+            yield return $"Realised reaction along the enforced axes is {d.ReactionResidual:0.###e0} "
+                + $"({d.ReactionResidual / loadNorm:0.##}× the load norm): the zero-reaction request is "
+                + "inconsistent with the q box or the topology.";
+    }
+
+    /// <summary>Human-readable diagnostics lines for the Diag output.</summary>
+    internal static IReadOnlyList<string> DiagnosticLines(
+        InverseFdmDiagnostics d, int iterations, bool converged, double geometricError)
+    {
+        return
+        [
+            $"geom_error = {geometricError:0.######e0}",
+            $"iterations = {iterations}",
+            $"converged = {converged}",
+            $"stage1_error = {d.Stage1Error:0.######e0}",
+            $"uniform_seed_error = {d.UniformSeedError:0.######e0}",
+            $"used_uniform_seed = {d.UsedUniformSeed}",
+            $"frozen_steps = {d.FrozenSteps}",
+            $"newton_steps = {d.NewtonSteps}",
+            $"stage2_factorizations = {d.Stage2Factorizations}",
+            $"clarabel_fallbacks = {d.ClarabelFallbacks}",
+            $"active_set_capped = {d.ActiveSetCapped}",
+            $"degenerate_linearizations = {d.DegenerateLinearizations}",
+            $"reaction_residual = {d.ReactionResidual:0.######e0}",
+        ];
+    }
 
     internal static int FrozenIterationBudget(MetricMode metric, int frozenIterations) =>
         metric == MetricMode.Force ? 0 : Math.Max(0, frozenIterations);
@@ -753,6 +927,7 @@ internal static class InverseFdmUiState
             ParticularMode.Gram => 0,
             ParticularMode.QrLeastSquares => 2,
             ParticularMode.Clarabel => 3,
+            ParticularMode.GramDense => 4,
             _ => 1,
         };
 
@@ -777,6 +952,7 @@ internal static class InverseFdmUiState
             ParticularMode.MoorePenrose => ActiveInverseEngine.MoorePenrose,
             ParticularMode.Tikhonov => ActiveInverseEngine.Tikhonov,
             ParticularMode.QrLeastSquares => ActiveInverseEngine.QrLeastSquares,
+            ParticularMode.GramDense => ActiveInverseEngine.GramDense,
             _ => ActiveInverseEngine.Gram,
         };
     }
