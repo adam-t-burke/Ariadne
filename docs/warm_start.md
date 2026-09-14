@@ -76,6 +76,89 @@ A useful invariance: `D(s·q) = s·D(q)`, so the CWLS weighting depends only on
 the *pattern* of `q_k`, not on its scale. This is why a uniform seed with the
 right sign pattern is a legitimate metric seed.
 
+### 2.1 Relation to TNA best-fit (scale optimisation and §13.5)
+
+The comparison that a TNA reader will make is Chapter 13 of *Shell
+Structures for Architecture* (Van Mele, Panozzo, Sorkine-Hornung & Block
+2014, “Best-fit thrust network analysis”), not Schek. TNA fixes the plan
+(the form diagram) and takes horizontal force densities from a force
+diagram, so only the heights `z` of the free nodes remain. Vertical
+equilibrium is `D z = p` with `D = Cₙᵀ diag(q_h) Cₙ`. The energy they
+minimise is already geometric,
+
+```
+f(q) = ‖z_N(q) − s_N‖²,     z_N(q) = D_N(q)⁻¹ (p − D_F(q) z_F),
+```
+
+subject to the force diagram remaining a convex reciprocal of the form
+diagram. That is the same objective as here, restricted to the vertical
+block, with an extra reciprocity constraint this work does not have.
+Chapter 13 then splits the inverse into two steps that must not be
+conflated with each other, or with Schek.
+
+**Scale optimisation (§13.4.3)** is the pre-step that freezes the
+distribution and fits one scalar so the funicular sits on `s`:
+
+```
+min_{z,r}  ‖z − s‖²    subject to    D z − r p = 0.
+```
+
+`D` is held fixed; `r` scales the loads, which is equivalent to scaling the
+force diagram by `1/r`. Vertical FDM/TNA equilibrium is linear in height, so
+this is linear least squares with linear equalities and is solved by one
+KKT system in `(z, r, λ)`. Substituting the constraint is the identity in
+the vertical block:
+
+```
+z − s = − D⁻¹ (D s − r p).
+```
+
+`D s − r p` is the vertical force residual at the target with scaled loads.
+Scale optimisation is therefore **the exact minimizer of `f` on a
+one-parameter family**, with the load-scale `r` chosen so that
+`z = r D⁻¹ p` is linear in the unknown.
+
+Along a ray `q = α q₀` one has `D(α q₀) = α D₀` and
+`z(α) = D₀⁻¹ p / α`, which is hyperbolic in `α`. TNA's `r = 1/α` is the
+change of variable that makes that one-parameter problem a linear KKT
+system. A frozen CWLS step restricted to `Δ ∥ q₀` is a Gauss–Newton step
+on `‖z₀/α − s‖` in `α`, hence first-order, *not* that KKT system. The seed
+guard (Section 3.3) minimises the exact `‖x(α q₀) − x*‖` in `α` by
+golden-section search, per sign group: it solves the same one-parameter
+geometric problem without the linearising `r`, and in all three
+coordinates.
+
+**Force-density optimisation (§13.5.1)** then leaves that ray: gradient
+descent on `f(q)`, ignoring reciprocity, with the closed-form gradient
+
+```
+∇f(q) = 2 (Z_N − S_N) D_N⁻¹ C_Nᵀ C z
+```
+
+(their eq. 13.23), followed by a projection onto a reciprocal force
+diagram (§13.5.2). The `D_N⁻¹` in that gradient is the same compliance that
+appears in the identity. Write `J = ∂z/∂q`; TNA takes a steepest-descent
+step in the direction `−Jᵀ (z − s)`. A frozen CWLS / Gauss–Newton step is
+the quadratic model for the *same* Jacobian,
+
+```
+(Jᵀ J) Δ = −Jᵀ (z − s),     J ≈ −D(q)⁻¹ E,
+```
+
+i.e. `min_Δ ‖D⁻¹ (E Δ + r)‖²`. Three restrictions of Chapter 13 are then
+dropped: the plan is not fixed (`x, y, z` all move); there is no
+reciprocity constraint on a force diagram; the box on `q` is handled
+exactly, including mixed sign.
+
+**What is not TNA.** Schek's inverse, and our Stage 1 / Gram, minimise
+`‖E(x*) q − p‖²` — leftover *force* at the target, every node weighted
+equally. That is a different objective. Calling best-fit TNA “Schek in a
+different parameterisation” is the sentence a TNA room will reject, and
+it is wrong: Chapter 13 never forms that residual as the energy. The
+contribution relative to Chapter 13 is the Gauss–Newton / saddle
+linearisation of `f` in 3-D FDM, with a box, as a warm start rather than
+as the design loop with reciprocity.
+
 ---
 
 ## 3. Pipeline
@@ -134,7 +217,9 @@ geometry can be an order of magnitude further from the target than a uniform
 `q` would be. The guard builds a uniform seed with the sign pattern of the box
 (or of Stage 1 where the box allows both signs), fits its magnitude per sign
 group by a golden-section search on the exact geometric error (20 Laplacian
-factorisations per group), and compares. If Stage 1 is worse by more than the
+factorisations per group), and compares. That 1-D search is TNA scale
+optimisation without the load-scale `r` that linearises depth, and in all
+three coordinates (Section 2.1). If Stage 1 is worse by more than the
 margin it is *suspect*; both seeds then run the *whole* of Stage 2 (frozen
 step and Gauss--Newton steps) and the lower final geometric error continues.
 A branch from which no damped step was accepted at all loses to one that
@@ -621,7 +706,9 @@ What the trend says:
 |---|---|---|---|---|---|
 | Schek 1974, force-density method (forward) | `x(q)` for given `q` | – | yes | 1 sparse Laplacian solve | the primitive everything else calls (`forward_solve`: 0.4 ms at 1 k edges, 53 ms at 65 k) |
 | Uniform / hand-picked `q` (common practice; the start FDMremote, JAX FDM and this repository's own optimiser use) | nothing; a starting point | trivially | only if the pattern is right — and with equal magnitudes the Laplacian is singular on 4 of the 8 CEM structures (Section 6.1) | 0 | median 52× the optimum start; 13/64 suite cases end > 1.5× the optimum |
-| Least-squares force residual on `E(x*)` (Schek's inverse, Block & Lachauer 2014 "best-fit TNA" in force-density form, Linkwitz) | `min ‖E(x*)q − p‖²` | with an interior point (our Stage 1) or unboxed + clip (Gram) | finds the self-stress pattern but not its magnitude | 1 sparse LS solve; ruinous when `EᵀE` is formed densely | 30–130× the optimum start; L-BFGS-B needs 600–900 evaluations to recover, cable dome never |
+| Least-squares force residual on `E(x*)` (Schek's inverse, Linkwitz; *not* TNA best-fit — see the next two rows) | `min ‖E(x*)q − p‖²` | with an interior point (our Stage 1) or unboxed + clip (Gram) | finds the self-stress pattern but not its magnitude | 1 sparse LS solve; ruinous when `EᵀE` is formed densely | 30–130× the optimum start; L-BFGS-B needs 600–900 evaluations to recover, cable dome never |
+| TNA scale optimisation (Van Mele, Panozzo, Sorkine-Hornung & Block 2014, *Shell Structures for Architecture* §13.4.3) | `min ‖z − s‖²` s.t. `D z − r p = 0` (`D` frozen; `r` scales loads ≡ inverse diagram scale) | one scalar, unconstrained | compression-only funiculars; plan fixed | 1 linear KKT system in `(z, r)` | exact minimizer of the geometric height error on a 1-parameter family, linearised by `r`; our seed guard is the same 1-D problem in `α` and 3-D (Section 2.1) |
+| TNA best-fit force densities (same chapter, §13.5.1) then reciprocity projection (§13.5.2) | `min ‖z(q) − s‖²` by gradient descent on `∇f = 2 (Z − S) D⁻¹ Cᵀ C z`, then restore a convex reciprocal force diagram | clip / convexity of `K*` | compression-only; plan fixed | 1 sparse Laplacian solve per GD step (their `D_N x = C_Nᵀ C z`) | same geometric objective as here, 2.5-D; steepest descent in `q`, not the Gauss–Newton / CWLS saddle; no mixed-sign, no box as a QP |
 | Geometric least squares by Gauss–Newton / L-BFGS on `‖x(q) − x*‖²` (Van Mele & Block 2014 algebraic graph statics for the 2-D case; JAX FDM, Pastrana et al. 2023, for the general differentiable case) | the right objective | box via projection or `L-BFGS-B` | yes, given a start | 1 forward solve + adjoint per evaluation | this is the downstream optimiser; from a cold start it needs 100s–1000s of evaluations |
 | Length-ratio update `q ← q·ℓ(q)/ℓ*` (practitioner heuristic, iterative TNA horizontal equilibrium) | a fixed-point form of the geometric problem | clip | no (diverges with compression) | 1 forward solve | 5× the optimum on shallow tension nets; diverges on the barrel, the tied arch, the dome |
 | **Compliance-weighted LS + active set (this work)** | the geometric objective, linearised with its own metric | exact, active set on the sparse saddle | yes | 3–5 numeric LDLs per step (one symbolic) | within 2 % of the optimum on 64/64 before L-BFGS-B; 19 s at 16 k edges (two seeds raced) vs 52 s for the interior-point variant |
@@ -631,6 +718,13 @@ Two remarks for the paper:
 * The frozen CWLS step is *exactly* Schek's least-squares inverse with the
   norm changed from `I` to `D(q)⁻²`. Everything the geometric metric buys is
   in that change of norm; Section 2 gives the one-line derivation.
+* Relative to TNA Chapter 13 (Section 2.1): scale optimisation is the exact
+  geometric fit on the scale ray, linearised by `r`; §13.5.1 is gradient
+  descent on that same `‖z(q) − s‖²`. Frozen CWLS is Gauss–Newton for the
+  same Jacobian, not a different objective. The sentence that would be
+  wrong in a TNA room is “best-fit TNA is Schek in another
+  parameterisation.” The seed guard is the 1-D geometric problem in `α`;
+  CWLS is what leaves the ray, in 3-D, with a box.
 * The active-set Stage 2 is a bounded-variable least-squares solver (Stark &
   Parker BVLS; Hintermüller–Ito–Kunisch primal–dual active set) specialised to
   a sparse saddle with a reusable symbolic factorisation and a monotone
@@ -780,12 +874,25 @@ synthetic suite nor JAX FDM's examples contain.
   start the optimiser from a uniform or user-drawn `q`; the contribution here
   is the start itself, and Section 6.1 measures it against exactly that
   baseline in two independent codes.
-* **Closest prior art on the mathematics** is Cuvilliers' thesis (MIT 2020,
-  Mueller group): closest-fit force-density fitting with analytical gradients
-  and Hessians, solved with SQP; and, in the thrust-network setting, Block &
-  Lachauer's best-fit TNA and Van Mele & Block's algebraic graph statics. None
-  of them uses the compliance-weighted norm or an active-set treatment of the
-  box, and none reports mixed-sign or self-stressed cases.
+* **Closest prior art on the mathematics.** In the thrust-network setting the
+  comparison has to split in two, and neither half is Schek (Section 2.1).
+  **Scale optimisation** (`min ‖z − s‖²` s.t. `D z = r p`, `D` frozen) is
+  the exact geometric fit on one scalar, heights only, with the load-scale
+  `r` that linearises depth; the seed guard is that 1-D problem without the
+  linearising change of variable. **Best-fit** (§13.5.1) then does
+  gradient descent on the same `‖z(q) − s‖²`, so the `D⁻¹` already appears
+  in their gradient; Van Mele & Block's algebraic graph statics is geometric
+  least squares in the 2-D graphic-statics setting. What this work adds on
+  that objective is the Gauss–Newton / saddle step (`Jᵀ J` rather than
+  steepest descent), in 3-D FDM, with an exact box, mixed sign, and no
+  reciprocity constraint. Cuvilliers' thesis (MIT 2020, Mueller group) is
+  the closest on unconstrained 3-D force-density fitting — analytical
+  gradients and Hessians, solved with SQP — but not this linearisation of
+  the box, and not mixed-sign or self-stressed cases. The sentence that
+  would be wrong in a TNA room is “nobody uses the geometric metric,” or
+  “best-fit TNA is the force residual.” The accurate one is that TNA uses
+  the geometric metric for scale and then for gradient descent on `q`, and
+  this work uses Gauss–Newton on that metric as a boxed 3-D warm start.
 * **Mixed-sign FDM in Pastrana's work** appears in three places: the JAX FDM
   paper (ICML DAE 2023) shows `q` sampled in `[−1, −0.1]` next to `q = 1`
   (Fig. 3) and a tensegrity tower (Fig. 5), and the repository ships the tied

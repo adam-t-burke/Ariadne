@@ -36,7 +36,7 @@ iterations, median 906 evaluations to get within 5 % of it.
 
 ---
 
-## Slide 2 — The identity (1:00–2:30)
+## Slide 2 — The identity (1:00–2:45)
 
 **Say.** At the target, the force residual in `q` is affine,
 `r(q) = E(x*) q − p`. Because `E(x*) q = D(q) x* + D_f(q) x_f`, the forward
@@ -54,6 +54,24 @@ gives the right linear model — compliance-weighted least squares, CWLS —
 and `D(s·q) = s·D(q)` means the weighting depends only on the *pattern* of
 `q`, so a signed uniform seed is a legitimate place to evaluate it.
 
+**TNA aside (say; they will be in the room).** Chapter 13 of *Shell
+Structures* (Van Mele, Panozzo, Sorkine-Hornung, Block) has two inverse
+steps, both on the geometric height error `‖z − s‖²`, not on leftover
+force. (i) Scale optimisation, §13.4.3: freeze the diagram, `min ‖z − s‖²`
+s.t. `D z − r p = 0`. Their `r` scales the loads with `D` held fixed
+(`1/r` scales the diagram) and is the change of variable that makes depth
+linear, so one KKT system is exact. Along a ray `q = α q₀` we would have
+`z = D₀⁻¹ p / α`, which is *not* linear in `α`; the seed guard minimises
+the exact `‖x(α q₀) − x*‖` in `α` (per sign group) — same one-parameter
+geometric problem, without that `r`, and in 3D. (ii) Best-fit, §13.5.1,
+then varies `q` by gradient descent on that same `‖z(q) − s‖²` (and
+projects back to a reciprocal diagram). The gradient already contains
+`D⁻¹`; a frozen CWLS / Gauss–Newton step is the quadratic model for the
+same Jacobian, `(Jᵀ J) Δ = −Jᵀ (z − s)` with `J ≈ −D⁻¹ E`, not a steepest-
+descent step, and it runs in `x,y,z` with a box and no reciprocity
+constraint. Do not hear “best-fit TNA = Schek”: Schek / our Stage 1 is
+`min ‖E q − p‖`, a different objective.
+
 **Show.** The equation, then one convergence plot as evidence that the
 unweighted seeds start far away:
 
@@ -68,7 +86,7 @@ where the force-residual seeds *end*.
 
 ---
 
-## Slide 3 — Pipeline and sparsity (2:30–4:30)
+## Slide 3 — Pipeline and sparsity (2:45–4:30)
 
 **Say.** Four stages, all sparse LDLᵀ factorisations of a saddle system:
 Stage 1 is the boxed force-residual particular (Clarabel, member-force form);
@@ -193,16 +211,18 @@ and up.
 
 ## Slide 8 — Related work, limits, take-away (9:15–10:00)
 
-**Say.** Schek's FDM and the Gram/least-squares inverse minimise the force
-residual — the unweighted seeds here. Block & Lachauer's best-fit thrust
-network is the same weighting in a different parameterisation. Pastrana's
+**Say.** Schek's inverse is the force residual `min ‖E q − p‖` — our
+unweighted seeds, a different objective from TNA. TNA scale optimisation
+is this identity on one scalar, heights only; TNA best-fit then does
+gradient descent on `‖z(q) − s‖²` (Slide 2). We take Gauss–Newton steps
+on that geometric objective for the full 3-D `q`, with a box. Pastrana's
 JAX FDM handles mixed sign by seed sign and bounds and optimises the same
 geometric loss with L-BFGS-B from a uniform seed; CEM parameterises trails
-and deviations instead. Cuvilliers' thesis is the closest prior art on the
-`D⁻¹` weighting. On the published JAX FDM and compas_cem cases the pipeline
-hands over a start within 1–13 % of the reachable error on the exact
-targets and never fails where the uniform seed hits a singular Laplacian
-(4 of 8 CEM structures).
+and deviations instead. Cuvilliers' thesis is the closest prior art on
+the `D⁻¹` weighting for unconstrained 3-D FDM. On the published JAX FDM
+and compas_cem cases the pipeline hands over a start within 1–13 % of
+the reachable error on the exact targets and never fails where the
+uniform seed hits a singular Laplacian (4 of 8 CEM structures).
 
 **Limits.** At 65 k edges the active set reaches its pass limit on the
 second Gauss–Newton step; targets far outside the FDM image (heavily
