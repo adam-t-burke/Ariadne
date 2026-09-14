@@ -605,6 +605,148 @@ fn ffi_error_reporting() {
     assert!(n >= 0, "unexpected negative from theseus_last_error");
 }
 
+// ─────────────────────────────────────────────────────────────
+//  Test: inverse pipeline FFI exposes Stage-2 options and diagnostics
+// ─────────────────────────────────────────────────────────────
+
+/// Target = forward geometry of a known q, so Stage 1 lands close and the
+/// pipeline has something to refine.
+unsafe fn arch_target(h: *mut TheseusHandle, d: &ArchData) -> Vec<f64> {
+    let mut xyz = vec![0.0; d.num_nodes * 3];
+    let mut lengths = vec![0.0; d.num_edges];
+    let mut forces = vec![0.0; d.num_edges];
+    let mut q_out = vec![0.0; d.num_edges];
+    let mut reactions = vec![0.0; d.num_nodes * 3];
+    let rc = theseus_solve_forward(
+        h,
+        xyz.as_mut_ptr(),
+        lengths.as_mut_ptr(),
+        forces.as_mut_ptr(),
+        q_out.as_mut_ptr(),
+        reactions.as_mut_ptr(),
+    );
+    assert_eq!(rc, 0, "forward: {}", get_last_error());
+    let mut target = Vec::with_capacity(d.num_free * 3);
+    for &node in &d.free_idx {
+        target.extend_from_slice(&xyz[node * 3..node * 3 + 3]);
+    }
+    target
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn run_pipeline(
+    h: *mut TheseusHandle,
+    d: &ArchData,
+    target: &[f64],
+    stage2_method: i32,
+    seed_guard_margin: f64,
+    nondimensionalize: i32,
+    diagnostics: *mut TheseusInverseDiagnostics,
+) -> (i32, Vec<f64>, f64) {
+    let mut q = vec![0.0; d.num_edges];
+    let mut xyz = vec![0.0; d.num_nodes * 3];
+    let mut lengths = vec![0.0; d.num_edges];
+    let mut forces = vec![0.0; d.num_edges];
+    let mut reactions = vec![0.0; d.num_nodes * 3];
+    let mut iterations = 0usize;
+    let mut converged = false;
+    let mut geom_error = f64::NAN;
+    let rc = theseus_solve_inverse_fdm_pipeline(
+        h,
+        target.as_ptr(),
+        0.0,
+        1e-6,
+        1,
+        1,
+        3, // Clarabel Stage 1
+        0, // Direct
+        0,
+        0,
+        0,
+        0, // member-force Stage 1
+        ptr::null(),
+        0,
+        d.lower.as_ptr(),
+        d.lower.len(),
+        d.upper.as_ptr(),
+        d.upper.len(),
+        4000,
+        1e-8,
+        2, // GeometryNewton
+        ptr::null(),
+        0,
+        1,
+        2,
+        stage2_method,
+        0.0,
+        seed_guard_margin,
+        nondimensionalize,
+        1.0,
+        q.as_mut_ptr(),
+        xyz.as_mut_ptr(),
+        lengths.as_mut_ptr(),
+        forces.as_mut_ptr(),
+        reactions.as_mut_ptr(),
+        &mut iterations,
+        &mut converged,
+        &mut geom_error,
+        diagnostics,
+    );
+    (rc, q, geom_error)
+}
+
+#[test]
+fn ffi_inverse_pipeline_reports_diagnostics_and_accepts_stage2_methods() {
+    let d = arch_data();
+    unsafe {
+        let h = create_handle(&d);
+        let target = arch_target(h, &d);
+
+        let mut diag = TheseusInverseDiagnostics::default();
+        let (rc, q, err) = run_pipeline(h, &d, &target, 0, 3.0, 1, &mut diag);
+        assert_eq!(rc, 0, "active set: {}", get_last_error());
+        assert!(q.iter().all(|v| v.is_finite()));
+        assert!(err.is_finite() && err < 1e-3, "active-set start err {err}");
+        assert!(diag.stage1_error.is_finite());
+        assert!(
+            diag.uniform_seed_error.is_finite(),
+            "guard on: uniform seed must be scored"
+        );
+        assert!(diag.frozen_steps + diag.newton_steps <= 3);
+        // Exact target: Stage 1 already lands on it, so the seed error is
+        // small and the guard keeps the Stage-1 seed.
+        assert!(diag.stage1_error < 1e-3, "stage1 err {}", diag.stage1_error);
+        assert_eq!(diag.used_uniform_seed, 0);
+        assert_eq!(diag.reaction_residual, 0.0, "no reaction rows enforced");
+
+        // Clarabel Stage 2 (legacy) reaches the same target.
+        let mut diag_ip = TheseusInverseDiagnostics::default();
+        let (rc, _, err_ip) = run_pipeline(h, &d, &target, 1, 0.0, 0, &mut diag_ip);
+        assert_eq!(rc, 0, "clarabel stage 2: {}", get_last_error());
+        assert!(err_ip.is_finite() && err_ip < 1e-3, "IP start err {err_ip}");
+        assert!(
+            diag_ip.uniform_seed_error.is_nan(),
+            "guard off: uniform seed must not be scored"
+        );
+        assert_eq!(diag_ip.used_uniform_seed, 0);
+
+        // Null diagnostics pointer is allowed.
+        let (rc, _, _) = run_pipeline(h, &d, &target, 0, 3.0, 1, ptr::null_mut());
+        assert_eq!(rc, 0, "null diagnostics: {}", get_last_error());
+
+        // Unknown Stage-2 method is rejected with an error, not a panic.
+        let (rc, _, _) = run_pipeline(h, &d, &target, 7, 3.0, 1, ptr::null_mut());
+        assert_eq!(rc, -1);
+        assert!(
+            get_last_error().contains("stage-2 method"),
+            "{}",
+            get_last_error()
+        );
+
+        theseus_free(h);
+    }
+}
+
 #[test]
 fn concurrent_cancel_is_race_free_reentrant_and_run_scoped() {
     let d = arch_data();

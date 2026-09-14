@@ -42,6 +42,7 @@ use ndarray::Array2;
 use std::cell::RefCell;
 use std::ops::{Deref, DerefMut};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::ptr;
 use std::slice;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -3003,6 +3004,154 @@ pub unsafe extern "C" fn theseus_solve_inverse_fdm_metric_phases(
     out_converged: *mut bool,
     out_geom_error: *mut f64,
 ) -> i32 {
+    theseus_solve_inverse_fdm_pipeline(
+        handle,
+        target_free_xyz,
+        regularization,
+        cwls_damping,
+        use_l2,
+        max_l1_iter,
+        particular_method,
+        linear_algebra,
+        enforce_zero_rx,
+        enforce_zero_ry,
+        enforce_zero_rz,
+        solve_for_q,
+        signs,
+        n_signs,
+        lower,
+        n_lower,
+        upper,
+        n_upper,
+        max_iter,
+        tol,
+        metric,
+        q_ref,
+        n_q_ref,
+        max_frozen_outer,
+        max_outer,
+        crate::inverse::Stage2Method::ActiveSet as i32,
+        crate::inverse::DEFAULT_LM_DAMPING,
+        crate::inverse::DEFAULT_SEED_GUARD_MARGIN,
+        1,
+        1.0,
+        out_q,
+        out_xyz,
+        out_lengths,
+        out_forces,
+        out_reactions,
+        out_iterations,
+        out_converged,
+        out_geom_error,
+        ptr::null_mut(),
+    )
+}
+
+/// Stage-2 warm-start diagnostics returned by
+/// [`theseus_solve_inverse_fdm_pipeline`]. Mirrors
+/// [`crate::inverse::InverseDiagnostics`] field for field; see that type for
+/// the meaning of each entry. Errors and metrics are in model units (the
+/// non-dimensionalisation is undone before they are reported).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TheseusInverseDiagnostics {
+    pub stage1_error: f64,
+    pub uniform_seed_error: f64,
+    pub reaction_residual: f64,
+    pub frozen_steps: usize,
+    pub newton_steps: usize,
+    pub stage2_factorizations: usize,
+    pub clarabel_fallbacks: usize,
+    pub active_set_capped: usize,
+    pub degenerate_linearizations: usize,
+    /// 1 when the seed guard replaced the Stage-1 seed by the uniform seed.
+    pub used_uniform_seed: u8,
+}
+
+impl From<&crate::inverse::InverseDiagnostics> for TheseusInverseDiagnostics {
+    fn from(d: &crate::inverse::InverseDiagnostics) -> Self {
+        Self {
+            stage1_error: d.stage1_error,
+            uniform_seed_error: d.uniform_seed_error,
+            reaction_residual: d.reaction_residual,
+            frozen_steps: d.frozen_steps,
+            newton_steps: d.newton_steps,
+            stage2_factorizations: d.stage2_factorizations,
+            clarabel_fallbacks: d.clarabel_fallbacks,
+            active_set_capped: d.active_set_capped,
+            degenerate_linearizations: d.degenerate_linearizations,
+            used_uniform_seed: u8::from(d.used_uniform_seed),
+        }
+    }
+}
+
+/// Solve inverse FDM with every warm-start pipeline option exposed.
+///
+/// Extends [`theseus_solve_inverse_fdm_metric_phases`] (which delegates here
+/// with the library defaults) by the Stage-2 options that were previously
+/// fixed inside the FFI, and returns the Stage-2 diagnostics.
+///
+/// * `stage2_method`: 0 = active-set BVLS on the sparse weighted saddle
+///   (default), 1 = Clarabel interior point (the previous behaviour).
+/// * `lm_damping`: Levenberg--Marquardt floor for the Gauss--Newton steps,
+///   relative to the curvature diagonal; 0 (default) halves the step length
+///   on the exact merit instead of damping the direction.
+/// * `seed_guard_margin`: Stage-1 collapse guard; the Stage-1 seed is raced
+///   against a scaled uniform sign seed when it is worse by more than this
+///   factor. 0 disables the guard. Default 3.
+/// * `nondimensionalize`: non-zero scales positions by the target extent and
+///   loads by their magnitude before assembling (default on).
+/// * `reaction_weight`: weight of the `enforce_zero_r*` rows relative to the
+///   equilibrium / geometric rows. Default 1.
+/// * `out_diagnostics`: may be null.
+///
+/// Returns 0 on success, -1 on error, -2 on internal panic.
+///
+/// # Safety
+/// Valid handle and output buffers.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn theseus_solve_inverse_fdm_pipeline(
+    handle: *mut TheseusHandle,
+    target_free_xyz: *const f64,
+    regularization: f64,
+    cwls_damping: f64,
+    use_l2: i32,
+    max_l1_iter: usize,
+    particular_method: i32,
+    linear_algebra: i32,
+    enforce_zero_rx: i32,
+    enforce_zero_ry: i32,
+    enforce_zero_rz: i32,
+    solve_for_q: i32,
+    signs: *const i32,
+    n_signs: usize,
+    lower: *const f64,
+    n_lower: usize,
+    upper: *const f64,
+    n_upper: usize,
+    max_iter: usize,
+    tol: f64,
+    metric: i32,
+    q_ref: *const f64,
+    n_q_ref: usize,
+    max_frozen_outer: usize,
+    max_outer: usize,
+    stage2_method: i32,
+    lm_damping: f64,
+    seed_guard_margin: f64,
+    nondimensionalize: i32,
+    reaction_weight: f64,
+    out_q: *mut f64,
+    out_xyz: *mut f64,
+    out_lengths: *mut f64,
+    out_forces: *mut f64,
+    out_reactions: *mut f64,
+    out_iterations: *mut usize,
+    out_converged: *mut bool,
+    out_geom_error: *mut f64,
+    out_diagnostics: *mut TheseusInverseDiagnostics,
+) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
         let h = require_handle(handle)?;
         let nn_free = h.problem.topology.free_node_indices.len();
@@ -3033,6 +3182,7 @@ pub unsafe extern "C" fn theseus_solve_inverse_fdm_metric_phases(
         let method = crate::inverse::ParticularMethod::try_from(particular_method)?;
         let algebra = crate::inverse::LinearAlgebra::try_from(linear_algebra)?;
         let metric = crate::inverse::InverseMetric::try_from(metric)?;
+        let stage2_method = crate::inverse::Stage2Method::try_from(stage2_method)?;
 
         let q_ref = if metric.is_geometric() {
             if q_ref.is_null() || n_q_ref == 0 {
@@ -3071,11 +3221,11 @@ pub unsafe extern "C" fn theseus_solve_inverse_fdm_metric_phases(
                 max_frozen_outer,
                 max_outer,
                 cwls_damping,
-                stage2_method: crate::inverse::Stage2Method::ActiveSet,
-                lm_damping: crate::inverse::DEFAULT_LM_DAMPING,
-                seed_guard_margin: crate::inverse::DEFAULT_SEED_GUARD_MARGIN,
-                nondimensionalize: true,
-                reaction_weight: 1.0,
+                stage2_method,
+                lm_damping,
+                seed_guard_margin,
+                nondimensionalize: nondimensionalize != 0,
+                reaction_weight,
             },
         )?;
         let q = result.q;
@@ -3113,6 +3263,9 @@ pub unsafe extern "C" fn theseus_solve_inverse_fdm_metric_phases(
         }
         if !out_geom_error.is_null() {
             *out_geom_error = result.geometric_error;
+        }
+        if !out_diagnostics.is_null() {
+            *out_diagnostics = TheseusInverseDiagnostics::from(&result.diagnostics);
         }
 
         Ok(())
