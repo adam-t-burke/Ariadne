@@ -28,6 +28,60 @@ public sealed class SolverResult
     /// target. NaN when not applicable or when the Laplacian was singular.
     /// </summary>
     public double GeometricError { get; init; } = double.NaN;
+
+    /// <summary>Stage-2 warm-start diagnostics for inverse solves; null otherwise.</summary>
+    public InverseFdmDiagnostics? InverseDiagnostics { get; init; }
+}
+
+/// <summary>Bound handling for the Stage-2 compliance-weighted steps.</summary>
+public enum InverseStage2Method
+{
+    /// <summary>Active-set bounded-variable least squares on the sparse weighted saddle.</summary>
+    ActiveSet = 0,
+    /// <summary>Clarabel interior-point QP (the previous default).</summary>
+    Clarabel = 1,
+}
+
+/// <summary>
+/// Diagnostics recorded by the inverse-FDM Stage-2 warm start. Errors are in
+/// model units; the reaction residual is in load units.
+/// </summary>
+public sealed record InverseFdmDiagnostics
+{
+    /// <summary>Stage-2 merit of the clipped Stage-1 seed (geometric error plus reaction residuals).</summary>
+    public double Stage1Error { get; init; } = double.NaN;
+    /// <summary>Merit of the scaled uniform sign seed scored by the guard; NaN when the guard was off.</summary>
+    public double UniformSeedError { get; init; } = double.NaN;
+    /// <summary>True when the seed guard replaced the Stage-1 seed by the uniform seed.</summary>
+    public bool UsedUniformSeed { get; init; }
+    /// <summary>Frozen-Jacobian steps accepted.</summary>
+    public int FrozenSteps { get; init; }
+    /// <summary>Gauss–Newton steps accepted.</summary>
+    public int NewtonSteps { get; init; }
+    /// <summary>Stage-2 factorisations performed, including active-set passes and rejected trials.</summary>
+    public int Stage2Factorizations { get; init; }
+    /// <summary>Stage-2 steps that fell back from the active set to Clarabel.</summary>
+    public int ClarabelFallbacks { get; init; }
+    /// <summary>Stage-2 steps on which the active set hit its pass limit and returned a partial step.</summary>
+    public int ActiveSetCapped { get; init; }
+    /// <summary>Gauss–Newton steps whose linearisation point had a collapsed edge (frozen Jacobian used).</summary>
+    public int DegenerateLinearizations { get; init; }
+    /// <summary>‖E_R(x(q)) q‖ along the enforced reaction axes at the returned q; 0 when none enforced.</summary>
+    public double ReactionResidual { get; init; }
+
+    internal static InverseFdmDiagnostics FromNative(in TheseusInterop.InverseDiagnosticsNative d) => new()
+    {
+        Stage1Error = d.stage1_error,
+        UniformSeedError = d.uniform_seed_error,
+        UsedUniformSeed = d.used_uniform_seed != 0,
+        FrozenSteps = (int)d.frozen_steps,
+        NewtonSteps = (int)d.newton_steps,
+        Stage2Factorizations = (int)d.stage2_factorizations,
+        ClarabelFallbacks = (int)d.clarabel_fallbacks,
+        ActiveSetCapped = (int)d.active_set_capped,
+        DegenerateLinearizations = (int)d.degenerate_linearizations,
+        ReactionResidual = d.reaction_residual,
+    };
 }
 
 public enum RigidityMethod
@@ -782,13 +836,17 @@ public sealed class TheseusSolver : IDisposable
 
     // ── Inverse solvers (experimental) ──────────────────────
 
-    /// particularMethod: 0 = Gram, 1 = Augmented, 2 = Sparse QR, 3 = Clarabel
-    /// (Direct unconstrained only; constrained Direct always uses Clarabel).
+    /// particularMethod: 0 = Gram (sparse), 1 = Augmented, 2 = Sparse QR,
+    /// 3 = Clarabel, 4 = Gram (dense) (Direct unconstrained only; constrained
+    /// Direct always uses Clarabel).
     /// linearAlgebra: 0 = Direct, 1 = Iterative.
     /// metric: 0 = Force (min ‖Mx − p‖), 1 = Geometry, 2 = GeometryNewton.
     /// solveForQ selects only the Stage-1 particular coordinate. GeometryNewton
     /// can run frozen-target CWLS updates before its Gauss–Newton updates;
     /// both phases refine q using Laplacian compliance.
+    /// stage2Method, lmDamping, seedGuardMargin, nondimensionalize and
+    /// reactionWeight are the warm-start pipeline options; their defaults are
+    /// the library defaults (active set, 0, 3, true, 1).
     public SolverResult SolveInverseFdm(
         double[] targetFreeXyz, double regularization,
         bool useL2 = true, int maxL1Iter = 20, int particularMethod = 3,
@@ -798,7 +856,10 @@ public sealed class TheseusSolver : IDisposable
         int[]? signs = null, double[]? lower = null, double[]? upper = null,
         int maxIter = 500, double tol = 1e-6,
         int metric = 0, double[]? qRef = null, int maxOuter = 0,
-        double cwlsDamping = 1e-6, int maxFrozenOuter = 0)
+        double cwlsDamping = 1e-6, int maxFrozenOuter = 0,
+        InverseStage2Method stage2Method = InverseStage2Method.ActiveSet,
+        double lmDamping = 0.0, double seedGuardMargin = 3.0,
+        bool nondimensionalize = true, double reactionWeight = 1.0)
     {
         ThrowIfDisposed();
         var q = new double[_numEdges];
@@ -809,11 +870,12 @@ public sealed class TheseusSolver : IDisposable
         nuint iterations = 0;
         byte converged = 0;
         double geometricError = double.NaN;
+        var diagnostics = new TheseusInterop.InverseDiagnosticsNative();
         int[] signsArr = signs ?? [];
         double[] lowerArr = lower ?? [];
         double[] upperArr = upper ?? [];
 
-        Check(TheseusInterop.theseus_solve_inverse_fdm_metric_phases(
+        Check(TheseusInterop.theseus_solve_inverse_fdm_pipeline(
             _handle, targetFreeXyz, regularization, cwlsDamping,
             useL2 ? 1 : 0, (nuint)maxL1Iter, particularMethod, linearAlgebra,
             enforceZeroRx ? 1 : 0, enforceZeroRy ? 1 : 0,
@@ -824,8 +886,11 @@ public sealed class TheseusSolver : IDisposable
             (nuint)maxIter, tol,
             metric, qRef, (nuint)(qRef?.Length ?? 0),
             (nuint)maxFrozenOuter, (nuint)maxOuter,
+            (int)stage2Method, lmDamping, seedGuardMargin,
+            nondimensionalize ? 1 : 0, reactionWeight,
             q, xyz, lengths, forces, reactions,
-            ref iterations, ref converged, ref geometricError));
+            ref iterations, ref converged, ref geometricError,
+            ref diagnostics));
 
         return new SolverResult
         {
@@ -837,6 +902,7 @@ public sealed class TheseusSolver : IDisposable
             Iterations = (int)iterations,
             Converged = converged != 0,
             GeometricError = geometricError,
+            InverseDiagnostics = InverseFdmDiagnostics.FromNative(diagnostics),
         };
     }
 

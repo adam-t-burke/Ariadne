@@ -406,6 +406,44 @@ internal static class TheseusInterop
         double[] out_forces, double[] out_reactions,
         ref nuint out_iterations, ref byte out_converged, ref double out_geom_error);
 
+    /// <summary>
+    /// Mirror of the Rust <c>TheseusInverseDiagnostics</c> (<c>#[repr(C)]</c>):
+    /// three doubles, six <c>usize</c>, one byte. Field order must match.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct InverseDiagnosticsNative
+    {
+        public double stage1_error;
+        public double uniform_seed_error;
+        public double reaction_residual;
+        public nuint frozen_steps;
+        public nuint newton_steps;
+        public nuint stage2_factorizations;
+        public nuint clarabel_fallbacks;
+        public nuint active_set_capped;
+        public nuint degenerate_linearizations;
+        public byte used_uniform_seed;
+    }
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_solve_inverse_fdm_pipeline(
+        IntPtr handle,
+        double[] target_free_xyz, double regularization, double cwls_damping,
+        int use_l2, nuint max_l1_iter, int particular_method, int linear_algebra,
+        int enforce_zero_rx, int enforce_zero_ry, int enforce_zero_rz, int solve_for_q,
+        int[] signs, nuint n_signs,
+        double[] lower, nuint n_lower,
+        double[] upper, nuint n_upper,
+        nuint max_iter, double tol,
+        int metric, double[]? q_ref, nuint n_q_ref,
+        nuint max_frozen_outer, nuint max_outer,
+        int stage2_method, double lm_damping, double seed_guard_margin,
+        int nondimensionalize, double reaction_weight,
+        double[] out_q, double[] out_xyz, double[] out_lengths,
+        double[] out_forces, double[] out_reactions,
+        ref nuint out_iterations, ref byte out_converged, ref double out_geom_error,
+        ref InverseDiagnosticsNative out_diagnostics);
+
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
     public static extern int theseus_rigidity_report_sizes(
         IntPtr handle,

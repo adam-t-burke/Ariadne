@@ -7,6 +7,7 @@ using Ariadne.FDM;
 using Ariadne.Graphs;
 using Ariadne.Utilities;
 using Rhino.Geometry;
+using Theseus.Interop;
 
 /// <summary>
 /// Shared L-BFGS tuning parameters used by solver service and optimization config.
@@ -425,6 +426,8 @@ public sealed record SolveResult
     /// geometry to the target. NaN when unavailable.
     /// </summary>
     public double GeometricError { get; init; } = double.NaN;
+    /// <summary>Stage-2 warm-start diagnostics for inverse solves; null otherwise.</summary>
+    public InverseFdmDiagnostics? InverseDiagnostics { get; init; }
 
     /// <summary>
     /// Node positions as Point3d list (convenience accessor).

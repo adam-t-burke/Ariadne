@@ -158,13 +158,15 @@ public static class TheseusSolverService
     }
 
     /// Solve inverse FDM at a target geometry, then forward-solve with the recovered q.
-    /// particularMethod: 0 = Gram, 1 = Augmented, 2 = Sparse QR, 3 = Clarabel
-    /// (Direct unconstrained only; constrained Direct always uses Clarabel).
+    /// particularMethod: 0 = Gram (sparse), 1 = Augmented, 2 = Sparse QR,
+    /// 3 = Clarabel, 4 = Gram (dense) (Direct unconstrained only; constrained
+    /// Direct always uses Clarabel).
     /// linearAlgebra: 0 = Direct, 1 = Iterative.
     /// metric: 0 = Force, 1 = legacy frozen Geometry, 2 = GeometryNewton.
     /// GeometryNewton may run maxFrozenOuter frozen-target CWLS updates before
     /// maxOuter Gauss–Newton updates. solveForQ selects only the Stage-1
     /// particular coordinate; both geometric phases work in q.
+    /// The trailing pipeline options default to the library defaults.
     public static SolveResult SolveInverseFdm(
         FDM_Network network,
         SolverInputs inputs,
@@ -186,7 +188,12 @@ public static class TheseusSolverService
         int metric = 0,
         int maxOuter = 0,
         double cwlsDamping = 1e-6,
-        int maxFrozenOuter = 0)
+        int maxFrozenOuter = 0,
+        InverseStage2Method stage2Method = InverseStage2Method.ActiveSet,
+        double lmDamping = 0.0,
+        double seedGuardMargin = 3.0,
+        bool nondimensionalize = true,
+        double reactionWeight = 1.0)
     {
         ValidateCommon(network, inputs);
         var context = BuildContext(network);
@@ -208,7 +215,8 @@ public static class TheseusSolverService
 
         var result = solver.SolveInverseFdm(targetFreeXyz, regularization, useL2, maxL1Iter, particularMethod,
             linearAlgebra, enforceZeroRx, enforceZeroRy, enforceZeroRz, solveForQ,
-            signs, lower, upper, maxIter, tol, metric, null, maxOuter, cwlsDamping, maxFrozenOuter);
+            signs, lower, upper, maxIter, tol, metric, null, maxOuter, cwlsDamping, maxFrozenOuter,
+            stage2Method, lmDamping, seedGuardMargin, nondimensionalize, reactionWeight);
         return BuildResult(network, result, context);
     }
 
@@ -864,7 +872,8 @@ public static class TheseusSolverService
             Iterations = result.Iterations,
             Converged = result.Converged,
             TerminationReason = result.TerminationReason,
-            GeometricError = result.GeometricError
+            GeometricError = result.GeometricError,
+            InverseDiagnostics = result.InverseDiagnostics
         };
     }
 
