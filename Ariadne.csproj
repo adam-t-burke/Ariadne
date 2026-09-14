@@ -13,8 +13,10 @@
     <NoWarn>$(NoWarn);1591</NoWarn>
   </PropertyGroup>
 
+  <!-- macOS dev builds: Grasshopper pulls in WinForms, so let the SDK fetch the Windows ref packs here. -->
   <PropertyGroup Condition="!$([MSBuild]::IsOSPlatform('Windows'))">
     <GenerateErrorForMissingTargetingPacks>false</GenerateErrorForMissingTargetingPacks>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
   </PropertyGroup>
 
   <!-- Copy native theseus library to output (Windows, Mac) -->
