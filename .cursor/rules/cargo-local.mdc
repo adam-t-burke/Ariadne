@@ -1,0 +1,16 @@
+---
+description: Run cargo so artefacts land in the repository target/ directory, not the sandbox cache.
+alwaysApply: true
+---
+
+# Cargo in this repository
+
+The agent sandbox exports `CARGO_TARGET_DIR` pointing at a temporary cache. Cargo lets that
+environment variable override `.cargo/config.toml`, so builds silently end up outside the repo and
+`./target/release/examples/warm_start_bench`, `build.sh`, and the dylib copy cannot find them.
+
+- Run every cargo command outside the sandbox (`required_permissions: ["all"]`) **or** strip the
+  variable first: `env -u CARGO_TARGET_DIR cargo build --release -p theseus --example warm_start_bench`.
+- Never point a command at the `/var/folders/.../cargo-target` path; fix the invocation instead.
+- Expected outputs: `target/release/examples/warm_start_bench`, `target/<triple>/release/libtheseus.dylib`
+  (via `build.sh`).

@@ -1,0 +1,5 @@
+# Keep every cargo artefact in the repository's target/ so build.sh, the
+# bench README, and the Grasshopper dylib copy all find the same binaries.
+# Note: a CARGO_TARGET_DIR environment variable still overrides this.
+[build]
+target-dir = "target"
