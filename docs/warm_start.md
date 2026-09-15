@@ -349,6 +349,54 @@ pushes the Stage-1 particular harder but makes the Stage-2 system worse
 conditioned; on the suite it gave *larger* realised reactions after the same
 three steps, so 1 is recommended.
 
+### 3.8 Partial targets (`target_weights`)
+
+A designer rarely has a position for every free node; the goal is usually a
+few key nodes (a ridge line, a clearance point, the edge of an opening) with
+the rest of the net left to equilibrium. That is how jax_fdm's
+`NodePointGoal` and compas_cem's node goals are posed, and it is also the
+formulation with room to be met exactly: a full target is generally not
+funicular and the fit is a compromise, a target on a subset `S` of the free
+nodes usually is reachable.
+
+Two things stand in the way of simply dropping rows. The identity of Section 2
+needs a *full* `x*` to assemble `E(x*)`, and `n_edges` unknowns against
+`3·|S|` constraints leaves the problem underdetermined, so something has to
+say what the untargeted nodes should do. Both are settled by a per-node weight
+on the geometric rows:
+
+```
+merit(q) = ‖W (x(q) − x̂)‖² + w_R² ‖R(q)‖²,     W = diag(w_i) ⊗ I₃
+```
+
+with `x̂` the target *completed* on the untargeted nodes (the Grasshopper
+component uses their current position), `w_i = 1` on `S` and a small positive
+`w_hold` elsewhere (default `0.01`). The frozen and Gauss--Newton steps
+minimise `‖W S⁻¹(EΔ + r)‖² + λ_c‖Δ‖²`; the seed guard and the step control
+score candidates on the same weighted merit. The weight is dimensionless, so
+non-dimensionalisation is unchanged. All weights equal to one reproduce the
+full-target pipeline exactly.
+
+Implementation: the weight enters [`MetricWeight`](../crates/theseus/src/inverse_extra.rs)
+once, as a column scaling `S W⁻¹` of the assembled metric together with
+`apply_inverse ↦ W S⁻¹ r`, so the saddle variable `e` *is* the weighted
+residual and every Stage-2 backend (active set, Clarabel, LSQR, SPG, the
+Hutchinson curvature probe) inherits the weighting without change. Reaction
+rows keep weight one and their coupling `wG` acts on the unweighted geometry,
+as the realised reaction requires. Weights must be strictly positive: a zero
+weight would make `S W⁻¹` singular, and the soft hold is what keeps the
+underdetermined subset problem well posed. Stage 1 (`min ‖E(x̂)q − p‖²`) is left
+unweighted; it only needs the completed `x̂`, and the guard scores its seed on
+the weighted merit like every other candidate. Weighting the Stage-1 rows as
+well is an open ablation.
+
+On a funicular 5×5 corner-anchored grid whose three central nodes are lifted
+by `0.3` (`tests/inverse.rs`, `subset_target_lands_on_the_targeted_nodes_and_lets_the_rest_float`),
+the full-target solve lands `0.11` from the lifted nodes (the compromise with
+the 18 rows that ask for the old funicular), while the subset solve with
+`w_hold = 0.01` lands `2·10⁻⁵` from them and lets the remaining nodes move
+`0.22` in total to carry the change.
+
 ---
 
 ## 4. Benchmarks
@@ -966,3 +1014,10 @@ synthetic suite nor JAX FDM's examples contain.
    The Stage-1 seed is what limits it there; candidates are a Stage 1 in the
    compliance-weighted norm of the uniform seed, or several Stage-2 restarts
    from the seed sweep with the best final error kept.
+7. **Partial targets on the suite.** Section 3.8 is validated on a synthetic
+   grid only. The external case files already carry sparse designer goals
+   (`target_original` with `null` entries) that the case builder currently
+   discards in favour of the dense target; running them through
+   `target_weights` would measure the subset formulation against the
+   published node-goal solves, and would settle whether the Stage-1 rows
+   should be weighted as well.
