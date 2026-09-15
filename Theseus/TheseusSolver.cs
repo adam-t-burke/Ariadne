@@ -847,6 +847,9 @@ public sealed class TheseusSolver : IDisposable
     /// stage2Method, lmDamping, seedGuardMargin, nondimensionalize and
     /// reactionWeight are the warm-start pipeline options; their defaults are
     /// the library defaults (active set, 0, 3, true, 1).
+    /// targetWeights: optional per-free-node weights on the geometric rows
+    /// (free-node order, finite and strictly positive); null weighs every
+    /// node 1. Used to pose a target on a subset of the free nodes.
     public SolverResult SolveInverseFdm(
         double[] targetFreeXyz, double regularization,
         bool useL2 = true, int maxL1Iter = 20, int particularMethod = 3,
@@ -859,9 +862,14 @@ public sealed class TheseusSolver : IDisposable
         double cwlsDamping = 1e-6, int maxFrozenOuter = 0,
         InverseStage2Method stage2Method = InverseStage2Method.ActiveSet,
         double lmDamping = 0.0, double seedGuardMargin = 3.0,
-        bool nondimensionalize = true, double reactionWeight = 1.0)
+        bool nondimensionalize = true, double reactionWeight = 1.0,
+        double[]? targetWeights = null)
     {
         ThrowIfDisposed();
+        if (targetWeights is not null && targetWeights.Length != _numFree)
+            throw new ArgumentException(
+                $"Target weights must contain one value per free node ({_numFree}), got {targetWeights.Length}.",
+                nameof(targetWeights));
         var q = new double[_numEdges];
         var xyz = new double[_numNodes * 3];
         var lengths = new double[_numEdges];
@@ -888,6 +896,7 @@ public sealed class TheseusSolver : IDisposable
             (nuint)maxFrozenOuter, (nuint)maxOuter,
             (int)stage2Method, lmDamping, seedGuardMargin,
             nondimensionalize ? 1 : 0, reactionWeight,
+            targetWeights,
             q, xyz, lengths, forces, reactions,
             ref iterations, ref converged, ref geometricError,
             ref diagnostics));

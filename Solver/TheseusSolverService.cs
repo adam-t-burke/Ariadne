@@ -167,6 +167,9 @@ public static class TheseusSolverService
     /// maxOuter Gauss–Newton updates. solveForQ selects only the Stage-1
     /// particular coordinate; both geometric phases work in q.
     /// The trailing pipeline options default to the library defaults.
+    /// targetWeights (optional, one per free node, finite and positive)
+    /// weights the geometric rows so a target can be posed on a subset of
+    /// the free nodes; null weighs every node 1.
     public static SolveResult SolveInverseFdm(
         FDM_Network network,
         SolverInputs inputs,
@@ -193,7 +196,8 @@ public static class TheseusSolverService
         double lmDamping = 0.0,
         double seedGuardMargin = 3.0,
         bool nondimensionalize = true,
-        double reactionWeight = 1.0)
+        double reactionWeight = 1.0,
+        double[]? targetWeights = null)
     {
         ValidateCommon(network, inputs);
         var context = BuildContext(network);
@@ -216,7 +220,7 @@ public static class TheseusSolverService
         var result = solver.SolveInverseFdm(targetFreeXyz, regularization, useL2, maxL1Iter, particularMethod,
             linearAlgebra, enforceZeroRx, enforceZeroRy, enforceZeroRz, solveForQ,
             signs, lower, upper, maxIter, tol, metric, null, maxOuter, cwlsDamping, maxFrozenOuter,
-            stage2Method, lmDamping, seedGuardMargin, nondimensionalize, reactionWeight);
+            stage2Method, lmDamping, seedGuardMargin, nondimensionalize, reactionWeight, targetWeights);
         return BuildResult(network, result, context);
     }
 

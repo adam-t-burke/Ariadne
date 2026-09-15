@@ -3035,6 +3035,7 @@ pub unsafe extern "C" fn theseus_solve_inverse_fdm_metric_phases(
         crate::inverse::DEFAULT_SEED_GUARD_MARGIN,
         1,
         1.0,
+        ptr::null(),
         out_q,
         out_xyz,
         out_lengths,
@@ -3103,12 +3104,17 @@ impl From<&crate::inverse::InverseDiagnostics> for TheseusInverseDiagnostics {
 ///   loads by their magnitude before assembling (default on).
 /// * `reaction_weight`: weight of the `enforce_zero_r*` rows relative to the
 ///   equilibrium / geometric rows. Default 1.
+/// * `target_weights`: per-free-node weights on the geometric rows
+///   (`num_free` doubles, free-node order), or null for all ones. Poses a
+///   target on a subset of the free nodes: targeted rows weigh 1, rows that
+///   carry a completion of the target (e.g. the current geometry) a small
+///   positive weight. Must be finite and strictly positive.
 /// * `out_diagnostics`: may be null.
 ///
 /// Returns 0 on success, -1 on error, -2 on internal panic.
 ///
 /// # Safety
-/// Valid handle and output buffers.
+/// Valid handle and output buffers; `target_weights` null or `num_free` long.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn theseus_solve_inverse_fdm_pipeline(
@@ -3142,6 +3148,7 @@ pub unsafe extern "C" fn theseus_solve_inverse_fdm_pipeline(
     seed_guard_margin: f64,
     nondimensionalize: i32,
     reaction_weight: f64,
+    target_weights: *const f64,
     out_q: *mut f64,
     out_xyz: *mut f64,
     out_lengths: *mut f64,
@@ -3226,7 +3233,7 @@ pub unsafe extern "C" fn theseus_solve_inverse_fdm_pipeline(
                 seed_guard_margin,
                 nondimensionalize: nondimensionalize != 0,
                 reaction_weight,
-                target_weights: Vec::new(),
+                target_weights: copy_f64(target_weights, nn_free),
             },
         )?;
         let q = result.q;

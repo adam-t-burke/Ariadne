@@ -439,6 +439,7 @@ internal static class TheseusInterop
         nuint max_frozen_outer, nuint max_outer,
         int stage2_method, double lm_damping, double seed_guard_margin,
         int nondimensionalize, double reaction_weight,
+        double[]? target_weights,
         double[] out_q, double[] out_xyz, double[] out_lengths,
         double[] out_forces, double[] out_reactions,
         ref nuint out_iterations, ref byte out_converged, ref double out_geom_error,

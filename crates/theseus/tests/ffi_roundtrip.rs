@@ -682,6 +682,7 @@ unsafe fn run_pipeline(
         seed_guard_margin,
         nondimensionalize,
         1.0,
+        ptr::null(),
         q.as_mut_ptr(),
         xyz.as_mut_ptr(),
         lengths.as_mut_ptr(),
