@@ -1964,6 +1964,169 @@ fn public_q_bounds_hold_for_q_and_member_force_stage_one() {
     }
 }
 
+// ─────────────────────────────────────────────────────────────
+//  Per-node target weights (subset targets)
+// ─────────────────────────────────────────────────────────────
+
+fn boxed_newton_opts(frozen: usize, newton: usize) -> InverseFdmOptions {
+    InverseFdmOptions {
+        metric: InverseMetric::GeometryNewton,
+        lower: vec![1e-3],
+        upper: vec![100.0],
+        max_frozen_outer: frozen,
+        max_outer: newton,
+        tol: 1e-10,
+        ..inverse_opts(1e-8, true, ParticularMethod::Clarabel, LinearAlgebra::Direct, false)
+    }
+}
+
+/// Distance from the forward solve to the target over a subset of free rows.
+fn subset_error(problem: &Problem, target: &Array2<f64>, q: &[f64], rows: &[usize]) -> f64 {
+    let (reached, _) = forward_target(problem, q);
+    rows.iter()
+        .map(|&i| (0..3).map(|d| (reached[[i, d]] - target[[i, d]]).powi(2)).sum::<f64>())
+        .sum::<f64>()
+        .sqrt()
+}
+
+#[test]
+fn unit_target_weights_reproduce_the_unweighted_solve() {
+    let (problem, known_q) = square_grid_problem(4);
+    let (funicular, _) = forward_target(&problem, &known_q);
+    let target = jitter_z(&funicular);
+    let n_free = problem.topology.free_node_indices.len();
+
+    let plain = solve_inverse_fdm(&problem, &target, boxed_newton_opts(1, 2)).unwrap();
+    let weighted = solve_inverse_fdm(
+        &problem,
+        &target,
+        InverseFdmOptions {
+            target_weights: vec![1.0; n_free],
+            ..boxed_newton_opts(1, 2)
+        },
+    )
+    .unwrap();
+
+    assert_eq!(plain.iterations, weighted.iterations);
+    assert_eq!(plain.diagnostics.frozen_steps, weighted.diagnostics.frozen_steps);
+    assert_eq!(plain.diagnostics.newton_steps, weighted.diagnostics.newton_steps);
+    for (a, b) in plain.q.iter().zip(&weighted.q) {
+        assert!(
+            (a - b).abs() <= 1e-12 * a.abs().max(1.0),
+            "unit weights changed q: {a} vs {b}"
+        );
+    }
+    assert!((plain.geometric_error - weighted.geometric_error).abs() <= 1e-12);
+}
+
+#[test]
+fn subset_target_lands_on_the_targeted_nodes_and_lets_the_rest_float() {
+    // A funicular 5×5 grid whose three central nodes are lifted. The full
+    // target (lifted nodes plus the old funicular elsewhere) is not funicular;
+    // the subset target (lifted nodes only, the rest softly held) has room.
+    let (problem, known_q) = square_grid_problem(5);
+    let (funicular, _) = forward_target(&problem, &known_q);
+    let n_free = problem.topology.free_node_indices.len();
+    let centre = |row: usize, col: usize| row * 5 + col;
+    let targeted: Vec<usize> = [centre(2, 1), centre(2, 2), centre(2, 3)]
+        .iter()
+        .map(|node| {
+            problem
+                .topology
+                .free_node_indices
+                .iter()
+                .position(|n| n == node)
+                .unwrap()
+        })
+        .collect();
+    let mut target = funicular.clone();
+    for &i in &targeted {
+        target[[i, 2]] -= 0.3;
+    }
+    let untargeted: Vec<usize> = (0..n_free).filter(|i| !targeted.contains(i)).collect();
+    let bump = subset_error(&problem, &target, &known_q, &targeted);
+
+    let full = solve_inverse_fdm(&problem, &target, boxed_newton_opts(1, 4)).unwrap();
+    let mut weights = vec![0.01; n_free];
+    for &i in &targeted {
+        weights[i] = 1.0;
+    }
+    let subset = solve_inverse_fdm(
+        &problem,
+        &target,
+        InverseFdmOptions {
+            target_weights: weights,
+            ..boxed_newton_opts(1, 4)
+        },
+    )
+    .unwrap();
+
+    let full_on_targets = subset_error(&problem, &target, &full.q, &targeted);
+    let subset_on_targets = subset_error(&problem, &target, &subset.q, &targeted);
+    let subset_drift = subset_error(&problem, &target, &subset.q, &untargeted);
+    eprintln!(
+        "bump {bump:.4e}; full solve on targets {full_on_targets:.4e}; \
+         subset solve on targets {subset_on_targets:.4e}, drift elsewhere {subset_drift:.4e}; \
+         weighted merit {:.4e} from stage-1 {:.4e}",
+        subset.geometric_error, subset.diagnostics.stage1_error
+    );
+
+    assert!(subset.q.iter().all(|q| q.is_finite()));
+    assert!(
+        subset_on_targets < full_on_targets,
+        "weighting the targeted nodes should land closer on them than the full target: \
+         {subset_on_targets:.4e} vs {full_on_targets:.4e}"
+    );
+    assert!(
+        subset_on_targets < 0.25 * bump,
+        "subset solve should remove most of the {bump:.4e} lift, left {subset_on_targets:.4e}"
+    );
+    assert!(subset_drift > 1e-6, "untargeted nodes should be free to move");
+    // The Stage-2 phases only accept steps that lower the weighted merit.
+    assert!(
+        subset.geometric_error <= subset.diagnostics.stage1_error * (1.0 + 1e-9),
+        "weighted merit {:.4e} above the Stage-1 seed {:.4e}",
+        subset.geometric_error,
+        subset.diagnostics.stage1_error
+    );
+}
+
+#[test]
+fn invalid_target_weights_are_rejected() {
+    let (problem, known_q) = square_grid_problem(4);
+    let (target, _) = forward_target(&problem, &known_q);
+    let n_free = problem.topology.free_node_indices.len();
+
+    for (label, weights) in [
+        ("wrong length", vec![1.0; n_free + 1]),
+        ("zero", {
+            let mut w = vec![1.0; n_free];
+            w[0] = 0.0;
+            w
+        }),
+        ("negative", {
+            let mut w = vec![1.0; n_free];
+            w[1] = -0.5;
+            w
+        }),
+        ("nan", {
+            let mut w = vec![1.0; n_free];
+            w[2] = f64::NAN;
+            w
+        }),
+    ] {
+        let result = solve_inverse_fdm(
+            &problem,
+            &target,
+            InverseFdmOptions {
+                target_weights: weights,
+                ..boxed_newton_opts(1, 2)
+            },
+        );
+        assert!(result.is_err(), "{label} target weights were accepted");
+    }
+}
+
 #[test]
 #[ignore = "manual release benchmark; run with --release --ignored --nocapture"]
 fn benchmark_staged_inverse_21_by_21_nodes() {

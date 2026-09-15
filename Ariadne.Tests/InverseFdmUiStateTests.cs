@@ -107,6 +107,20 @@ public sealed class InverseFdmUiStateTests
     }
 
     [Fact]
+    public void DiagnosticLinesReportThePartialTargetRecord()
+    {
+        var lines = InverseFdmUiState.DiagnosticLines(
+            new Theseus.Interop.InverseFdmDiagnostics(),
+            iterations: 1, converged: false, geometricError: 0.25,
+            partial: (WeightedError: 0.125, TargetedNodes: 3, HoldWeight: 0.01));
+        Assert.Equal("geom_error = 2.5e-1", lines[0]);
+        Assert.Equal("weighted_error = 1.25e-1", lines[1]);
+        Assert.Equal("targeted_nodes = 3", lines[2]);
+        Assert.Equal("hold_weight = 1e-2", lines[3]);
+        Assert.Equal(16, lines.Count);
+    }
+
+    [Fact]
     public void EffectiveBoundsMatchNativeFiniteBoxRules()
     {
         Assert.False(InverseFdmUiState.HasEffectiveBounds(
