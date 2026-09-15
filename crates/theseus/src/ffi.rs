@@ -3226,6 +3226,7 @@ pub unsafe extern "C" fn theseus_solve_inverse_fdm_pipeline(
                 seed_guard_margin,
                 nondimensionalize: nondimensionalize != 0,
                 reaction_weight,
+                target_weights: Vec::new(),
             },
         )?;
         let q = result.q;

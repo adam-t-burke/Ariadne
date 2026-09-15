@@ -249,6 +249,7 @@ fn inverse_opts(
         seed_guard_margin: DEFAULT_SEED_GUARD_MARGIN,
         nondimensionalize: true,
         reaction_weight: 1.0,
+        target_weights: Vec::new(),
     }
 }
 

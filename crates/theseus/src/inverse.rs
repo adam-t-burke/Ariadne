@@ -228,6 +228,17 @@ pub struct InverseFdmOptions {
     /// (with `nondimensionalize`); larger values push harder towards zero
     /// reaction at the expense of geometric fit.
     pub reaction_weight: f64,
+    /// Per-free-node weights on the Stage-2 geometric rows, in free-node
+    /// order. Empty means every node weighs `1`; otherwise the merit becomes
+    /// `‖W(x(q) − x*)‖²` with `W` the weight repeated on the node's three
+    /// axes. This is how a target on a *subset* of the free nodes is posed:
+    /// targeted nodes weigh `1`, the remaining rows carry a completion of the
+    /// target (typically the current geometry) with a small positive weight
+    /// that keeps the problem well posed and softly holds them in place.
+    /// Weights must be finite and strictly positive. Stage 1 (the force
+    /// residual) is not weighted; the seed guard scores it on the weighted
+    /// merit.
+    pub target_weights: Vec<f64>,
 }
 
 /// Bound handling for the Stage-2 compliance-weighted steps.
@@ -292,6 +303,7 @@ impl InverseFdmOptions {
             seed_guard_margin: DEFAULT_SEED_GUARD_MARGIN,
             nondimensionalize: true,
             reaction_weight: 1.0,
+            target_weights: Vec::new(),
         }
     }
 }
@@ -311,6 +323,8 @@ pub struct InverseFdmResult {
     pub iterations: usize,
     pub converged: bool,
     /// `‖x(q) − x*‖`, the distance the forward solve lands from the target.
+    /// With `target_weights` set this is the weighted norm `‖W(x(q) − x*)‖`,
+    /// i.e. the geometric part of the merit Stage 2 minimises.
     ///
     /// Exact for geometry-independent loads via `e = −D(q)^-1 r(q)`. Reported
     /// for every metric, so a `Force` solve can be compared against a

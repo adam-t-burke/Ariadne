@@ -1013,12 +1013,24 @@ fn l2_norm_prefix(v: &[f64], len: usize) -> f64 {
 /// `S` is kept assembled for the backends that embed it (Clarabel, saddle);
 /// `D` is kept factored for the backends that apply `S⁻¹` per matvec (LSQR,
 /// SPG) and for evaluating the exact geometric error. `D` is never inverted.
+///
+/// With per-node target weights `W` (see
+/// [`InverseFdmOptions::target_weights`]) the weighted residual `W S⁻¹ r` is
+/// what every backend must see. Rather than touching each of them, the
+/// assembled matrix is `S W⁻¹` (free columns scaled by `1/w`) and
+/// [`Self::apply_inverse`] returns `W S⁻¹ r`: the saddle variable `e` then
+/// *is* the weighted residual and `½‖e‖²` the weighted objective. Reaction
+/// rows and columns keep weight `1`; the coupling term is evaluated on the
+/// unweighted geometry, as the realised reaction requires.
 struct MetricWeight {
     s: SparseColMatOwned,
     d: SparseColMatOwned,
     d_factor: Factorization,
     /// `w·G`, present only with reaction rows.
     coupling: Option<SparseColMatOwned>,
+    /// Per-row target weights on the `3·n_free` free-node rows (node weight
+    /// repeated per axis); `None` when every node weighs one.
+    row_weights: Option<Vec<f64>>,
     /// Axis of each reaction block row, in row order.
     reaction_dims: Vec<usize>,
     n_fixed: usize,
@@ -1030,15 +1042,36 @@ struct MetricWeight {
 
 impl MetricWeight {
     /// Assemble and factor the weight at force densities `q` for the rows of
-    /// `system`, with the reaction rows scaled by `reaction_weight`.
+    /// `system`, with the reaction rows scaled by `reaction_weight` and the
+    /// free-node rows by the per-node `node_weights` (empty = all ones).
     fn build(
         problem: &Problem,
         q: &[f64],
         system: &EquilibriumSystem,
         reaction_weight: f64,
+        node_weights: &[f64],
     ) -> Result<Self, TheseusError> {
         let n_eq = system.n_eq;
         let n_free = system.n_free;
+        let row_weights = if node_weights.is_empty() {
+            None
+        } else {
+            if node_weights.len() != n_free {
+                return Err(TheseusError::Shape(format!(
+                    "target_weights has {} entries, expected one per free node ({n_free})",
+                    node_weights.len()
+                )));
+            }
+            let mut rows = Vec::with_capacity(3 * n_free);
+            for _axis in 0..3 {
+                rows.extend_from_slice(node_weights);
+            }
+            Some(rows)
+        };
+        // Column scale of the free-node columns of S: 1/w, or 1 without weights.
+        let column_scale = |column: usize| -> f64 {
+            row_weights.as_ref().map_or(1.0, |w| 1.0 / w[column])
+        };
         let cn = &problem.topology.free_incidence;
         let cn_t = cn.transpose();
         let scaled = row_scaled_copy(cn, q);
@@ -1079,7 +1112,11 @@ impl MetricWeight {
                 let value = d.values[nz];
                 for axis in 0..3 {
                     let offset = axis * n_free;
-                    triplets.push(((offset + row) as u32, (offset + col) as u32, value));
+                    triplets.push((
+                        (offset + row) as u32,
+                        (offset + col) as u32,
+                        value * column_scale(offset + col),
+                    ));
                 }
             }
         }
@@ -1095,7 +1132,7 @@ impl MetricWeight {
                         triplets.push((
                             (row_offset + g.row_indices[nz] as usize) as u32,
                             (col_offset + col) as u32,
-                            g.values[nz],
+                            g.values[nz] * column_scale(col_offset + col),
                         ));
                     }
                 }
@@ -1131,6 +1168,7 @@ impl MetricWeight {
             d,
             d_factor,
             coupling,
+            row_weights,
             reaction_dims,
             n_fixed,
             n_free,
@@ -1140,10 +1178,12 @@ impl MetricWeight {
         })
     }
 
-    /// Apply `S⁻¹` to an equilibrium-row vector.
+    /// Apply `W S⁻¹` to an equilibrium-row vector.
     ///
-    /// Solves the three axis blocks in one triangular solve, then forms the
-    /// reaction rows as `r_R − wG·e_axis` (block forward substitution).
+    /// Solves the three axis blocks in one triangular solve, forms the
+    /// reaction rows as `r_R − wG·e_axis` (block forward substitution) from
+    /// the unweighted geometry, then scales the free-node rows by the target
+    /// weights. Without weights this is plain `S⁻¹`.
     fn apply_inverse(&self, r: &[f64]) -> Result<Vec<f64>, TheseusError> {
         let mut out = self.solve_d_blocks(r)?;
         let first = 3 * self.n_free;
@@ -1158,15 +1198,39 @@ impl MetricWeight {
                 }
             }
         }
+        if let Some(w) = &self.row_weights {
+            for (value, &wi) in out[..first].iter_mut().zip(w) {
+                *value *= wi;
+            }
+        }
         Ok(out)
     }
 
-    /// Apply `S⁻ᵀ` to an equilibrium-row vector (block back substitution:
-    /// the reaction rows pass through, the free-node rows solve
+    /// Recover the unweighted geometric offset `x* − x(q)` on the free-node
+    /// rows from a vector produced by [`Self::apply_inverse`]; reaction rows
+    /// pass through unchanged.
+    fn unweight_geometry(&self, weighted: &[f64]) -> Vec<f64> {
+        let mut out = weighted.to_vec();
+        if let Some(w) = &self.row_weights {
+            let first = 3 * self.n_free;
+            for (value, &wi) in out[..first].iter_mut().zip(w) {
+                *value /= wi;
+            }
+        }
+        out
+    }
+
+    /// Apply `(W S⁻¹)ᵀ = S⁻ᵀ W` to an equilibrium-row vector (block back
+    /// substitution: the reaction rows pass through, the free-node rows solve
     /// `D u = v − wGᵀ v_R`). Used for the Hutchinson curvature estimate.
     fn apply_inverse_transpose(&self, v: &[f64]) -> Result<Vec<f64>, TheseusError> {
         let first = 3 * self.n_free;
         let mut rhs = v.to_vec();
+        if let Some(w) = &self.row_weights {
+            for (value, &wi) in rhs[..first].iter_mut().zip(w) {
+                *value *= wi;
+            }
+        }
         if let Some(g) = &self.coupling {
             let g_t = g.transpose();
             for (block, &axis) in self.reaction_dims.iter().enumerate() {
@@ -1260,13 +1324,15 @@ impl MetricWeight {
 /// Current geometry and error for an unknown vector under the geometric metric.
 struct GeometryProbe {
     weight: MetricWeight,
-    /// `S⁻¹ r`: `x* − x(q)` on the free-node rows, the weighted realised
-    /// reactions `w·E_R(x(q))·q` on the reaction rows.
+    /// `W S⁻¹ r`: the target-weighted `x* − x(q)` on the free-node rows
+    /// (plain `x* − x(q)` without target weights), the weighted realised
+    /// reactions `w·E_R(x(q))·q` on the reaction rows. Use
+    /// [`MetricWeight::unweight_geometry`] to read positions off it.
     neg_error: Vec<f64>,
-    /// `‖x(q) − x*‖` over the free-node rows only.
+    /// `‖W(x(q) − x*)‖` over the free-node rows only.
     error: f64,
-    /// `‖S⁻¹ r‖` over all rows: the geometric error plus the weighted
-    /// realised reactions, which is the objective the Stage-2 steps
+    /// `‖W S⁻¹ r‖` over all rows: the (weighted) geometric error plus the
+    /// weighted realised reactions, which is the objective the Stage-2 steps
     /// minimise. Equal to `error` without reaction rows.
     merit: f64,
 }
@@ -1278,20 +1344,22 @@ struct GeometryProbe {
 ///
 /// Reaction rows, when present, come out as the reactions of the forward
 /// solve at `q` (see [`MetricWeight`]), so the merit is what a forward solve
-/// at `q` would actually report.
+/// at `q` would actually report. `node_weights` are the per-free-node target
+/// weights (empty = all ones).
 fn probe_geometry(
     problem: &Problem,
     system: &EquilibriumSystem,
     unknown: &[f64],
     solve_for_q: bool,
     reaction_weight: f64,
+    node_weights: &[f64],
 ) -> Result<GeometryProbe, TheseusError> {
     let q = if solve_for_q {
         unknown.to_vec()
     } else {
         forces_to_q(unknown, &system.lengths)
     };
-    let weight = MetricWeight::build(problem, &q, system, reaction_weight)?;
+    let weight = MetricWeight::build(problem, &q, system, reaction_weight, node_weights)?;
     let mut r = system.a.matvec(unknown);
     for (ri, &pi) in r.iter_mut().zip(system.p.iter()) {
         *ri -= pi;
@@ -1327,9 +1395,9 @@ pub fn geometric_error_vector(
         false,
         false,
     )?;
-    let probe = probe_geometry(problem, &system, q, true, 1.0)?;
+    let probe = probe_geometry(problem, &system, q, true, 1.0, &[])?;
     let n_free = system.n_free;
-    // probe.neg_error is x* − x(q).
+    // probe.neg_error is x* − x(q) (no target weights here).
     Ok(Array2::from_shape_fn((n_free, 3), |(i, d)| {
         -probe.neg_error[d * n_free + i]
     }))
@@ -1375,6 +1443,35 @@ fn shift_box(bounds: &BoxBounds, x: &[f64]) -> BoxBounds {
             .map(|(&hi, &xi)| hi - xi)
             .collect(),
     }
+}
+
+/// Reject per-node target weights that are not one per free node, finite and
+/// strictly positive. Zero would make the weighted metric singular (the
+/// saddle's `S W⁻¹` block); a subset target is posed with a small positive
+/// weight on the completed rows instead.
+fn validate_target_weights(problem: &Problem, opts: &InverseFdmOptions) -> Result<(), TheseusError> {
+    if opts.target_weights.is_empty() {
+        return Ok(());
+    }
+    let n_free = problem.topology.free_node_indices.len();
+    if opts.target_weights.len() != n_free {
+        return Err(TheseusError::Shape(format!(
+            "target_weights has {} entries, expected one per free node ({n_free})",
+            opts.target_weights.len()
+        )));
+    }
+    if let Some((i, &w)) = opts
+        .target_weights
+        .iter()
+        .enumerate()
+        .find(|(_, w)| !w.is_finite() || **w <= 0.0)
+    {
+        return Err(TheseusError::Solver(format!(
+            "target_weights[{i}] = {w} must be finite and strictly positive; use a small \
+             positive weight, not zero, for free nodes without a target"
+        )));
+    }
+    Ok(())
 }
 
 /// Reject reaction constraints that no equilibrium state can satisfy.
@@ -1424,7 +1521,9 @@ fn reaction_residual(problem: &Problem, system: &EquilibriumSystem, q: &[f64], w
     if system.n_eq <= first {
         return 0.0;
     }
-    match probe_geometry(problem, system, q, true, weight) {
+    // Reaction rows are formed from the unweighted geometry, so target
+    // weights do not enter here.
+    match probe_geometry(problem, system, q, true, weight, &[]) {
         Ok(probe) => probe.neg_error[first..]
             .iter()
             .map(|v| (v / weight).powi(2))
@@ -1582,6 +1681,7 @@ pub fn solve_inverse_fdm(
             "reaction_weight must be finite and positive".into(),
         ));
     }
+    validate_target_weights(problem, &opts)?;
     let ne = problem.topology.num_edges;
     let mut stage1_system = EquilibriumSystem::assemble(
         problem,
@@ -1880,7 +1980,16 @@ pub fn solve_inverse_fdm(
         opts.enforce_zero_ry,
         opts.enforce_zero_rz,
     )
-    .and_then(|q_system| probe_geometry(problem, &q_system, &stage1_q, true, opts.reaction_weight))
+    .and_then(|q_system| {
+        probe_geometry(
+            problem,
+            &q_system,
+            &stage1_q,
+            true,
+            opts.reaction_weight,
+            &opts.target_weights,
+        )
+    })
     .map(|probe| probe.error)
     .unwrap_or(f64::NAN);
     Ok(InverseFdmResult {
@@ -2007,6 +2116,7 @@ impl<'a> Stage2Context<'a> {
             q,
             true,
             self.opts.reaction_weight,
+            &self.opts.target_weights,
         )
         .map(|probe| probe.merit)
         .unwrap_or(f64::INFINITY)
@@ -2498,7 +2608,14 @@ fn solve_geometric_outer(
         ctx.seed_active_set(&x);
     }
 
-    let mut probe = probe_geometry(problem, system, &x, true, opts.reaction_weight)?;
+    let mut probe = probe_geometry(
+        problem,
+        system,
+        &x,
+        true,
+        opts.reaction_weight,
+        &opts.target_weights,
+    )?;
     let mut best_x = x.clone();
     let mut best_merit = probe.merit;
     let mut best_error = probe.error;
@@ -2529,9 +2646,12 @@ fn solve_geometric_outer(
             InverseMetric::Geometry => None,
             InverseMetric::GeometryNewton => {
                 // x(q_k) = x* + e_k = x* − S⁻¹r_k, no forward solve needed.
+                // The probe stores the target-weighted offset; divide the
+                // weights back out to read positions.
                 let n_free = system.n_free;
+                let offset = probe.weight.unweight_geometry(&probe.neg_error);
                 let current = Array2::from_shape_fn((n_free, 3), |(i, d)| {
-                    system.free_positions[[i, d]] - probe.neg_error[d * n_free + i]
+                    system.free_positions[[i, d]] - offset[d * n_free + i]
                 });
                 // An iterate whose geometry collapses an edge cannot be
                 // linearised (its direction is undefined); the step then
@@ -2591,7 +2711,14 @@ fn solve_geometric_outer(
                     .collect();
                 clip_to_box(&mut candidate, bounds);
                 total_probes += 1;
-                match probe_geometry(problem, system, &candidate, true, opts.reaction_weight) {
+                match probe_geometry(
+                    problem,
+                    system,
+                    &candidate,
+                    true,
+                    opts.reaction_weight,
+                    &opts.target_weights,
+                ) {
                     Ok(next) if next.merit < probe.merit => {
                         let improvement =
                             (probe.merit - next.merit) / probe.merit.max(f64::MIN_POSITIVE);
@@ -2713,6 +2840,7 @@ pub fn solve_spg_box(
             seed_guard_margin: DEFAULT_SEED_GUARD_MARGIN,
             nondimensionalize: true,
             reaction_weight: 1.0,
+            target_weights: Vec::new(),
         },
     )?;
     Ok(SpgBoxResult {
