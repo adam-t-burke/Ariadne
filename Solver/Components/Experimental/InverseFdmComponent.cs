@@ -49,7 +49,9 @@ public class InverseFdmComponent : GH_Component
     protected override void RegisterInputParams(GH_InputParamManager pManager)
     {
         pManager.AddGenericParameter("Network", "Network", "FDM Network (topology + anchors)", GH_ParamAccess.item);
-        pManager.AddPointParameter("Target Points", "Target", "Desired free-node positions (one per free node, matching order)", GH_ParamAccess.list);
+        pManager.AddPointParameter("Target Points", "Target",
+            "Desired free-node positions. Without Target Nodes: one per free node, matching order. With Target Nodes: one per listed node.",
+            GH_ParamAccess.list);
         pManager.AddVectorParameter("Loads", "Loads", "Loads on free nodes", GH_ParamAccess.list, new Vector3d(0, 0, -1));
         pManager.AddPointParameter("Load Nodes", "LN", "Nodes to apply loads to (optional; if empty, loads apply to all free nodes)", GH_ParamAccess.list);
         pManager.AddNumberParameter("Regularization", "λ", "Stage-1 particular regularization used by Tikhonov, Gram (sparse/dense), LSQR, Clarabel, and SPG. Ignored for Moore–Penrose and QR.", GH_ParamAccess.item, 1e-6);
@@ -80,6 +82,15 @@ public class InverseFdmComponent : GH_Component
         pManager.AddNumberParameter("Reaction Weight", "wR",
             "Weight of the Rx0/Ry0/Rz0 rows relative to the equilibrium (Stage 1) and geometric (Stage 2) rows. 1 (default) counts one load unit of reaction like one target extent of geometric error.",
             GH_ParamAccess.item, InverseFdmUiState.DefaultReactionWeight);
+        pManager.AddPointParameter("Target Nodes", "TN",
+            "Free nodes the Target Points refer to, matched by network tolerance like Load Nodes (optional). "
+            + "Empty: Target Points must list every free node in order. Otherwise only the listed nodes carry a target; "
+            + "the remaining free nodes are held softly at their current position with weight wHold.",
+            GH_ParamAccess.list);
+        pManager.AddNumberParameter("Hold Weight", "wHold",
+            "Geometric metric only, with Target Nodes: weight of untargeted free nodes toward their current position, in (0, 1]. "
+            + "Small values let them float and follow equilibrium; 1 treats the current position as a full target. Default 0.01.",
+            GH_ParamAccess.item, InverseFdmTargets.DefaultHoldWeight);
         pManager[3].Optional = true;
         pManager[11].Optional = true;
         pManager[12].Optional = true;
@@ -87,6 +98,8 @@ public class InverseFdmComponent : GH_Component
         pManager[17].Optional = true;
         pManager[18].Optional = true;
         pManager[19].Optional = true;
+        pManager[20].Optional = true;
+        pManager[21].Optional = true;
     }
 
     protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -99,7 +112,7 @@ public class InverseFdmComponent : GH_Component
         pManager.AddVectorParameter("Residual", "Residual", "Free-node equilibrium residual at the target", GH_ParamAccess.list);
         pManager.AddNumberParameter("Residual Ratio", "RelRes", "Residual norm divided by load norm", GH_ParamAccess.item);
         pManager.AddNumberParameter("Geometric Error", "GeomErr",
-            "‖x(q) − x*‖: distance from the forward-solved geometry to the target. Unlike RelRes this is a length, not a force ratio. Divide by the target's bounding-box diagonal to compare with the benchmark's err/L.",
+            "‖x(q) − x*‖: distance from the forward-solved geometry to the target. With Target Nodes, over the targeted nodes only. Unlike RelRes this is a length, not a force ratio. Divide by the target's bounding-box diagonal to compare with the benchmark's err/L.",
             GH_ParamAccess.item);
         pManager.AddBooleanParameter("Guard Used", "Guard",
             "True when the seed guard replaced the Stage-1 particular by the scaled uniform sign seed.",
@@ -134,6 +147,8 @@ public class InverseFdmComponent : GH_Component
         double seedGuardMargin = InverseFdmUiState.DefaultSeedGuardMargin;
         double lmDamping = InverseFdmUiState.DefaultLmDamping;
         double reactionWeight = InverseFdmUiState.DefaultReactionWeight;
+        List<Point3d> targetNodes = [];
+        double holdWeight = InverseFdmTargets.DefaultHoldWeight;
 
         if (!DA.GetData(0, ref network)) return;
         if (!DA.GetDataList(1, targetPoints)) return;
@@ -155,6 +170,8 @@ public class InverseFdmComponent : GH_Component
         DA.GetData(17, ref seedGuardMargin);
         DA.GetData(18, ref lmDamping);
         DA.GetData(19, ref reactionWeight);
+        DA.GetDataList(20, targetNodes);
+        DA.GetData(21, ref holdWeight);
 
         _lambda = regularization;
         _cwlsDamping = cwlsDamping;
@@ -199,12 +216,25 @@ public class InverseFdmComponent : GH_Component
         _particular = InverseFdmUiState.UpdateParticular(_linearAlgebra, _particular, _hasBox);
         UpdateMessage();
 
-        int numFree = network.Free.Count;
-        if (targetPoints.Count != numFree)
+        InverseFdmTargetSet targets;
+        try
         {
-            AddRuntimeMessage(GH_RuntimeMessageLevel.Error,
-                $"Target points count ({targetPoints.Count}) must match free node count ({numFree}).");
+            var targetNodeIndices = targetNodes.Count > 0
+                ? TheseusSolverService.ResolveLoadNodeIndices(network, targetNodes)
+                : null;
+            targets = InverseFdmTargets.Complete(
+                network.Free.ConvertAll(node => node.Value), targetPoints, targetNodeIndices, holdWeight);
+        }
+        catch (ArgumentException ex)
+        {
+            AddRuntimeMessage(GH_RuntimeMessageLevel.Error, ex.Message);
             return;
+        }
+        if (targets.IsPartial && _metric == MetricMode.Force)
+        {
+            AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
+                "Target Nodes only weight the geometric metric. With Metric = Force the untargeted nodes' "
+                + "current positions enter the force residual at full weight.");
         }
 
         bool unconstrainedDirect = _linearAlgebra == LinearAlgebraMode.Direct && !_hasBox;
@@ -223,14 +253,6 @@ public class InverseFdmComponent : GH_Component
                 $"Gram (dense) forms EᵀE as a full {network.Graph.Ne}×{network.Graph.Ne} matrix: "
                 + "O(ne²) memory and O(ne³) time. It is the reference for what sparsity buys; "
                 + "use Gram (sparse) or Tikhonov for the same minimiser at sparse cost.");
-        }
-
-        double[] targetFreeXyz = new double[numFree * 3];
-        for (int i = 0; i < numFree; i++)
-        {
-            targetFreeXyz[i * 3 + 0] = targetPoints[i].X;
-            targetFreeXyz[i * 3 + 1] = targetPoints[i].Y;
-            targetFreeXyz[i * 3 + 2] = targetPoints[i].Z;
         }
 
         var q = new List<double>(network.Graph.Ne);
@@ -264,13 +286,14 @@ public class InverseFdmComponent : GH_Component
             int frozenBudget = InverseFdmUiState.FrozenIterationBudget(_metric, _frozenIterations);
             int gnBudget = InverseFdmUiState.GaussNewtonIterationBudget(_metric, _gnIterations);
             var result = TheseusSolverService.SolveInverseFdm(
-                network, inputs, targetFreeXyz, effectiveRegularization,
+                network, inputs, targets.FreeXyz, effectiveRegularization,
                 true, maxL1Iter, particularMethod, (int)_linearAlgebra,
                 enforceZeroRx, enforceZeroRy, enforceZeroRz, solveForQ,
                 [.. signs], [.. lower], [.. upper], maxIter, tol,
                 nativeMetric, gnBudget, cwlsDamping, frozenBudget,
                 InverseFdmUiState.NativeStage2Method(_stage2),
-                lmDamping, seedGuardMargin, _nondimensionalize, reactionWeight);
+                lmDamping, seedGuardMargin, _nondimensionalize, reactionWeight,
+                targets.Weights);
 
             if (_metric == MetricMode.Force
                 && _hasBox
@@ -284,7 +307,7 @@ public class InverseFdmComponent : GH_Component
             var packedLoads = TheseusSolverService.PackFreeNodeLoads(
                 network.FreeNodes.Count, loads, loadNodeIndices);
             var (forces, residuals, ratio) = TargetResidual(
-                network, targetPoints, packedLoads, result.ForceDensities);
+                network, targets.CompletedPoints, packedLoads, result.ForceDensities);
 
             var diagnostics = result.InverseDiagnostics ?? new InverseFdmDiagnostics();
             if (_metric == MetricMode.Geometric)
@@ -294,17 +317,25 @@ public class InverseFdmComponent : GH_Component
                     AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, warning);
             }
 
+            // With a partial target the native error is the weighted merit;
+            // report the plain landing distance over the targeted nodes.
+            var nodePositions = result.NodePositions;
+            double geometricError = targets.IsPartial
+                ? InverseFdmTargets.TargetError(nodePositions, network.FreeNodes, targets)
+                : result.GeometricError;
+
             DA.SetData(0, result.Network);
-            DA.SetDataList(1, result.NodePositions);
+            DA.SetDataList(1, nodePositions);
             DA.SetDataList(2, result.EdgeCurves);
             DA.SetDataList(3, result.ForceDensities);
             DA.SetDataList(4, forces);
             DA.SetDataList(5, residuals);
             DA.SetData(6, ratio);
-            DA.SetData(7, result.GeometricError);
+            DA.SetData(7, geometricError);
             DA.SetData(8, diagnostics.UsedUniformSeed);
             DA.SetDataList(9, InverseFdmUiState.DiagnosticLines(
-                diagnostics, result.Iterations, result.Converged, result.GeometricError));
+                diagnostics, result.Iterations, result.Converged, geometricError,
+                targets.IsPartial ? (result.GeometricError, targets.TargetedFree.Count, holdWeight) : null));
 
             if (ratio > 0.25 && _metric == MetricMode.Force)
             {
@@ -665,6 +696,32 @@ its IRLS approximation were removed because IRLS was not an exact bounded L1
 solve and has no consistent role in compliance-weighted CWLS.
 </p>
 
+<h2>Targets on a subset of the free nodes</h2>
+<p>
+Without <b>Target Nodes</b>, <b>Target Points</b> must list every free node in
+order. With <b>Target Nodes</b> (points matched to free nodes by the network
+tolerance, like Load Nodes), only the listed nodes carry a target and
+<b>Target Points</b> lists one point per listed node. The pipeline still needs a
+full <code>x*</code> to assemble <code>E(x*)</code>, so the remaining free nodes
+are completed with their <i>current</i> position and their geometric rows are
+weighted by <b>wHold</b>: the Stage-2 merit becomes
+<code>‖W(x(q) − x*)‖²</code> with <code>W = 1</code> on targeted nodes and
+<code>wHold</code> elsewhere. A small wHold lets the untargeted nodes float and
+follow equilibrium (the problem stays well posed because the weight is
+positive); wHold = 1 is the full-target solve on the completed geometry.
+Stage 1 (the force residual) is not weighted; the seed guard scores it on the
+weighted merit like every other candidate. This is the same posing as a
+node goal on a few nodes in jax_fdm or compas_cem, with the rest of the net
+left to equilibrium plus a weak preference for staying put.
+</p>
+<p>
+With Target Nodes, <b>GeomErr</b> is the plain landing distance
+<code>‖x_S(q) − x*_S‖</code> over the targeted nodes, and <b>Diag</b> adds
+<code>weighted_error</code> (the merit the pipeline minimised),
+<code>targeted_nodes</code> and <code>hold_weight</code>.
+<b>Forces / Residual / RelRes</b> are evaluated at the completed target.
+</p>
+
 <h2>Frozen CWLS phase</h2>
 <p>
 At iteration <code>q_k</code>, Frozen CWLS rebuilds the compliance
@@ -823,6 +880,9 @@ realised reaction well above the load along an enforced zero-reaction axis).
 <li><b>Loads / Load Nodes</b> — without Load Nodes, loads apply to free nodes
 in order and the final load repeats. With Load Nodes, one load broadcasts or
 one load per listed node is required; unlisted free nodes receive zero.</li>
+<li><b>Target Nodes / wHold</b> — restrict the target to the listed free nodes
+and hold the others at their current position with weight wHold in (0, 1];
+see <i>Targets on a subset of the free nodes</i>.</li>
 <li><b>Rx0 / Ry0 / Rz0</b> — add linear zero-reaction rows to the particular
 and CWLS subproblems, weighted by <b>wR</b> relative to the equilibrium and
 geometric rows. They are least-squares rows, not hard equalities; the realised
@@ -841,8 +901,8 @@ Independent of FrozenIter and GNiter.</li>
 <b>Network / Nodes / Edges</b> are the final forward solve.
 <b>Forces / Residual / RelRes</b> are evaluated at x* using the returned q.
 <b>GeomErr = ‖x(q)−x*‖</b> is a length and directly measures warm-start landing
-error. A small force residual ratio does not imply a small GeomErr when the
-target is not funicular. <b>Guard</b> is true when the uniform seed won the
+error (over the targeted nodes only when Target Nodes are given). A small force
+residual ratio does not imply a small GeomErr when the target is not funicular. <b>Guard</b> is true when the uniform seed won the
 race. <b>Diag</b> lists the Stage-2 record as <code>key = value</code> lines:
 the Stage-1 and uniform-seed errors, accepted frozen and Gauss–Newton steps,
 factorisations, Clarabel fallbacks, active-set cap hits, degenerate
@@ -963,13 +1023,24 @@ internal static class InverseFdmUiState
                 + "inconsistent with the q box or the topology.";
     }
 
-    /// <summary>Human-readable diagnostics lines for the Diag output.</summary>
+    /// <summary>
+    /// Human-readable diagnostics lines for the Diag output. <paramref name="partial"/>
+    /// carries, for a subset target, the weighted merit the pipeline minimised,
+    /// the number of targeted free nodes and the hold weight.
+    /// </summary>
     internal static IReadOnlyList<string> DiagnosticLines(
-        InverseFdmDiagnostics d, int iterations, bool converged, double geometricError)
+        InverseFdmDiagnostics d, int iterations, bool converged, double geometricError,
+        (double WeightedError, int TargetedNodes, double HoldWeight)? partial = null)
     {
-        return
+        var lines = new List<string> { $"geom_error = {geometricError:0.######e0}" };
+        if (partial is { } p)
+        {
+            lines.Add($"weighted_error = {p.WeightedError:0.######e0}");
+            lines.Add($"targeted_nodes = {p.TargetedNodes}");
+            lines.Add($"hold_weight = {p.HoldWeight:0.######e0}");
+        }
+        lines.AddRange(
         [
-            $"geom_error = {geometricError:0.######e0}",
             $"iterations = {iterations}",
             $"converged = {converged}",
             $"stage1_error = {d.Stage1Error:0.######e0}",
@@ -982,7 +1053,8 @@ internal static class InverseFdmUiState
             $"active_set_capped = {d.ActiveSetCapped}",
             $"degenerate_linearizations = {d.DegenerateLinearizations}",
             $"reaction_residual = {d.ReactionResidual:0.######e0}",
-        ];
+        ]);
+        return lines;
     }
 
     internal static int FrozenIterationBudget(MetricMode metric, int frozenIterations) =>
