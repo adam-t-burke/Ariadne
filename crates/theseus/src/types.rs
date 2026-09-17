@@ -21,7 +21,7 @@ pub enum TheseusError {
     SparsityMismatch { edge: usize, row: usize, col: usize },
     /// The factorization has not been computed yet.
     MissingFactorization,
-    /// Argmin solver returned an error.
+    /// Optimization failed.
     Solver(String),
     /// Shape mismatch in input data.
     Shape(String),
@@ -58,17 +58,6 @@ impl From<faer_sparse::cholesky::CholeskyError> for TheseusError {
 impl From<faer_sparse::FaerError> for TheseusError {
     fn from(e: faer_sparse::FaerError) -> Self {
         Self::Linalg(e.to_string())
-    }
-}
-
-impl From<argmin::core::Error> for TheseusError {
-    fn from(e: argmin::core::Error) -> Self {
-        let msg = e.to_string();
-        if msg == Self::Cancelled.to_string() {
-            Self::Cancelled
-        } else {
-            Self::Solver(msg)
-        }
     }
 }
 
