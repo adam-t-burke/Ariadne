@@ -1,10 +1,7 @@
-//! L-BFGS optimisation driver via the `argmin` crate.
+//! L-BFGS and L-BFGS-B optimization through Basin.
 //!
-//! Wraps the hand-coded `value_and_gradient` into argmin's `CostFunction`
-//! + `Gradient` traits, then runs L-BFGS with the user's solver options.
-//!
-//! Uses `Vec<f64>` as the argmin parameter type to avoid ndarray version
-//! conflicts between our ndarray 0.16 and argmin-math's bundled ndarray.
+//! The evaluator shares the forward and adjoint solve across cost/gradient
+//! requests. Accepted steps drive progress independently of line-search trials.
 
 use crate::ffi::ProgressCallback;
 use crate::gradients::value_and_gradient;
@@ -13,220 +10,771 @@ use crate::types::{
     VariableSupportKind,
 };
 use crate::variable_supports;
-use argmin::core::observers::{Observe, ObserverMode};
-use argmin::core::{
-    CostFunction, Error, Executor, Gradient, IterState, State, TerminationReason,
-    TerminationStatus, KV,
-};
-use argmin::solver::linesearch::MoreThuenteLineSearch;
-use argmin::solver::quasinewton::LBFGS;
-use ariadne_lbfgsb::{
-    Backend, Bounds as SolverBounds, Control, Convergence, Failure, Iteration, Options,
-    SolveAdapter, SolveError, Solver, StopReason, Termination,
+use basin::{
+    BoxConstraints, CostFunction, Executor, Gradient, GradientState, LbfgsState, Lbfgsb,
+    MoreThuente, Solver, State, StepOutcome, TerminationReason,
 };
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const DIRECT_BOX_SCALE_EPS: f64 = 1e-12;
-type EvaluationRecord = Rc<RefCell<Option<(Vec<f64>, f64, Vec<f64>)>>>;
+type OptimizerState = LbfgsState<Vec<f64>>;
 
-// ─────────────────────────────────────────────────────────────
-//  argmin problem wrapper
-// ─────────────────────────────────────────────────────────────
+struct Evaluation {
+    cache: FdmCache,
+    parameters: Vec<f64>,
+    physical_gradient: Vec<f64>,
+    gradient: Vec<f64>,
+    x: Vec<f64>,
+    value: f64,
+    valid: bool,
+    loss_trace: Vec<f64>,
+}
 
-/// Wraps the FDM problem + cache + barrier data so argmin can evaluate
-/// cost and gradient.
-///
-/// `RefCell` is used for the cache because argmin's `CostFunction` /
-/// `Gradient` traits take `&self`, but our forward solver mutates the cache.
-/// The solver is single-threaded, so the borrow never actually conflicts,
-/// but `RefCell` gives us debug-mode borrow checking for free.
-///
-/// **Evaluation cache**: argmin calls `cost(θ)` and `gradient(θ)` separately
-/// at the same θ each iteration.  We cache the last `(θ, loss, grad)` so the
-/// expensive forward + adjoint solve runs only once per unique θ.
 struct FdmProblem<'a> {
     problem: &'a Problem,
-    cache: Rc<RefCell<FdmCache>>,
-    lb: Vec<f64>,
-    ub: Vec<f64>,
-    lb_idx: Vec<usize>,
-    ub_idx: Vec<usize>,
-    /// Cached (θ, loss, gradient) from the last evaluation.
-    last_eval: EvaluationRecord,
-    /// Loss value recorded at each unique evaluation.
-    loss_trace: RefCell<Vec<f64>>,
     cancel_flag: &'a AtomicBool,
+    anchor_scales: Vec<f64>,
+    lower: Vec<f64>,
+    upper: Vec<f64>,
+    evaluation_lower: Vec<f64>,
+    evaluation_upper: Vec<f64>,
+    lower_indices: Vec<usize>,
+    upper_indices: Vec<usize>,
+    evaluation: RefCell<Evaluation>,
+    // A callback may need an accepted point after a rejected trial evaluation.
+    observer_cache: RefCell<Option<FdmCache>>,
 }
 
 impl<'a> FdmProblem<'a> {
-    fn check_cancelled(&self) -> Result<(), Error> {
-        if self.cancel_flag.load(Ordering::Acquire) {
-            return Err(Error::msg(TheseusError::Cancelled.to_string()));
-        }
-        Ok(())
-    }
-
-    /// Ensure the cache contains results for `theta`.
-    /// If θ matches the cached value, this is a no-op.
-    /// Otherwise, runs the full forward + adjoint solve.
-    fn ensure_evaluated(&self, theta: &[f64]) -> Result<(), argmin::core::Error> {
-        self.check_cancelled()?;
-        {
-            let cached = self.last_eval.borrow();
-            if let Some((ref t, _, _)) = *cached {
-                if t == theta {
-                    return Ok(());
-                }
-            }
-        }
-        // Reject θ vectors containing NaN/Inf before attempting the solve
-        if theta.iter().any(|v| !v.is_finite()) {
-            return Err(argmin::core::Error::msg("theta contains NaN or Inf"));
-        }
-
-        // Cache miss — run the full solve
-        let mut fdm_cache = self.cache.borrow_mut();
-        let mut grad = vec![0.0; theta.len()];
-        let val = value_and_gradient(
-            &mut fdm_cache,
-            self.problem,
-            theta,
-            &mut grad,
-            &self.lb,
-            &self.ub,
-            &self.lb_idx,
-            &self.ub_idx,
-        )
-        .map_err(|e| argmin::core::Error::msg(e.to_string()))?;
-
-        // Guard against NaN/Inf in loss or gradient
-        if !val.is_finite() || grad.iter().any(|g| !g.is_finite()) {
-            return Err(argmin::core::Error::msg(
-                "value_and_gradient produced NaN or Inf",
+    fn new(problem: &'a Problem, cancel_flag: &'a AtomicBool) -> Result<Self, TheseusError> {
+        let n_lat = variable_supports::latent_dim(problem);
+        let n = problem.topology.num_edges + n_lat;
+        let bounded =
+            problem.solver.q_parameterization_mode == QParameterizationMode::DirectBoxBounds;
+        let anchor_scales = if bounded {
+            anchor_optimizer_scales(problem)
+        } else {
+            vec![1.0; n_lat]
+        };
+        if anchor_scales.len() != n_lat {
+            return Err(TheseusError::Shape(
+                "anchor optimizer scale length mismatch".into(),
             ));
         }
-
-        {
-            let mut trace = self.loss_trace.borrow_mut();
-            trace.push(val);
-        }
-
-        *self.last_eval.borrow_mut() = Some((theta.to_vec(), val, grad));
-        self.check_cancelled()
-    }
-}
-
-type LbfgsState = IterState<Vec<f64>, Vec<f64>, (), (), (), f64>;
-
-/// Emits progress only after accepted L-BFGS iterations. Argmin calls
-/// observers after `next_iter`, so this avoids More-Thuente trial states.
-struct MajorIterationProgressObserver {
-    problem: *const Problem,
-    cancel_flag: *const AtomicBool,
-    evaluation_cache: Rc<RefCell<FdmCache>>,
-    observer_cache: RefCell<FdmCache>,
-    last_eval: EvaluationRecord,
-    callback: ProgressCallback,
-    report_frequency: usize,
-}
-
-impl MajorIterationProgressObserver {
-    fn problem(&self) -> Result<&Problem, Error> {
-        unsafe {
-            self.problem
-                .as_ref()
-                .ok_or_else(|| Error::msg("progress observer problem pointer is null"))
-        }
-    }
-
-    fn check_cancelled(&self) -> Result<(), Error> {
-        let cancelled = unsafe {
-            self.cancel_flag
-                .as_ref()
-                .ok_or_else(|| Error::msg("progress observer cancellation pointer is null"))?
-                .load(Ordering::Acquire)
+        let (lower, upper) = if bounded {
+            validate_direct_box_bounds(problem)?;
+            direct_box_optimizer_bounds(problem, n_lat)
+        } else {
+            (vec![f64::NEG_INFINITY; n], vec![f64::INFINITY; n])
         };
-        if cancelled {
-            Err(Error::msg(TheseusError::Cancelled.to_string()))
+        let (evaluation_lower, evaluation_upper) = parameter_bounds(problem);
+        Ok(Self {
+            problem,
+            cancel_flag,
+            anchor_scales,
+            lower,
+            upper,
+            lower_indices: finite_indices(&evaluation_lower),
+            upper_indices: finite_indices(&evaluation_upper),
+            evaluation_lower,
+            evaluation_upper,
+            evaluation: RefCell::new(Evaluation {
+                cache: FdmCache::new(problem)?,
+                parameters: vec![0.0; n],
+                physical_gradient: vec![0.0; n],
+                gradient: vec![0.0; n],
+                x: vec![0.0; n],
+                value: 0.0,
+                valid: false,
+                loss_trace: Vec::new(),
+            }),
+            observer_cache: RefCell::new(None),
+        })
+    }
+
+    fn check_cancelled(&self) -> Result<(), TheseusError> {
+        if self.cancel_flag.load(Ordering::Acquire) {
+            Err(TheseusError::Cancelled)
         } else {
             Ok(())
         }
     }
 
-    fn xyz_for(&self, theta: &[f64]) -> Result<Vec<f64>, Error> {
-        let problem = self.problem()?;
-        let nn = problem.topology.num_nodes;
-        let ne = problem.topology.num_edges;
-
-        if let Some((cached_theta, _, _)) = self.last_eval.borrow().as_ref() {
-            if cached_theta.as_slice() == theta {
-                let cache = self.evaluation_cache.borrow();
-                return Ok(flatten_xyz(&cache, nn));
-            }
-        }
-
-        let q = theta[..ne].to_vec();
-        let anchors = variable_supports::map_latents_to_positions(problem, &theta[ne..])
-            .map_err(|e| Error::msg(e.to_string()))?;
-        let mut cache = self.observer_cache.borrow_mut();
-        crate::fdm::solve_fdm_with_loads(&mut cache, &q, problem, &anchors, 1e-12)
-            .map_err(|e| Error::msg(e.to_string()))?;
-        Ok(flatten_xyz(&cache, nn))
-    }
-}
-
-impl Observe<LbfgsState> for MajorIterationProgressObserver {
-    fn observe_iter(&mut self, state: &LbfgsState, _kv: &KV) -> Result<(), Error> {
-        let major_iteration = state.get_iter() as usize + 1;
-        if !should_report_major_iteration(major_iteration, self.report_frequency) {
+    fn ensure_evaluated(&self, x: &[f64]) -> Result<(), TheseusError> {
+        self.check_cancelled()?;
+        let mut evaluation = self.evaluation.borrow_mut();
+        if evaluation.valid && evaluation.x == x {
             return Ok(());
         }
-
-        let problem = self.problem()?;
-        let ne = problem.topology.num_edges;
-        let Some(theta) = state.get_param() else {
-            // L-BFGS can return a terminated state without restoring `param`
-            // when the inner line search exits early. That is not an accepted
-            // major iteration state, so do not stream it.
-            return Ok(());
-        };
-        if theta.len() < ne {
-            return Err(Error::msg(
-                "progress observer parameter vector is too short",
+        if x.len() != evaluation.x.len() || x.iter().any(|v| !v.is_finite()) {
+            return Err(TheseusError::Solver(
+                "invalid or non-finite optimizer parameters".into(),
             ));
         }
+        // Invalidate before mutating the cache so a failed evaluation cannot be reused.
+        evaluation.valid = false;
+        let Evaluation {
+            cache,
+            parameters,
+            physical_gradient,
+            gradient,
+            ..
+        } = &mut *evaluation;
+        fill_physical_parameters(self.problem, x, &self.anchor_scales, parameters);
+        let value = value_and_gradient(
+            cache,
+            self.problem,
+            parameters,
+            physical_gradient,
+            &self.evaluation_lower,
+            &self.evaluation_upper,
+            &self.lower_indices,
+            &self.upper_indices,
+        )?;
+        fill_scaled_gradient(
+            self.problem,
+            physical_gradient,
+            &self.anchor_scales,
+            gradient,
+        );
+        if !value.is_finite() || gradient.iter().any(|g| !g.is_finite()) {
+            return Err(TheseusError::Solver(
+                "value_and_gradient produced NaN or Inf".into(),
+            ));
+        }
+        evaluation.x.copy_from_slice(x);
+        evaluation.value = value;
+        evaluation.valid = true;
+        evaluation.loss_trace.push(value);
+        self.check_cancelled()
+    }
 
-        let xyz_flat = self.xyz_for(theta)?;
-        let q = theta[..ne].to_vec();
-        let should_continue = unsafe {
-            (self.callback)(
-                major_iteration,
-                state.get_cost(),
-                xyz_flat.as_ptr(),
-                problem.topology.num_nodes,
-                q.as_ptr(),
-                ne,
-            )
-        };
-        if should_continue == 0 {
-            return Err(Error::msg(TheseusError::Cancelled.to_string()));
+    fn xyz_for(&self, x: &[f64]) -> Result<Vec<f64>, TheseusError> {
+        let evaluation = self.evaluation.borrow();
+        if evaluation.valid && evaluation.x == x {
+            return Ok(flatten_xyz(
+                &evaluation.cache,
+                self.problem.topology.num_nodes,
+            ));
+        }
+        let mut theta = vec![0.0; x.len()];
+        fill_physical_parameters(self.problem, x, &self.anchor_scales, &mut theta);
+        let ne = self.problem.topology.num_edges;
+        let anchors = variable_supports::map_latents_to_positions(self.problem, &theta[ne..])?;
+        let mut cache = self.observer_cache.borrow_mut();
+        if cache.is_none() {
+            *cache = Some(FdmCache::new(self.problem)?);
+        }
+        let cache = cache.as_mut().unwrap();
+        crate::fdm::solve_fdm_with_loads(cache, &theta[..ne], self.problem, &anchors, 1e-12)?;
+        Ok(flatten_xyz(cache, self.problem.topology.num_nodes))
+    }
+
+    fn report(
+        &self,
+        iteration: usize,
+        x: &[f64],
+        value: f64,
+        callback: Option<ProgressCallback>,
+        frequency: usize,
+    ) -> Result<(), TheseusError> {
+        self.check_cancelled()?;
+        if let Some(callback) =
+            callback.filter(|_| should_report_major_iteration(iteration, frequency))
+        {
+            let xyz = self.xyz_for(x)?;
+            let ne = self.problem.topology.num_edges;
+            let keep_going = unsafe {
+                callback(
+                    iteration,
+                    value,
+                    xyz.as_ptr(),
+                    self.problem.topology.num_nodes,
+                    x.as_ptr(),
+                    ne,
+                )
+            };
+            if keep_going == 0 {
+                return Err(TheseusError::Cancelled);
+            }
         }
         self.check_cancelled()
     }
+
+    fn finish(
+        self,
+        x: &[f64],
+        iterations: usize,
+        reason: TerminationReason,
+        gradient_norm: f64,
+        state: &mut OptimizationState,
+    ) -> Result<SolverResult, TheseusError> {
+        self.check_cancelled()?;
+        let mut evaluation = self.evaluation.into_inner();
+        fill_physical_parameters(
+            self.problem,
+            x,
+            &self.anchor_scales,
+            &mut evaluation.parameters,
+        );
+        let (q, latents) = unpack_parameters(self.problem, &evaluation.parameters);
+        let anchors = variable_supports::map_latents_to_positions(self.problem, &latents)?;
+        if !evaluation.valid || evaluation.x != x {
+            crate::fdm::solve_fdm_with_loads(
+                &mut evaluation.cache,
+                &q,
+                self.problem,
+                &anchors,
+                1e-12,
+            )?;
+        }
+        if self.cancel_flag.load(Ordering::Acquire) {
+            return Err(TheseusError::Cancelled);
+        }
+        let (converged, text) = termination_text(reason);
+        let metric = if self.problem.solver.q_parameterization_mode
+            == QParameterizationMode::DirectBoxBounds
+        {
+            "projected_gradient"
+        } else {
+            "gradient"
+        };
+        let termination_reason = format!(
+            "{text}; iterations={iterations}; evaluations={}; {metric}={gradient_norm:.3e}",
+            evaluation.loss_trace.len()
+        );
+        state.force_densities = q.clone();
+        state.variable_anchor_positions = anchors.clone();
+        state.variable_anchor_latents = latents;
+        state.iterations = iterations;
+        state.loss_trace = evaluation.loss_trace.clone();
+        Ok(SolverResult {
+            q,
+            anchor_positions: anchors,
+            xyz: evaluation.cache.nf,
+            member_lengths: evaluation.cache.member_lengths,
+            member_forces: evaluation.cache.member_forces,
+            reactions: evaluation.cache.reactions,
+            cross_section_areas: evaluation.cache.cross_section_areas,
+            loss_trace: evaluation.loss_trace,
+            iterations,
+            converged,
+            termination_reason,
+        })
+    }
 }
 
-fn should_report_major_iteration(major_iteration: usize, report_frequency: usize) -> bool {
-    let frequency = report_frequency.max(1);
-    major_iteration == 1 || major_iteration % frequency == 0
+// Borrowing the evaluator lets callbacks inspect its cache without raw pointers.
+impl CostFunction for &FdmProblem<'_> {
+    type Param = Vec<f64>;
+    type Output = f64;
+    type Error = TheseusError;
+    fn cost(&self, x: &Vec<f64>) -> Result<f64, TheseusError> {
+        self.ensure_evaluated(x)?;
+        Ok(self.evaluation.borrow().value)
+    }
+}
+impl Gradient for &FdmProblem<'_> {
+    type Gradient = Vec<f64>;
+    fn gradient(&self, x: &Vec<f64>) -> Result<Vec<f64>, TheseusError> {
+        self.ensure_evaluated(x)?;
+        Ok(self.evaluation.borrow().gradient.clone())
+    }
+    fn cost_and_gradient(&self, x: &Vec<f64>) -> Result<(f64, Vec<f64>), TheseusError> {
+        self.ensure_evaluated(x)?;
+        let evaluation = self.evaluation.borrow();
+        Ok((evaluation.value, evaluation.gradient.clone()))
+    }
+}
+impl BoxConstraints for &FdmProblem<'_> {
+    fn lower(&self) -> &Vec<f64> {
+        &self.lower
+    }
+    fn upper(&self) -> &Vec<f64> {
+        &self.upper
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Tolerances {
+    bounded: bool,
+    gradient: f64,
+    cost: f64,
+}
+
+impl Tolerances {
+    fn new(problem: &Problem) -> Result<Self, TheseusError> {
+        let bounded =
+            problem.solver.q_parameterization_mode == QParameterizationMode::DirectBoxBounds;
+        let gradient = problem.solver.absolute_tolerance;
+        let cost = problem.solver.relative_tolerance;
+        if !gradient.is_finite()
+            || !cost.is_finite()
+            || (!bounded && (gradient < 0.0 || cost < 0.0))
+        {
+            return Err(TheseusError::Solver(
+                "optimizer tolerances must be finite and nonnegative".into(),
+            ));
+        }
+        Ok(Self {
+            bounded,
+            gradient: gradient.max(0.0),
+            cost: cost.max(0.0),
+        })
+    }
+
+    fn check(&self, gradient: f64, value: f64, previous: Option<f64>) -> Option<TerminationReason> {
+        if self.gradient > 0.0
+            && if self.bounded {
+                gradient <= self.gradient
+            } else {
+                gradient < self.gradient
+            }
+        {
+            return Some(if self.bounded {
+                TerminationReason::ProjectedGradientTolerance
+            } else {
+                TerminationReason::GradientTolerance
+            });
+        }
+        let previous = previous?;
+        // Theseus's box tolerance has a unit floor; Basin's relative check does not.
+        if self.cost > 0.0
+            && if self.bounded {
+                previous - value <= self.cost * previous.abs().max(value.abs()).max(1.0)
+            } else {
+                (previous - value).abs() < self.cost
+            }
+        {
+            Some(if self.bounded {
+                TerminationReason::RelativeCostTolerance
+            } else {
+                TerminationReason::CostTolerance
+            })
+        } else {
+            None
+        }
+    }
+}
+
+struct CompatibleSolver<S> {
+    inner: S,
+    tolerances: Tolerances,
+    previous_cost: Option<f64>,
+}
+
+impl<P, S> Solver<P, OptimizerState> for CompatibleSolver<S>
+where
+    P: CostFunction<Param = Vec<f64>, Output = f64> + BoxConstraints,
+    S: Solver<P, OptimizerState>,
+{
+    type Error = S::Error;
+    fn init(
+        &mut self,
+        problem: &mut basin::Problem<P>,
+        state: OptimizerState,
+    ) -> Result<OptimizerState, Self::Error> {
+        self.inner.init(problem, state)
+    }
+    fn next_iter(
+        &mut self,
+        problem: &mut basin::Problem<P>,
+        state: OptimizerState,
+    ) -> Result<(OptimizerState, Option<TerminationReason>), Self::Error> {
+        self.previous_cost = Some(state.cost());
+        self.inner.next_iter(problem, state)
+    }
+    fn reset_convergence(&mut self) {
+        self.previous_cost = None;
+        self.inner.reset_convergence();
+    }
+    fn check_convergence(
+        &mut self,
+        problem: &basin::Problem<P>,
+        state: &OptimizerState,
+    ) -> Option<TerminationReason> {
+        let norm = gradient_norm(
+            state,
+            self.tolerances.bounded,
+            problem.inner().lower(),
+            problem.inner().upper(),
+        );
+        self.tolerances
+            .check(norm, state.cost(), self.previous_cost)
+    }
+}
+
+fn gradient_norm(state: &OptimizerState, bounded: bool, lower: &[f64], upper: &[f64]) -> f64 {
+    let gradient = state
+        .gradient()
+        .expect("Basin initializes the gradient before publishing a state");
+    if !bounded {
+        return gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
+    }
+    state
+        .param()
+        .iter()
+        .zip(gradient)
+        .enumerate()
+        .map(|(i, (&x, &g))| {
+            if g < 0.0 {
+                g.max(x - upper[i]).abs()
+            } else {
+                g.min(x - lower[i]).abs()
+            }
+        })
+        .fold(0.0, f64::max)
+}
+
+fn termination_text(reason: TerminationReason) -> (bool, &'static str) {
+    match reason {
+        TerminationReason::ProjectedGradientTolerance => {
+            (true, "converged: projected gradient tolerance reached")
+        }
+        TerminationReason::GradientTolerance => (true, "converged: gradient tolerance reached"),
+        TerminationReason::RelativeCostTolerance => (
+            true,
+            "converged: relative objective reduction tolerance reached",
+        ),
+        TerminationReason::CostTolerance => (
+            true,
+            "converged: absolute objective reduction tolerance reached",
+        ),
+        TerminationReason::MaxIter => (false, "stopped: maximum iterations reached"),
+        TerminationReason::SolverFailed => (false, "failed: solver could not find a step"),
+        _ => (false, "stopped: solver terminated without convergence"),
+    }
+}
+
+fn should_report_major_iteration(iteration: usize, frequency: usize) -> bool {
+    iteration == 1 || iteration.is_multiple_of(frequency.max(1))
 }
 
 fn flatten_xyz(cache: &FdmCache, nn: usize) -> Vec<f64> {
-    let nf = &cache.nf;
     (0..nn)
-        .flat_map(|i| (0..3).map(move |d| nf[[i, d]]))
+        .flat_map(|i| (0..3).map(move |d| cache.nf[[i, d]]))
         .collect()
+}
+
+fn run_solver<S>(
+    fdm: &FdmProblem<'_>,
+    solver: S,
+    initial: Vec<f64>,
+    tolerances: Tolerances,
+    callback: Option<ProgressCallback>,
+    frequency: usize,
+) -> Result<(OptimizerState, TerminationReason), TheseusError>
+where
+    for<'a, 'b> S: Solver<&'a FdmProblem<'b>, OptimizerState, Error = TheseusError>,
+{
+    let max_iterations = if tolerances.bounded {
+        fdm.problem.solver.max_iterations.max(1)
+    } else {
+        fdm.problem.solver.max_iterations
+    };
+    let solver = CompatibleSolver {
+        inner: solver,
+        tolerances,
+        previous_cost: None,
+    };
+    let mut stepper = Executor::new(fdm, solver, LbfgsState::new(initial, 10))
+        .max_iter(max_iterations as u64)
+        .into_stepper()?;
+    let mut previous_cost = None;
+    let reason = loop {
+        fdm.check_cancelled()?;
+        let cost = stepper.state().cost();
+        match stepper.step()? {
+            StepOutcome::Continue => {
+                previous_cost = Some(cost);
+                let state = stepper.state();
+                fdm.report(
+                    state.iter() as usize,
+                    state.param(),
+                    state.cost(),
+                    callback,
+                    frequency,
+                )?;
+            }
+            StepOutcome::Stopped(mut reason) => {
+                // The old bounded solver checks convergence before the iteration budget.
+                if reason == TerminationReason::MaxIter && tolerances.bounded {
+                    let state = stepper.state();
+                    let norm = gradient_norm(state, true, &fdm.lower, &fdm.upper);
+                    reason = tolerances
+                        .check(norm, state.cost(), previous_cost)
+                        .unwrap_or(reason);
+                }
+                break reason;
+            }
+        }
+    };
+    fdm.check_cancelled()?;
+    Ok((stepper.into_state(), reason))
+}
+
+/// Optimize force densities and variable supports, reporting accepted iterations.
+///
+/// A zero callback return or a set cancellation flag aborts without publishing
+/// a partial result to `state`.
+pub fn optimize(
+    problem: &Problem,
+    state: &mut OptimizationState,
+    progress_cb: Option<ProgressCallback>,
+    report_freq: usize,
+    cancel_flag: &AtomicBool,
+) -> Result<SolverResult, TheseusError> {
+    crate::objectives::validate_objectives(&problem.objectives)?;
+    let tolerances = Tolerances::new(problem)?;
+    let fdm = FdmProblem::new(problem, cancel_flag)?;
+    fdm.check_cancelled()?;
+    let (result, reason) = if tolerances.bounded {
+        let initial = pack_direct_box_scaled(problem, state, &fdm.anchor_scales);
+        let solver = Lbfgsb::new().with_absolute_projected_gradient_tolerance(None);
+        run_solver(&fdm, solver, initial, tolerances, progress_cb, report_freq)?
+    } else {
+        let line_search = MoreThuente {
+            ftol: 1e-4,
+            gtol: 0.9,
+            xtol: 1e-10,
+            stpmin: f64::EPSILON.sqrt(),
+            stpmax: f64::INFINITY,
+            maxfev: u32::MAX,
+            ..MoreThuente::new()
+        };
+        let solver = Lbfgsb::with_line_search(line_search).unbounded();
+        run_solver(
+            &fdm,
+            solver,
+            pack_parameters(problem, state),
+            tolerances,
+            progress_cb,
+            report_freq,
+        )?
+    };
+    let norm = gradient_norm(&result, tolerances.bounded, &fdm.lower, &fdm.upper);
+    let x = if tolerances.bounded {
+        result.param()
+    } else {
+        result.best_param()
+    };
+    fdm.finish(x, result.iter() as usize, reason, norm, state)
+}
+
+/// Pack q and latent support parameters into a single θ vector.
+pub fn pack_parameters(problem: &Problem, state: &OptimizationState) -> Vec<f64> {
+    let ne = problem.topology.num_edges;
+    let n_lat = variable_supports::latent_dim(problem);
+    let mut theta = Vec::with_capacity(ne + n_lat);
+    for i in 0..ne {
+        theta.push(state.force_densities[i]);
+    }
+    if n_lat > 0 {
+        if state.variable_anchor_latents.len() == n_lat {
+            theta.extend_from_slice(&state.variable_anchor_latents);
+        } else {
+            // Backward compatibility fallback for older state payloads.
+            for i in 0..state.variable_anchor_positions.nrows() {
+                theta.push(state.variable_anchor_positions[[i, 0]]);
+                theta.push(state.variable_anchor_positions[[i, 1]]);
+                theta.push(state.variable_anchor_positions[[i, 2]]);
+            }
+        }
+    }
+    theta
+}
+
+/// Unpack θ into q and latent support parameters.
+pub fn unpack_parameters(problem: &Problem, theta: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let ne = problem.topology.num_edges;
+    let q = theta[..ne].to_vec();
+    let lat = theta[ne..].to_vec();
+    (q, lat)
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Bound index precomputation
+// ─────────────────────────────────────────────────────────────
+
+fn parameter_bounds(problem: &Problem) -> (Vec<f64>, Vec<f64>) {
+    let n_lat = variable_supports::latent_dim(problem);
+    let ne = problem.topology.num_edges;
+    let mut lb = vec![f64::NEG_INFINITY; ne];
+    let mut ub = vec![f64::INFINITY; ne];
+    if problem.solver.q_parameterization_mode == QParameterizationMode::DirectSoftBounds {
+        lb.copy_from_slice(&problem.bounds.lower);
+        ub.copy_from_slice(&problem.bounds.upper);
+    }
+    if n_lat > 0 {
+        // Support feasibility is enforced via latent maps. Keep latent vars unbounded.
+        lb.extend(vec![f64::NEG_INFINITY; n_lat]);
+        ub.extend(vec![f64::INFINITY; n_lat]);
+    }
+    (lb, ub)
+}
+
+fn finite_indices(v: &[f64]) -> Vec<usize> {
+    v.iter()
+        .enumerate()
+        .filter(|(_, &x)| x.is_finite())
+        .map(|(i, _)| i)
+        .collect()
+}
+
+fn anchor_lambda(problem: &Problem) -> f64 {
+    problem
+        .solver
+        .anchor_saturation_lambda
+        .abs()
+        .max(DIRECT_BOX_SCALE_EPS)
+}
+
+fn anchor_optimizer_scales(problem: &Problem) -> Vec<f64> {
+    let lambda = anchor_lambda(problem);
+    if problem.anchors.variable_supports.is_empty() {
+        return vec![lambda; variable_supports::latent_dim(problem)];
+    }
+
+    let mut scales = Vec::with_capacity(variable_supports::latent_dim(problem));
+    for support in &problem.anchors.variable_supports {
+        let support_lambda =
+            if support.saturation_lambda.is_finite() && support.saturation_lambda > 0.0 {
+                support.saturation_lambda
+            } else {
+                lambda
+            };
+        match &support.kind {
+            VariableSupportKind::Sphere { radius } => {
+                let scale = support_lambda * radius.abs().max(DIRECT_BOX_SCALE_EPS);
+                scales.extend_from_slice(&[scale, scale, scale]);
+            }
+            VariableSupportKind::Roller { enabled, .. } => {
+                for &is_enabled in enabled {
+                    if is_enabled {
+                        scales.push(1.0);
+                    }
+                }
+            }
+            VariableSupportKind::Rail { .. } | VariableSupportKind::NurbsCurve { .. } => {
+                scales.push(1.0);
+            }
+            VariableSupportKind::NurbsSurface { .. } => {
+                scales.extend_from_slice(&[1.0, 1.0]);
+            }
+        }
+    }
+    scales
+}
+
+fn validate_direct_box_bounds(problem: &Problem) -> Result<(), TheseusError> {
+    let ne = problem.topology.num_edges;
+    for i in 0..ne {
+        let lb = problem.bounds.lower[i];
+        let ub = problem.bounds.upper[i];
+        if !lb.is_finite() || !ub.is_finite() {
+            return Err(TheseusError::Shape(format!(
+                "DirectBoxBounds model contract requires finite two-sided q bounds at edge {i}; \
+                 use DirectSoftBounds for one-sided or unbounded q (got [{lb}, {ub}])"
+            )));
+        }
+        let span = ub - lb;
+        if !span.is_finite() || span <= DIRECT_BOX_SCALE_EPS {
+            return Err(TheseusError::Shape(format!(
+                "DirectBoxBounds model contract requires a non-fixed finite q interval wider than \
+                 {DIRECT_BOX_SCALE_EPS:e} at edge {i}; use DirectSoftBounds for fixed q \
+                 (got [{lb}, {ub}])"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn pack_direct_box_scaled(
+    problem: &Problem,
+    state: &OptimizationState,
+    anchor_scales: &[f64],
+) -> Vec<f64> {
+    let ne = problem.topology.num_edges;
+    let n_lat = variable_supports::latent_dim(problem);
+    let mut x = Vec::with_capacity(ne + n_lat);
+    for i in 0..ne {
+        let lower = problem.bounds.lower[i];
+        let upper = problem.bounds.upper[i];
+        x.push(state.force_densities[i].clamp(lower, upper));
+    }
+
+    let latents: Vec<f64> = if state.variable_anchor_latents.len() == n_lat {
+        state.variable_anchor_latents.clone()
+    } else {
+        state
+            .variable_anchor_positions
+            .iter()
+            .copied()
+            .take(n_lat)
+            .collect()
+    };
+    for (i, &scale) in anchor_scales.iter().enumerate().take(n_lat) {
+        let scale = scale.max(DIRECT_BOX_SCALE_EPS);
+        x.push(latents.get(i).copied().unwrap_or(0.0) / scale);
+    }
+    x
+}
+
+#[cfg(test)]
+fn direct_box_scaled_to_physical(problem: &Problem, x: &[f64], anchor_scales: &[f64]) -> Vec<f64> {
+    let mut theta = vec![0.0; x.len()];
+    fill_physical_parameters(problem, x, anchor_scales, &mut theta);
+    theta
+}
+
+fn fill_physical_parameters(
+    problem: &Problem,
+    x: &[f64],
+    anchor_scales: &[f64],
+    theta: &mut [f64],
+) {
+    let ne = problem.topology.num_edges;
+    theta[..ne].copy_from_slice(&x[..ne]);
+    for i in 0..anchor_scales.len() {
+        theta[ne + i] = x[ne + i] * anchor_scales[i];
+    }
+}
+
+fn fill_scaled_gradient(
+    problem: &Problem,
+    grad_physical: &[f64],
+    anchor_scales: &[f64],
+    gradient: &mut [f64],
+) {
+    let ne = problem.topology.num_edges;
+    gradient[..ne].copy_from_slice(&grad_physical[..ne]);
+    for i in 0..anchor_scales.len() {
+        gradient[ne + i] = grad_physical[ne + i] * anchor_scales[i];
+    }
+}
+
+#[cfg(test)]
+fn direct_box_scaled_gradient(
+    problem: &Problem,
+    grad_physical: &[f64],
+    anchor_scales: &[f64],
+) -> Vec<f64> {
+    let mut gradient = vec![0.0; grad_physical.len()];
+    fill_scaled_gradient(problem, grad_physical, anchor_scales, &mut gradient);
+    gradient
+}
+
+fn direct_box_optimizer_bounds(problem: &Problem, n_lat: usize) -> (Vec<f64>, Vec<f64>) {
+    let ne = problem.topology.num_edges;
+    let mut lower = problem.bounds.lower[..ne].to_vec();
+    let mut upper = problem.bounds.upper[..ne].to_vec();
+    let (support_lower, support_upper) = variable_supports::direct_box_optimizer_bounds(problem);
+    debug_assert_eq!(support_lower.len(), n_lat);
+    debug_assert_eq!(support_upper.len(), n_lat);
+    lower.extend(support_lower);
+    upper.extend(support_upper);
+    (lower, upper)
 }
 
 #[cfg(test)]
@@ -234,7 +782,6 @@ mod tests {
     use super::*;
     use crate::sparse::SparseColMatOwned;
     use crate::types::{AnchorInfo, Bounds, NetworkTopology, SolverOptions};
-    use ariadne_lbfgsb::Stats;
     use ndarray::Array2;
     use std::sync::Mutex;
 
@@ -378,42 +925,20 @@ mod tests {
     }
 
     #[test]
-    fn legacy_observer_does_not_desynchronize_evaluation_cache() {
+    fn progress_does_not_desynchronize_evaluation_cache() {
         let problem = tiny_problem(Bounds {
             lower: vec![0.1],
             upper: vec![10.0],
         });
-        let evaluation_cache = Rc::new(RefCell::new(FdmCache::new(&problem).unwrap()));
-        let evaluation_snapshot = evaluation_cache.borrow().nf.clone();
-        let last_eval = Rc::new(RefCell::new(Some((vec![2.0], 7.0, vec![3.0]))));
         let cancel = AtomicBool::new(false);
-        let observer = MajorIterationProgressObserver {
-            problem: &problem,
-            cancel_flag: &cancel,
-            evaluation_cache: evaluation_cache.clone(),
-            observer_cache: RefCell::new(FdmCache::new(&problem).unwrap()),
-            last_eval: last_eval.clone(),
-            callback: record_progress,
-            report_frequency: 1,
-        };
-
-        observer.xyz_for(&[3.0]).unwrap();
-
-        assert_eq!(evaluation_cache.borrow().nf, evaluation_snapshot);
-        assert_eq!(last_eval.borrow().as_ref().unwrap().0, vec![2.0]);
-    }
-
-    #[test]
-    fn direct_box_wires_iteration_limits_above_one_thousand_exactly() {
-        let mut problem = tiny_problem(Bounds {
-            lower: vec![2.0],
-            upper: vec![10.0],
-        });
-        problem.solver.max_iterations = 1_237;
-
-        let options = direct_box_solver_options(&problem).unwrap();
-
-        assert_eq!(options.max_iterations(), 1_237);
+        let fdm = FdmProblem::new(&problem, &cancel).unwrap();
+        fdm.ensure_evaluated(&[2.0]).unwrap();
+        let original = fdm.evaluation.borrow().cache.nf.clone();
+        fdm.xyz_for(&[3.0]).unwrap();
+        assert_eq!(fdm.evaluation.borrow().cache.nf, original);
+        assert_eq!(fdm.evaluation.borrow().x, vec![2.0]);
+        let _ = (&fdm).cost_and_gradient(&vec![2.0]).unwrap();
+        assert_eq!(fdm.evaluation.borrow().loss_trace.len(), 1);
     }
 
     #[test]
@@ -424,25 +949,12 @@ mod tests {
             upper: vec![10.0],
         });
         let cancel = AtomicBool::new(false);
-        let mut adapter =
-            FdmSolverAdapter::new(&problem, &cancel, Some(record_progress), 3, Vec::new()).unwrap();
-        let x = [2.0];
-        let mut gradient = [0.0];
-        let loss = adapter.value_and_gradient(&x, &mut gradient).unwrap();
-
+        let fdm = FdmProblem::new(&problem, &cancel).unwrap();
+        let value = (&fdm).cost(&vec![2.0]).unwrap();
         for iteration in 1..=7 {
-            let mut stats = Stats::default();
-            stats.iterations = iteration;
-            adapter
-                .accepted_iteration(Iteration {
-                    x: &x,
-                    value: loss,
-                    projected_gradient_norm: 0.0,
-                    stats,
-                })
+            fdm.report(iteration, &[2.0], value, Some(record_progress), 3)
                 .unwrap();
         }
-
         assert_eq!(*REPORTED_ITERATIONS.lock().unwrap(), vec![1, 3, 6]);
     }
 
@@ -453,682 +965,54 @@ mod tests {
             upper: vec![10.0],
         });
         let cancel = AtomicBool::new(false);
-        let mut adapter =
-            FdmSolverAdapter::new(&problem, &cancel, Some(cancel_progress), 1, Vec::new()).unwrap();
-        let x = [2.0];
-        let mut gradient = [0.0];
-        let loss = adapter.value_and_gradient(&x, &mut gradient).unwrap();
-        let mut stats = Stats::default();
-        stats.iterations = 1;
-
-        let error = adapter
-            .accepted_iteration(Iteration {
-                x: &x,
-                value: loss,
-                projected_gradient_norm: 0.0,
-                stats,
-            })
-            .unwrap_err();
-
-        assert!(matches!(error, TheseusError::Cancelled));
-    }
-}
-
-impl<'a> CostFunction for FdmProblem<'a> {
-    type Param = Vec<f64>;
-    type Output = f64;
-
-    fn cost(&self, theta: &Self::Param) -> Result<Self::Output, argmin::core::Error> {
-        self.ensure_evaluated(theta)?;
-        let cached = self.last_eval.borrow();
-        Ok(cached.as_ref().unwrap().1)
-    }
-}
-
-impl<'a> Gradient for FdmProblem<'a> {
-    type Param = Vec<f64>;
-    type Gradient = Vec<f64>;
-
-    fn gradient(&self, theta: &Self::Param) -> Result<Self::Gradient, argmin::core::Error> {
-        self.ensure_evaluated(theta)?;
-        let cached = self.last_eval.borrow();
-        Ok(cached.as_ref().unwrap().2.clone())
-    }
-}
-
-// ─────────────────────────────────────────────────────────────
-//  Parameter packing / unpacking
-// ─────────────────────────────────────────────────────────────
-
-/// Pack q and latent support parameters into a single θ vector.
-pub fn pack_parameters(problem: &Problem, state: &OptimizationState) -> Vec<f64> {
-    let ne = problem.topology.num_edges;
-    let n_lat = variable_supports::latent_dim(problem);
-    let mut theta = Vec::with_capacity(ne + n_lat);
-    for i in 0..ne {
-        theta.push(state.force_densities[i]);
-    }
-    if n_lat > 0 {
-        if state.variable_anchor_latents.len() == n_lat {
-            theta.extend_from_slice(&state.variable_anchor_latents);
-        } else {
-            // Backward compatibility fallback for older state payloads.
-            for i in 0..state.variable_anchor_positions.nrows() {
-                theta.push(state.variable_anchor_positions[[i, 0]]);
-                theta.push(state.variable_anchor_positions[[i, 1]]);
-                theta.push(state.variable_anchor_positions[[i, 2]]);
-            }
-        }
-    }
-    theta
-}
-
-/// Unpack θ into q and latent support parameters.
-pub fn unpack_parameters(problem: &Problem, theta: &[f64]) -> (Vec<f64>, Vec<f64>) {
-    let ne = problem.topology.num_edges;
-    let q = theta[..ne].to_vec();
-    let lat = theta[ne..].to_vec();
-    (q, lat)
-}
-
-// ─────────────────────────────────────────────────────────────
-//  Bound index precomputation
-// ─────────────────────────────────────────────────────────────
-
-fn parameter_bounds(problem: &Problem) -> (Vec<f64>, Vec<f64>) {
-    let n_lat = variable_supports::latent_dim(problem);
-    let ne = problem.topology.num_edges;
-    let mut lb = vec![f64::NEG_INFINITY; ne];
-    let mut ub = vec![f64::INFINITY; ne];
-    if problem.solver.q_parameterization_mode == QParameterizationMode::DirectSoftBounds {
-        lb.copy_from_slice(&problem.bounds.lower);
-        ub.copy_from_slice(&problem.bounds.upper);
-    }
-    if n_lat > 0 {
-        // Support feasibility is enforced via latent maps. Keep latent vars unbounded.
-        lb.extend(vec![f64::NEG_INFINITY; n_lat]);
-        ub.extend(vec![f64::INFINITY; n_lat]);
-    }
-    (lb, ub)
-}
-
-fn finite_indices(v: &[f64]) -> Vec<usize> {
-    v.iter()
-        .enumerate()
-        .filter(|(_, &x)| x.is_finite())
-        .map(|(i, _)| i)
-        .collect()
-}
-
-fn lbfgs_tolerances(problem: &Problem) -> (f64, f64) {
-    (
-        problem.solver.absolute_tolerance,
-        problem.solver.relative_tolerance,
-    )
-}
-
-fn anchor_lambda(problem: &Problem) -> f64 {
-    problem
-        .solver
-        .anchor_saturation_lambda
-        .abs()
-        .max(DIRECT_BOX_SCALE_EPS)
-}
-
-fn anchor_optimizer_scales(problem: &Problem) -> Vec<f64> {
-    let lambda = anchor_lambda(problem);
-    if problem.anchors.variable_supports.is_empty() {
-        return vec![lambda; variable_supports::latent_dim(problem)];
-    }
-
-    let mut scales = Vec::with_capacity(variable_supports::latent_dim(problem));
-    for support in &problem.anchors.variable_supports {
-        let support_lambda = if support.saturation_lambda.is_finite()
-            && support.saturation_lambda > 0.0
-        {
-            support.saturation_lambda
-        } else {
-            lambda
-        };
-        match &support.kind {
-            VariableSupportKind::Sphere { radius } => {
-                let scale = support_lambda * radius.abs().max(DIRECT_BOX_SCALE_EPS);
-                scales.extend_from_slice(&[scale, scale, scale]);
-            }
-            VariableSupportKind::Roller { enabled, .. } => {
-                for &is_enabled in enabled {
-                    if is_enabled {
-                        scales.push(1.0);
-                    }
-                }
-            }
-            VariableSupportKind::Rail { .. } | VariableSupportKind::NurbsCurve { .. } => {
-                scales.push(1.0);
-            }
-            VariableSupportKind::NurbsSurface { .. } => {
-                scales.extend_from_slice(&[1.0, 1.0]);
-            }
-        }
-    }
-    scales
-}
-
-fn validate_direct_box_bounds(problem: &Problem) -> Result<(), TheseusError> {
-    let ne = problem.topology.num_edges;
-    for i in 0..ne {
-        let lb = problem.bounds.lower[i];
-        let ub = problem.bounds.upper[i];
-        if !lb.is_finite() || !ub.is_finite() {
-            return Err(TheseusError::Shape(format!(
-                "DirectBoxBounds model contract requires finite two-sided q bounds at edge {i}; \
-                 use DirectSoftBounds for one-sided or unbounded q (got [{lb}, {ub}])"
-            )));
-        }
-        let span = ub - lb;
-        if !span.is_finite() || span <= DIRECT_BOX_SCALE_EPS {
-            return Err(TheseusError::Shape(format!(
-                "DirectBoxBounds model contract requires a non-fixed finite q interval wider than \
-                 {DIRECT_BOX_SCALE_EPS:e} at edge {i}; use DirectSoftBounds for fixed q \
-                 (got [{lb}, {ub}])"
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn pack_direct_box_scaled(
-    problem: &Problem,
-    state: &OptimizationState,
-    anchor_scales: &[f64],
-) -> Vec<f64> {
-    let ne = problem.topology.num_edges;
-    let n_lat = variable_supports::latent_dim(problem);
-    let mut x = Vec::with_capacity(ne + n_lat);
-    for i in 0..ne {
-        let lower = problem.bounds.lower[i];
-        let upper = problem.bounds.upper[i];
-        x.push(state.force_densities[i].clamp(lower, upper));
-    }
-
-    let latents: Vec<f64> = if state.variable_anchor_latents.len() == n_lat {
-        state.variable_anchor_latents.clone()
-    } else {
-        state
-            .variable_anchor_positions
-            .iter()
-            .copied()
-            .take(n_lat)
-            .collect()
-    };
-    for (i, &scale) in anchor_scales.iter().enumerate().take(n_lat) {
-        let scale = scale.max(DIRECT_BOX_SCALE_EPS);
-        x.push(latents.get(i).copied().unwrap_or(0.0) / scale);
-    }
-    x
-}
-
-#[cfg(test)]
-fn direct_box_scaled_to_physical(problem: &Problem, x: &[f64], anchor_scales: &[f64]) -> Vec<f64> {
-    let mut theta = vec![0.0; x.len()];
-    fill_physical_parameters(problem, x, anchor_scales, &mut theta);
-    theta
-}
-
-fn fill_physical_parameters(
-    problem: &Problem,
-    x: &[f64],
-    anchor_scales: &[f64],
-    theta: &mut [f64],
-) {
-    let ne = problem.topology.num_edges;
-    theta[..ne].copy_from_slice(&x[..ne]);
-    for i in 0..anchor_scales.len() {
-        theta[ne + i] = x[ne + i] * anchor_scales[i];
-    }
-}
-
-fn fill_scaled_gradient(
-    problem: &Problem,
-    grad_physical: &[f64],
-    anchor_scales: &[f64],
-    gradient: &mut [f64],
-) {
-    let ne = problem.topology.num_edges;
-    gradient[..ne].copy_from_slice(&grad_physical[..ne]);
-    for i in 0..anchor_scales.len() {
-        gradient[ne + i] = grad_physical[ne + i] * anchor_scales[i];
-    }
-}
-
-#[cfg(test)]
-fn direct_box_scaled_gradient(
-    problem: &Problem,
-    grad_physical: &[f64],
-    anchor_scales: &[f64],
-) -> Vec<f64> {
-    let mut gradient = vec![0.0; grad_physical.len()];
-    fill_scaled_gradient(problem, grad_physical, anchor_scales, &mut gradient);
-    gradient
-}
-
-fn direct_box_optimizer_bounds(problem: &Problem, n_lat: usize) -> (Vec<f64>, Vec<f64>) {
-    let ne = problem.topology.num_edges;
-    let mut lower = problem.bounds.lower[..ne].to_vec();
-    let mut upper = problem.bounds.upper[..ne].to_vec();
-    let (support_lower, support_upper) = variable_supports::direct_box_optimizer_bounds(problem);
-    debug_assert_eq!(support_lower.len(), n_lat);
-    debug_assert_eq!(support_upper.len(), n_lat);
-    lower.extend(support_lower);
-    upper.extend(support_upper);
-    (lower, upper)
-}
-
-struct FdmSolverAdapter<'a> {
-    problem: &'a Problem,
-    cancel_flag: &'a AtomicBool,
-    progress_cb: Option<ProgressCallback>,
-    report_frequency: usize,
-    anchor_scales: Vec<f64>,
-    evaluation_lower: Vec<f64>,
-    evaluation_upper: Vec<f64>,
-    lower_indices: Vec<usize>,
-    upper_indices: Vec<usize>,
-    cache: FdmCache,
-    physical_parameters: Vec<f64>,
-    physical_gradient: Vec<f64>,
-    evaluated_x: Vec<f64>,
-    has_evaluation: bool,
-    xyz_flat: Vec<f64>,
-    loss_trace: Vec<f64>,
-}
-
-impl<'a> FdmSolverAdapter<'a> {
-    fn new(
-        problem: &'a Problem,
-        cancel_flag: &'a AtomicBool,
-        progress_cb: Option<ProgressCallback>,
-        report_frequency: usize,
-        anchor_scales: Vec<f64>,
-    ) -> Result<Self, TheseusError> {
-        let n = problem.topology.num_edges + variable_supports::latent_dim(problem);
-        Ok(Self {
-            problem,
-            cancel_flag,
-            progress_cb,
-            report_frequency: report_frequency.max(1),
-            anchor_scales,
-            evaluation_lower: vec![f64::NEG_INFINITY; n],
-            evaluation_upper: vec![f64::INFINITY; n],
-            lower_indices: Vec::new(),
-            upper_indices: Vec::new(),
-            cache: FdmCache::new(problem)?,
-            physical_parameters: vec![0.0; n],
-            physical_gradient: vec![0.0; n],
-            evaluated_x: vec![0.0; n],
-            has_evaluation: false,
-            xyz_flat: vec![0.0; problem.topology.num_nodes * 3],
-            loss_trace: Vec::new(),
-        })
-    }
-
-    fn check_cancelled(&self) -> Result<(), TheseusError> {
-        if self.cancel_flag.load(Ordering::Acquire) {
+        let fdm = FdmProblem::new(&problem, &cancel).unwrap();
+        let value = (&fdm).cost(&vec![2.0]).unwrap();
+        assert!(matches!(
+            fdm.report(1, &[2.0], value, Some(cancel_progress), 1),
             Err(TheseusError::Cancelled)
-        } else {
-            Ok(())
-        }
+        ));
     }
 
-    fn fill_physical_parameters(&mut self, x: &[f64]) {
-        fill_physical_parameters(
-            self.problem,
-            x,
-            &self.anchor_scales,
-            &mut self.physical_parameters,
-        );
-    }
-
-    fn sync_final_cache(&mut self, x: &[f64]) -> Result<(), TheseusError> {
-        if self.has_evaluation && self.evaluated_x == x {
-            return Ok(());
-        }
-        self.fill_physical_parameters(x);
-        let ne = self.problem.topology.num_edges;
-        let anchors = variable_supports::map_latents_to_positions(
-            self.problem,
-            &self.physical_parameters[ne..],
-        )?;
-        crate::fdm::solve_fdm_with_loads(
-            &mut self.cache,
-            &self.physical_parameters[..ne],
-            self.problem,
-            &anchors,
-            1e-12,
-        )?;
-        self.evaluated_x.copy_from_slice(x);
-        self.has_evaluation = true;
-        Ok(())
-    }
-
-    fn finish(
-        mut self,
-        x: &[f64],
-        report: ariadne_lbfgsb::Report,
-        state: &mut OptimizationState,
-    ) -> Result<SolverResult, TheseusError> {
-        self.sync_final_cache(x)?;
-        self.fill_physical_parameters(x);
-        let ne = self.problem.topology.num_edges;
-        let q = self.physical_parameters[..ne].to_vec();
-        let latents = self.physical_parameters[ne..].to_vec();
-        let anchors = variable_supports::map_latents_to_positions(self.problem, &latents)?;
-        let termination_reason = direct_box_termination_text(&report);
-        let converged = report.termination.converged();
-
-        state.force_densities = q.clone();
-        state.variable_anchor_positions = anchors.clone();
-        state.variable_anchor_latents = latents;
-        state.iterations = report.stats.iterations;
-        state.loss_trace = self.loss_trace.clone();
-
-        Ok(SolverResult {
-            q,
-            anchor_positions: anchors,
-            xyz: self.cache.nf,
-            member_lengths: self.cache.member_lengths,
-            member_forces: self.cache.member_forces,
-            reactions: self.cache.reactions,
-            loss_trace: self.loss_trace,
-            iterations: report.stats.iterations,
-            converged,
-            termination_reason,
-            cross_section_areas: self.cache.cross_section_areas,
-        })
-    }
-}
-
-impl SolveAdapter for FdmSolverAdapter<'_> {
-    type Error = TheseusError;
-
-    fn value_and_gradient(&mut self, x: &[f64], gradient: &mut [f64]) -> Result<f64, Self::Error> {
-        self.check_cancelled()?;
-        if x.iter().any(|value| !value.is_finite()) {
-            return Err(TheseusError::Solver(
-                "DirectBoxBounds received non-finite solver parameters".into(),
-            ));
-        }
-
-        self.fill_physical_parameters(x);
-        let loss = value_and_gradient(
-            &mut self.cache,
-            self.problem,
-            &self.physical_parameters,
-            &mut self.physical_gradient,
-            &self.evaluation_lower,
-            &self.evaluation_upper,
-            &self.lower_indices,
-            &self.upper_indices,
-        )?;
-        fill_scaled_gradient(
-            self.problem,
-            &self.physical_gradient,
-            &self.anchor_scales,
-            gradient,
-        );
-        self.loss_trace.push(loss);
-        self.evaluated_x.copy_from_slice(x);
-        self.has_evaluation = true;
-        self.check_cancelled()?;
-        Ok(loss)
-    }
-
-    fn accepted_iteration(&mut self, iteration: Iteration<'_>) -> Result<Control, Self::Error> {
-        self.check_cancelled()?;
-        let Some(progress_callback) = self.progress_cb.filter(|_| {
-            should_report_major_iteration(iteration.stats.iterations, self.report_frequency)
-        }) else {
-            return Ok(Control::Continue);
+    #[test]
+    fn tolerance_checks_preserve_mode_specific_meaning_and_zero_behavior() {
+        let boxed = Tolerances {
+            bounded: true,
+            gradient: 0.0,
+            cost: 0.01,
         };
-
-        for (node, xyz) in self.xyz_flat.chunks_exact_mut(3).enumerate() {
-            xyz.copy_from_slice(&[
-                self.cache.nf[[node, 0]],
-                self.cache.nf[[node, 1]],
-                self.cache.nf[[node, 2]],
-            ]);
-        }
-        let ne = self.problem.topology.num_edges;
-        let should_continue = unsafe {
-            progress_callback(
-                iteration.stats.iterations,
-                iteration.value,
-                self.xyz_flat.as_ptr(),
-                self.problem.topology.num_nodes,
-                self.physical_parameters.as_ptr(),
-                ne,
-            )
-        };
-        if should_continue == 0 {
-            return Err(TheseusError::Cancelled);
-        }
-        self.check_cancelled()?;
-        Ok(Control::Continue)
-    }
-}
-
-fn map_direct_box_solve_error(error: SolveError<TheseusError>) -> TheseusError {
-    match error {
-        SolveError::Objective(error) | SolveError::Callback(error) => error,
-        other => TheseusError::Solver(other.to_string()),
-    }
-}
-
-fn direct_box_termination_text(report: &ariadne_lbfgsb::Report) -> String {
-    let reason = match report.termination {
-        Termination::Converged(Convergence::ProjectedGradient) => {
-            "converged: projected gradient tolerance reached"
-        }
-        Termination::Converged(Convergence::RelativeFunction) => {
-            "converged: relative objective reduction tolerance reached"
-        }
-        Termination::Stopped(StopReason::MaximumIterations) => {
-            "stopped: maximum iterations reached"
-        }
-        Termination::Stopped(StopReason::MaximumEvaluations) => {
-            "stopped: maximum objective evaluations reached"
-        }
-        Termination::Stopped(StopReason::MaximumLineSearchEvaluations) => {
-            "stopped: maximum line-search evaluations reached"
-        }
-        Termination::Stopped(StopReason::User) => "stopped: requested by callback",
-        Termination::Failed(Failure::LineSearch) => "failed: line search could not find a step",
-        Termination::Failed(Failure::Numerical) => "failed: numerical error",
-        _ => "stopped: unrecognized solver termination",
-    };
-    format!(
-        "{reason}; iterations={}; evaluations={}; projected_gradient={:.3e}",
-        report.stats.iterations, report.stats.evaluations, report.projected_gradient_norm
-    )
-}
-
-fn direct_box_solver_options(problem: &Problem) -> Result<Options, TheseusError> {
-    Options::new()
-        .with_history_size(10)
-        .and_then(|options| options.with_backend(Backend::Faer))
-        .and_then(|options| options.with_max_iterations(problem.solver.max_iterations.max(1)))
-        .and_then(|options| {
-            options.with_projected_gradient_tolerance(problem.solver.absolute_tolerance.max(0.0))
-        })
-        .and_then(|options| {
-            options.with_relative_function_tolerance(problem.solver.relative_tolerance.max(0.0))
-        })
-        .map_err(|error| TheseusError::Solver(error.to_string()))
-}
-
-fn optimize_direct_box_bounds(
-    problem: &Problem,
-    state: &mut OptimizationState,
-    progress_cb: Option<ProgressCallback>,
-    report_freq: usize,
-    cancel_flag: &AtomicBool,
-) -> Result<SolverResult, TheseusError> {
-    crate::objectives::validate_objectives(&problem.objectives)?;
-
-    let ne = problem.topology.num_edges;
-    let n_lat = variable_supports::latent_dim(problem);
-    validate_direct_box_bounds(problem)?;
-    let anchor_scales = anchor_optimizer_scales(problem);
-    if anchor_scales.len() != n_lat {
-        return Err(TheseusError::Shape(format!(
-            "anchor optimizer scale length mismatch: got {}, expected {n_lat}",
-            anchor_scales.len()
-        )));
-    }
-
-    let mut x = pack_direct_box_scaled(problem, state, &anchor_scales);
-    let (lower, upper) = direct_box_optimizer_bounds(problem, n_lat);
-    let options = direct_box_solver_options(problem)?;
-    let bounds = SolverBounds::new(&lower, &upper, ne + n_lat)
-        .map_err(|error| TheseusError::Solver(error.to_string()))?;
-    let mut adapter = FdmSolverAdapter::new(
-        problem,
-        cancel_flag,
-        progress_cb,
-        report_freq,
-        anchor_scales,
-    )?;
-    let mut solver = Solver::new(options);
-    let report = solver
-        .minimize_with_adapter(&mut x, bounds, &mut adapter)
-        .map_err(map_direct_box_solve_error)?;
-    adapter.finish(&x, report, state)
-}
-
-// ─────────────────────────────────────────────────────────────
-//  Top-level optimisation entry point
-// ─────────────────────────────────────────────────────────────
-
-/// Run L-BFGS optimisation on the FDM problem.
-///
-/// `progress_cb` / `report_freq` control an optional FFI callback invoked
-/// every `report_freq` accepted L-BFGS iterations with the current node positions.
-pub fn optimize(
-    problem: &Problem,
-    state: &mut OptimizationState,
-    progress_cb: Option<ProgressCallback>,
-    report_freq: usize,
-    cancel_flag: &AtomicBool,
-) -> Result<SolverResult, TheseusError> {
-    if problem.solver.q_parameterization_mode == QParameterizationMode::DirectBoxBounds {
-        return optimize_direct_box_bounds(problem, state, progress_cb, report_freq, cancel_flag);
-    }
-
-    crate::objectives::validate_objectives(&problem.objectives)?;
-
-    let cache = FdmCache::new(problem)?;
-
-    let (lb, ub) = parameter_bounds(problem);
-    let lb_idx = finite_indices(&lb);
-    let ub_idx = finite_indices(&ub);
-
-    let init_param = pack_parameters(problem, state);
-
-    let cache = Rc::new(RefCell::new(cache));
-    let last_eval = Rc::new(RefCell::new(None));
-    let report_frequency = if report_freq == 0 { 1 } else { report_freq };
-
-    let fdm_problem = FdmProblem {
-        problem,
-        cache: cache.clone(),
-        lb,
-        ub,
-        lb_idx,
-        ub_idx,
-        last_eval: last_eval.clone(),
-        loss_trace: RefCell::new(Vec::new()),
-        cancel_flag,
-    };
-
-    // Configure L-BFGS with user-specified tolerances
-    let linesearch = MoreThuenteLineSearch::new();
-    let (tolerance_grad, tolerance_cost) = lbfgs_tolerances(problem);
-    let solver = LBFGS::new(linesearch, 10)
-        .with_tolerance_grad(tolerance_grad)
-        .map_err(|e| TheseusError::Solver(format!("tolerance_grad: {e}")))?
-        .with_tolerance_cost(tolerance_cost)
-        .map_err(|e| TheseusError::Solver(format!("tolerance_cost: {e}")))?;
-
-    let mut executor = Executor::new(fdm_problem, solver).configure(|config| {
-        config
-            .param(init_param)
-            .max_iters(problem.solver.max_iterations as u64)
-            .target_cost(f64::NEG_INFINITY)
-    });
-    if let Some(callback) = progress_cb {
-        executor = executor.add_observer(
-            MajorIterationProgressObserver {
-                problem: problem as *const Problem,
-                cancel_flag,
-                evaluation_cache: cache.clone(),
-                observer_cache: RefCell::new(FdmCache::new(problem)?),
-                last_eval,
-                callback,
-                report_frequency,
-            },
-            ObserverMode::Always,
+        assert_eq!(
+            boxed.check(1.0, 0.001, Some(0.002)),
+            Some(TerminationReason::RelativeCostTolerance)
         );
+        assert_eq!(
+            boxed.check(1.0, 100.0, Some(100.5)),
+            Some(TerminationReason::RelativeCostTolerance)
+        );
+        let soft = Tolerances {
+            bounded: false,
+            ..boxed
+        };
+        assert_eq!(soft.check(1.0, 100.0, Some(100.5)), None);
+        assert_eq!(
+            soft.check(1.0, 100.0, Some(100.001)),
+            Some(TerminationReason::CostTolerance)
+        );
+        for bounded in [true, false] {
+            assert_eq!(
+                Tolerances {
+                    bounded,
+                    gradient: 0.0,
+                    cost: 0.0
+                }
+                .check(0.0, 0.0, Some(0.0)),
+                None
+            );
+        }
     }
 
-    let result = executor.run()?;
-    let loss_trace = result
-        .problem
-        .problem
-        .as_ref()
-        .map(|p| p.loss_trace.borrow().clone())
-        .unwrap_or_default();
-
-    // Extract solution
-    let best_param = result
-        .state()
-        .get_best_param()
-        .ok_or_else(|| TheseusError::Solver("L-BFGS returned no best parameters".into()))?;
-    let (q, latents) = unpack_parameters(problem, best_param);
-    let anchors = variable_supports::map_latents_to_positions(problem, &latents)?;
-
-    // Reuse the evaluation cache from the final θ — no redundant forward solve.
-    if let Some(ref p) = result.problem.problem {
-        p.ensure_evaluated(best_param)?;
+    #[test]
+    fn solver_failure_is_not_convergence() {
+        assert!(!termination_text(TerminationReason::SolverFailed).0);
+        assert!(!termination_text(TerminationReason::MaxIter).0);
     }
-    let final_cache = cache.borrow();
-
-    let termination_status = result.state().get_termination_status();
-    let converged = matches!(
-        termination_status,
-        TerminationStatus::Terminated(TerminationReason::SolverConverged)
-    );
-
-    let termination_reason = match termination_status {
-        TerminationStatus::Terminated(reason) => format!("{reason}"),
-        TerminationStatus::NotTerminated => "not terminated".to_string(),
-    };
-
-    state.force_densities = q.clone();
-    state.variable_anchor_positions = anchors.clone();
-    state.variable_anchor_latents = latents.clone();
-    state.iterations = result.state().get_iter() as usize;
-    state.loss_trace = loss_trace.clone();
-
-    Ok(SolverResult {
-        q,
-        anchor_positions: anchors,
-        xyz: final_cache.nf.clone(),
-        member_lengths: final_cache.member_lengths.clone(),
-        member_forces: final_cache.member_forces.clone(),
-        reactions: final_cache.reactions.clone(),
-        loss_trace,
-        iterations: state.iterations,
-        converged,
-        termination_reason,
-        cross_section_areas: final_cache.cross_section_areas.clone(),
-    })
 }

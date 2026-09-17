@@ -22,6 +22,9 @@
     <None Include="Theseus\theseus.dll" Link="theseus.dll" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Theseus\libtheseus.dylib" Link="libtheseus.dylib" CopyToOutputDirectory="PreserveNewest" Condition="Exists('Theseus\libtheseus.dylib')" />
     <None Update="LICENSE.txt" Link="Ariadne-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="third-party\basin\LICENSE-MIT" Link="basin-LICENSE-MIT.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="third-party\basin\LICENSE-APACHE" Link="basin-LICENSE-APACHE.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="third-party\basin\COPYRIGHT" Link="basin-COPYRIGHT.txt" CopyToOutputDirectory="PreserveNewest" />
     <None Update="crates\lbfgsb\LICENSE" Link="ariadne-lbfgsb-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" />
     <None Update="crates\lbfgsb\UPSTREAM_LICENSE.txt" Link="ariadne-lbfgsb-UPSTREAM_LICENSE.txt" CopyToOutputDirectory="PreserveNewest" />
     <None Update="crates\lbfgsb\THIRD_PARTY_NOTICES.md" Link="ariadne-lbfgsb-THIRD_PARTY_NOTICES.md" CopyToOutputDirectory="PreserveNewest" />

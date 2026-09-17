@@ -198,7 +198,7 @@ fn ffi_forward_solve() {
         assert_eq!(rc, 0, "forward solve failed: {}", get_last_error());
 
         // Anchors preserved
-        assert!((xyz[0 * 3] - 0.0).abs() < 1e-12, "anchor 0 x");
+        assert!((xyz[0] - 0.0).abs() < 1e-12, "anchor 0 x");
         assert!((xyz[6 * 3] - 6.0).abs() < 1e-12, "anchor 6 x");
 
         // All positions finite
@@ -607,6 +607,12 @@ fn ffi_error_reporting() {
 
 #[test]
 fn concurrent_cancel_is_race_free_reentrant_and_run_scoped() {
+    for mode in [0, 2] {
+        check_concurrent_cancel(mode);
+    }
+}
+
+fn check_concurrent_cancel(mode: i32) {
     let d = arch_data();
     CALLBACK_ENTERED.store(false, Ordering::Release);
     CALLBACK_RELEASE.store(false, Ordering::Release);
@@ -614,6 +620,7 @@ fn concurrent_cancel_is_race_free_reentrant_and_run_scoped() {
 
     unsafe {
         let handle = create_handle(&d);
+        assert_eq!(theseus_set_q_parameterization_mode(handle, mode), 0);
         CALLBACK_HANDLE.store(handle as usize, Ordering::Release);
         let target_indices = [1usize, 2, 3, 4, 5];
         let target_xyz = [

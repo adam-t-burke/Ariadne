@@ -67,12 +67,18 @@ lipo -create -output "$OUTPUT_DIR/libtheseus.dylib" "$ARM64" "$X86_64"
 
 NOTICE_SOURCES=(
     "$WORKSPACE_DIR/LICENSE.txt"
+    "$WORKSPACE_DIR/third-party/basin/LICENSE-MIT"
+    "$WORKSPACE_DIR/third-party/basin/LICENSE-APACHE"
+    "$WORKSPACE_DIR/third-party/basin/COPYRIGHT"
     "$WORKSPACE_DIR/crates/lbfgsb/LICENSE"
     "$WORKSPACE_DIR/crates/lbfgsb/UPSTREAM_LICENSE.txt"
     "$WORKSPACE_DIR/crates/lbfgsb/THIRD_PARTY_NOTICES.md"
 )
 NOTICE_DESTINATIONS=(
     "$OUTPUT_DIR/Ariadne-LICENSE.txt"
+    "$OUTPUT_DIR/basin-LICENSE-MIT.txt"
+    "$OUTPUT_DIR/basin-LICENSE-APACHE.txt"
+    "$OUTPUT_DIR/basin-COPYRIGHT.txt"
     "$OUTPUT_DIR/ariadne-lbfgsb-LICENSE.txt"
     "$OUTPUT_DIR/ariadne-lbfgsb-UPSTREAM_LICENSE.txt"
     "$OUTPUT_DIR/ariadne-lbfgsb-THIRD_PARTY_NOTICES.md"

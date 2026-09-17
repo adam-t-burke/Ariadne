@@ -75,6 +75,9 @@ Copy-Item $dllSource $dllDest -Force
 Write-Host "Copied $dllSource -> $dllDest" -ForegroundColor Green
 $noticeFiles = @(
     @{ Source = (Join-Path $workspaceDir "LICENSE.txt"); Destination = "Ariadne-LICENSE.txt" },
+    @{ Source = (Join-Path $workspaceDir "third-party/basin/LICENSE-MIT"); Destination = "basin-LICENSE-MIT.txt" },
+    @{ Source = (Join-Path $workspaceDir "third-party/basin/LICENSE-APACHE"); Destination = "basin-LICENSE-APACHE.txt" },
+    @{ Source = (Join-Path $workspaceDir "third-party/basin/COPYRIGHT"); Destination = "basin-COPYRIGHT.txt" },
     @{ Source = (Join-Path $workspaceDir "crates/lbfgsb/LICENSE"); Destination = "ariadne-lbfgsb-LICENSE.txt" },
     @{ Source = (Join-Path $workspaceDir "crates/lbfgsb/UPSTREAM_LICENSE.txt"); Destination = "ariadne-lbfgsb-UPSTREAM_LICENSE.txt" },
     @{ Source = (Join-Path $workspaceDir "crates/lbfgsb/THIRD_PARTY_NOTICES.md"); Destination = "ariadne-lbfgsb-THIRD_PARTY_NOTICES.md" }

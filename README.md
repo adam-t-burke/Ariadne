@@ -14,7 +14,7 @@ Ariadne is a Grasshopper plugin for **inverse design of form-found structures** 
 ## Requirements
 
 - **Rhino 8** with Grasshopper
-- **.NET 8** (only when building from source)
+- **.NET 8** and **Rust 1.87 or newer** (only when building from source)
 
 ## Installation
 
@@ -23,7 +23,7 @@ Ariadne is a Grasshopper plugin for **inverse design of form-found structures** 
 **From source on Windows:** Clone the repo, run `.\build.ps1`, then open
 `Ariadne.sln` in Visual Studio and build in Release. Copy `Ariadne.gha`,
 `theseus.dll`, `Ariadne-LICENSE.txt`, `NATIVE_ARTIFACTS.md`, and every
-`ariadne-lbfgsb-*` notice from `bin\Release\net8.0\` into your Grasshopper
+`basin-*` and `ariadne-lbfgsb-*` notice from `bin\Release\net8.0\` into your Grasshopper
 Libraries folder. On macOS, run `./build.sh release`; it replaces the tracked
 bootstrap dylib with a universal binary built from the checked-out source.
 Release packages should use CI-built native artifacts, not untouched bootstrap
@@ -39,9 +39,10 @@ Define an FDM network (nodes, branches, fixed nodes), set initial force densitie
 - **Memory:** `TheseusSolver` implements `IDisposable`. Always use `using` or call `Dispose()` to free the native handle.
 - **Layout:** All flattened arrays (xyz, loads, targets) use row-major layout: `array[index * 3 + dim]`.
 - **Native library:** `theseus.dll` / `libtheseus.dylib` is built from the Rust workspace under `crates/` via `build.ps1` or `build.sh`.
-- **q bounds:** Optimization defaults to `DirectBoxBounds` (L-BFGS-B; strict finite lower/upper bounds on every edge). Switch to `DirectSoftBounds` from the OptConfig right-click menu for one-sided or infinite bounds. Legacy saved configs using the removed implicit bounded mode are migrated to box bounds when all q bounds are finite, otherwise to soft bounds.
-- **Convergence tolerances:** In `DirectBoxBounds`, **AbsTol** bounds the projected-gradient infinity norm and **RelTol** bounds the relative accepted-iterate reduction `(f[k]-f[k+1])/max(|f[k]|,|f[k+1]|,1)`. Initial parameters outside finite bounds are projected before the first objective evaluation. `DirectSoftBounds` uses the same values as its L-BFGS gradient and relative-cost tolerances.
+- **q bounds:** Optimization defaults to `DirectBoxBounds` (Basin L-BFGS-B; strict finite lower/upper bounds on every edge). Switch to `DirectSoftBounds` from the OptConfig right-click menu for one-sided or infinite bounds. Legacy saved configs using the removed implicit bounded mode are migrated to box bounds when all q bounds are finite, otherwise to soft bounds.
+- **Convergence tolerances:** In `DirectBoxBounds`, **AbsTol** bounds the projected-gradient infinity norm and **RelTol** bounds the relative accepted-iterate reduction `(f[k]-f[k+1])/max(|f[k]|,|f[k+1]|,1)`. Initial parameters outside finite bounds are projected before the first objective evaluation. `DirectSoftBounds` uses **AbsTol** for the Euclidean gradient norm and **RelTol** for the absolute change in objective value, preserving the existing settings behavior. Zero disables either tolerance.
 - **Iteration limit:** Positive **MaxIter** values are applied directly as the maximum number of accepted optimization iterations; no smaller hidden default cap is applied.
+- **Optimizer comparison:** See the [Basin benchmark report](crates/theseus/BENCHMARKS.md) for reproducible timings, numerical results, and stopping criteria against the previous solvers.
 - **Variable supports:** In `DirectBoxBounds`, roller, rail, and NURBS parameters use normalized hard boxes without sigmoid saturation. `DirectSoftBounds` keeps the smooth unbounded latent maps.
 - **q cache:** With **Cache Q** enabled, every completed solve with finite force densities updates the cache, including useful best-so-far results that stop at the iteration limit. Use **Reset Cache** to return to the input q values.
 - **Hydrostatic follower loads:** `Pressure Load (Hydrostatic)` applies `p = ρgh` along each current face normal. For a forward solve with fixed positive `q`, Theseus uses Newton iterations with load continuation and returns the loaded equilibrium with member force `F = qL`. Face winding sets the pressure direction.
@@ -84,7 +85,9 @@ rest lengths from that matched loaded state.
 
 ## License
 
-The Ariadne project is MIT licensed; see [LICENSE.txt](LICENSE.txt). The
+The Ariadne project is MIT licensed; see [LICENSE.txt](LICENSE.txt). Theseus uses
+Basin, available under MIT or Apache-2.0, with preserved
+[third-party notices](third-party/basin/README.md). The
 standalone translated solver under `crates/lbfgsb` is BSD-3-Clause and carries
 its own [license](crates/lbfgsb/LICENSE), preserved
 [upstream license](crates/lbfgsb/UPSTREAM_LICENSE.txt), and

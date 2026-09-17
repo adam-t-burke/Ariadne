@@ -16,6 +16,12 @@ checks the native file type and notice bundle, and uploads the rebuilt binary
 and notices as a platform-specific artifact. Releases should use those CI
 artifacts, not a pre-existing binary from the source tree.
 
-The native library includes `ariadne-lbfgsb`, a BSD-3-Clause solver. Distribute
-all files named `ariadne-lbfgsb-*` with the native binary. The surrounding
-Ariadne project is MIT licensed; see `Ariadne-LICENSE.txt`.
+Rebuilt native libraries use Basin for L-BFGS and L-BFGS-B. Distribute
+`basin-LICENSE-MIT.txt`, `basin-LICENSE-APACHE.txt`, and `basin-COPYRIGHT.txt`
+with the binary. The source copies and their version are recorded in
+[`third-party/basin`](../third-party/basin/README.md).
+
+The tracked bootstrap binaries predate the Basin migration and may include
+`ariadne-lbfgsb`. Its `ariadne-lbfgsb-*` notices remain in the distribution bundle
+to cover those binaries. The standalone crate also retains its own notices.
+The surrounding Ariadne project is MIT licensed; see `Ariadne-LICENSE.txt`.
