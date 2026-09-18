@@ -1,3 +1,4 @@
+use crate::linear_solver::{IterativeSolverOptions, LinearSolverKind};
 use crate::sparse::SparseColMatOwned;
 use ndarray::Array2;
 use std::fmt;
@@ -27,6 +28,21 @@ pub enum TheseusError {
     Shape(String),
     /// Optimization was cancelled by the caller via the progress callback.
     Cancelled,
+    /// An iterative linear solver (`IterativeCpu` / `IterativeGpu`) exhausted
+    /// its iteration budget before reaching the requested relative residual.
+    IterativeSolverDidNotConverge {
+        iterations: u32,
+        relative_residual: f64,
+        kind: LinearSolverKind,
+    },
+    /// An iterative linear solver was requested for a problem it cannot
+    /// solve (e.g. bounds permit `q ≤ 0`), or is not available in this build.
+    IterativeSolverUnsupported(String),
+    /// `IterativeGpu` was requested but no usable GPU adapter exists (the
+    /// message lists the adapters that were probed).
+    GpuUnavailable(String),
+    /// A GPU buffer allocation failed.
+    GpuOutOfMemory { requested: u64, available: u64 },
 }
 
 impl fmt::Display for TheseusError {
@@ -43,6 +59,44 @@ impl fmt::Display for TheseusError {
             Self::Solver(msg) => write!(f, "solver error: {msg}"),
             Self::Shape(msg) => write!(f, "shape error: {msg}"),
             Self::Cancelled => write!(f, "optimization cancelled by user"),
+            Self::IterativeSolverDidNotConverge {
+                iterations,
+                relative_residual,
+                kind,
+            } => write!(
+                f,
+                "linear solver '{kind}' did not converge after {iterations} iterations \
+                 (relative residual {relative_residual:.3e}); raise the iteration budget or \
+                 loosen the tolerance in the iterative options, or switch the linear solver \
+                 toggle to '{}'",
+                LinearSolverKind::Direct
+            ),
+            Self::IterativeSolverUnsupported(msg) => write!(
+                f,
+                "iterative linear solver not supported for this problem: {msg}; switch the \
+                 linear solver toggle to '{}'",
+                LinearSolverKind::Direct
+            ),
+            Self::GpuUnavailable(msg) => write!(
+                f,
+                "linear solver '{}' requested but no usable GPU adapter is available: {msg}; \
+                 switch the linear solver toggle to '{}' or '{}'",
+                LinearSolverKind::IterativeGpu,
+                LinearSolverKind::IterativeCpu,
+                LinearSolverKind::Direct
+            ),
+            Self::GpuOutOfMemory {
+                requested,
+                available,
+            } => write!(
+                f,
+                "linear solver '{}' ran out of device memory (requested {requested} bytes, \
+                 {available} bytes available); lower `max_device_bytes`, or switch the linear \
+                 solver toggle to '{}' or '{}'",
+                LinearSolverKind::IterativeGpu,
+                LinearSolverKind::IterativeCpu,
+                LinearSolverKind::Direct
+            ),
         }
     }
 }
@@ -433,6 +487,12 @@ pub struct SolverOptions {
     pub barrier_sharpness: f64,
     pub q_parameterization_mode: QParameterizationMode,
     pub anchor_saturation_lambda: f64,
+    /// Which linear solver evaluates `A(q) x = b` and the adjoint system.
+    /// Always [`LinearSolverKind::Direct`] unless explicitly toggled.
+    pub linear_solver: LinearSolverKind,
+    /// Parameters of the iterative solvers; ignored when `linear_solver` is
+    /// [`LinearSolverKind::Direct`].
+    pub iterative: IterativeSolverOptions,
 }
 
 impl Default for SolverOptions {
@@ -446,6 +506,8 @@ impl Default for SolverOptions {
             barrier_sharpness: DEFAULT_BARRIER_SHARPNESS,
             q_parameterization_mode: QParameterizationMode::DirectSoftBounds,
             anchor_saturation_lambda: 1.0,
+            linear_solver: LinearSolverKind::Direct,
+            iterative: IterativeSolverOptions::default(),
         }
     }
 }
@@ -1044,6 +1106,13 @@ impl Factorization {
         Ok(x)
     }
 
+    /// Number of stored numeric factor values (`L`, or `L` and `D`).
+    pub fn len_values(&self) -> usize {
+        match self {
+            Self::Cholesky { l_values, .. } | Self::Ldl { l_values, .. } => l_values.len(),
+        }
+    }
+
     /// The strategy this factorization was built with.
     pub fn strategy(&self) -> FactorizationStrategy {
         match self {
@@ -1144,41 +1213,8 @@ impl FdmCache {
         let nn = topo.num_nodes;
         let nn_free = topo.free_node_indices.len();
 
-        // ── 1. Build A's sparsity pattern from Cn^T * Cn ──
-        let cn = &topo.free_incidence; // ne × nn_free
-        let cn_t = cn.transpose();
-        let a_matrix = SparseColMatOwned::sparse_times_sparse(&cn_t, cn)
-            .map_err(|e| TheseusError::Solver(e))?;
-
-        // ── 2. Build q_to_nz mapping ──────────────────────
-        // For each edge k, find which free nodes it touches in Cn,
-        // then map those (n1, n2) pairs to indices in a_matrix.values.
-        let mut edge_to_free_nodes: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ne];
-        for col in 0..nn_free {
-            let start = cn.col_ptrs[col] as usize;
-            let end_ = cn.col_ptrs[col + 1] as usize;
-            for idx in start..end_ {
-                let row = cn.row_indices[idx] as usize;
-                let val = cn.values[idx];
-                edge_to_free_nodes[row].push((col, val));
-            }
-        }
-
-        let mut q_to_nz_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ne];
-        for k in 0..ne {
-            let nodes = &edge_to_free_nodes[k];
-            for &(n1, v1) in nodes {
-                for &(n2, v2) in nodes {
-                    let nz_idx = find_nz_index(&a_matrix.col_ptrs, &a_matrix.row_indices, n1, n2)
-                        .ok_or(TheseusError::SparsityMismatch {
-                        edge: k,
-                        row: n1,
-                        col: n2,
-                    })?;
-                    q_to_nz_entries[k].push((nz_idx, v1 * v2));
-                }
-            }
-        }
+        // ── 1–2. A's sparsity pattern (Cnᵀ Cn) and the q → nzval gather map ──
+        let (a_matrix, q_to_nz) = crate::linear_solver::direct::build_system_pattern(topo)?;
 
         // ── 3. Edge start / end from incidence ────────────
         let mut edge_starts = vec![0usize; ne];
@@ -1226,8 +1262,6 @@ impl FdmCache {
                 _ => {}
             }
         }
-
-        let q_to_nz = QToNz::from_edge_entries(&q_to_nz_entries, a_matrix.values.len());
 
         // ── 6. Pre-allocate all buffers ───────────────────
 
