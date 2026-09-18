@@ -256,6 +256,580 @@ matrix-free path converge in tens rather than a thousand iterations. The
 latter is the only option whose cost per evaluation and memory both scale
 linearly.
 
+## Phase 0: aggregation AMG prototype
+
+Phase 0 of `AMG_PLAN.md` / workstream WS-A of `ITERATIVE_SOLVER_PROGRAM.md`:
+a self-contained, single-threaded prototype of the matrix-free multilevel
+solve, used to fix the algorithm choices before any production code. The
+code is `examples/amg_prototype.rs`; it changes nothing under `src/`.
+
+```sh
+export RUSTUP_TOOLCHAIN=1.89.0
+# Correctness: coarse operator = PᵀAP on a random 200-node graph, V-cycle
+# preconditioner symmetric to 1e-10 and positive definite, solve matches faer.
+cargo run -p theseus --release --example amg_prototype -- --self-test
+# One sweep (plain aggregation), all sizes of one fixture:
+for s in 64 128 224 448 708; do
+  RAYON_NUM_THREADS=1 cargo run -p theseus --release --example amg_prototype -- \
+    --fixture grid --size $s --cycle v,k --degree 1,2,3 --passes 1,2 --warm 2 --reps 3
+done
+# Smoothed aggregation, the recommended configuration:
+RAYON_NUM_THREADS=1 cargo run -p theseus --release --example amg_prototype -- \
+  --fixture irregular --size 708 --cycle v --degree 2 --passes 3 --alpha 10 --smoothed 1
+```
+
+What the prototype contains (all in the example):
+
+* the free-node weighted graph Laplacian `A(q) x = anchor ⊙ x + Σ_e q_e
+  (x_u − x_v)` in node-gather form (CSR incidence, each node sums its
+  incident edges), on three right-hand sides at once;
+* pairwise heavy-edge aggregation: strength `w_uv / sqrt(d_u d_v)`, nodes
+  visited by decreasing degree (then index) and matched with their strongest
+  unmatched neighbour, leftovers joining their strongest neighbour's pair
+  (at most three members) or staying single; 1–3 matching passes per level
+  (aggregates of ~2/4/8 nodes); coarsening stops below `coarsest` nodes or
+  when a level keeps more than 70% of the nodes of the previous one; coarse
+  operator = quotient graph (`w_c = Σ q`, `anchor_U = Σ anchor_u`), so every
+  level reuses the edge kernel and a `q` change is an `O(nnz)` weight pass
+  per level;
+* Chebyshev smoother of degree 1–3 with Jacobi scaling on `[λ_max/α, λ_max]`,
+  `λ_max` from 10 power iterations on `D⁻¹A` per level at setup, with a 10%
+  margin, kept across the small `q` updates measured here;
+* V-cycle, and Notay's K-cycle (at each coarse level up to two flexible-CG
+  steps preconditioned by the next-coarser cycle, the second skipped when
+  the first already reduced the residual by 4×);
+* coarsest level solved with faer's sparse Cholesky through
+  `theseus::types::Factorization` (≤ 2,000 nodes, well under 1 ms per solve);
+* PCG (V-cycle) and flexible CG FCG(1) (K-cycle) on the block of three
+  right-hand sides, per-column convergence to relative residual `1e-8`;
+* the fallback of `AMG_PLAN.md`: smoothed aggregation, `P = (I − ω D⁻¹A) P₀`
+  with `ω = 4/(3 λ_max)` and `A_c = Pᵀ A P`, whose coarse operators are
+  general sparse matrices and whose `q` update is a sparse triple product
+  per level rather than a weight pass.
+
+Fixtures, each with a smooth non-constant force-density field
+`q = exp(ln(ratio) · (½ + ½ sin 2πx cos 2πy))` (ratio 10 unless stated) and
+unit downward loads:
+
+* **grid**: the `n × n` cable net of `tests/support/grid.rs` (four corner
+  supports, degree 4);
+* **irregular**: an `m × m` lattice jittered by up to 0.4 of the spacing,
+  every point joined to its 5–7 nearest neighbours, edge set symmetrised,
+  boundary ring fixed (degree 5–9);
+* **dome**: a spoke wheel / cable dome — hub, concentric rings whose node
+  count doubles when the circumferential spacing exceeds 1.5× the radial
+  one, radial spokes and diagonal bracing, outer ring fixed (hub degree
+  12, degree 8 on doubling rings, 6 elsewhere).
+
+Sizes are matched by edge count to the grids 64, 128, 224, 448 and 708
+(8k, 33k, 100k, 400k and 1M edges). The direct reference is the library
+path (`FdmCache::new` + `Factorization::update` + `solve_slices` on the same
+three right-hand sides): one numeric refactorization plus one 3-rhs solve,
+i.e. the per-`q` cost the optimizer pays today before the adjoint solve.
+
+Method: single thread (`RAYON_NUM_THREADS=1`, and the prototype has no
+parallelism), release build, Rust 1.89, faer-sparse 0.17.1. Iteration counts
+are deterministic. Times are medians of 3 solves. "Cold" starts from `x = 0`;
+"warm" perturbs every `q_e` by a uniform random ±2%, updates the hierarchy
+(level weights and anchors and the coarsest factor; for smoothed aggregation
+`P` and the coarse operators are rebuilt on the fixed aggregation) and
+restarts from the cold solution against the new right-hand side; the update
+is timed separately ("q-update"). The iterative solutions agree with
+faer's to `5e-8` relative (max-norm) at the `1e-8` residual tolerance. The
+4-vCPU VM was shared with other builds while the sweeps ran (load 2–6
+during the first pass, 1–2 during the re-runs), which inflates the
+memory-bound solves at 448 and 708 by up to 2×; every time reported is the
+smallest median over the runs of that configuration, and the dedicated
+1M-edge table was taken at load ≈ 1, where the grid-708 direct reference
+reproduces the 757 ms of the section above. Iteration counts are unaffected
+by load.
+
+### Fixtures and direct reference
+
+| fixture | grid-equivalent | edges | free nodes | direct refactor + 3-rhs solve (ms) |
+|---|---:|---:|---:|---:|
+| grid 64 | 64 | 8,064 | 4,092 | 1.4 |
+| grid 128 | 128 | 32,512 | 16,380 | 12.6 |
+| grid 224 | 224 | 99,904 | 50,172 | 46.0 |
+| grid 448 | 448 | 400,512 | 200,700 | 226 |
+| grid 708 | 708 | 1,001,112 | 501,260 | 756 |
+| irregular 49 | 64 | 8,129 | 2,209 | 0.9 |
+| irregular 98 | 128 | 32,376 | 9,216 | 6.1 |
+| irregular 172 | 224 | 99,655 | 28,900 | 22.3 |
+| irregular 345 | 448 | 400,434 | 117,649 | 118 |
+| irregular 546 | 708 | 1,002,202 | 295,936 | 358 |
+| dome 29 | 64 | 8,340 | 2,593 | 1.1 |
+| dome 58 | 128 | 32,532 | 10,465 | 8.2 |
+| dome 103 | 224 | 98,196 | 31,969 | 24.2 |
+| dome 207 | 448 | 393,108 | 129,505 | 148 |
+| dome 342 | 708 | 1,015,188 | 336,865 | 458 |
+
+### Hierarchies
+
+Levels, size of the coarse hierarchy relative to the fine edge count (at
+708), and fine-operator-equivalent applications per outer iteration (all
+levels' work converted to level-0 edge visits; the K-cycle's recursion
+doubles it per level unless the early exit cuts it short). One matching
+pass halves the node count per level and needs 8–9 levels at 500k nodes;
+two passes quarter it (5 levels); three passes with smoothing divide by ~8
+(4 levels).
+
+| fixture | config | levels 64 → 708 | coarse edges / fine edges | A-applications per iteration 64 → 708 |
+|---|---|---|---:|---|
+| grid | plain V d1 p1 | 3 → 4 → 6 → 8 → 9 | 1.34 | 4.4 → 5.0 → 5.5 → 5.7 → 5.7 |
+| grid | plain V d2 p2 | 2 → 3 → 4 → 5 → 5 | 0.45 | 5.1 → 6.4 → 6.7 → 6.8 → 6.8 |
+| grid | plain K d2 p1 | 3 → 4 → 6 → 8 → 9 | 1.34 | 11.6 → 18.3 → 31.9 → 45.8 → 52.9 |
+| grid | plain K d2 p2 | 2 → 3 → 4 → 5 → 5 | 0.45 | 5.1 → 8.3 → 10.1 → 10.9 → 11.0 |
+| grid | smoothed V d2 p3 α10 | 2 → 2 → 3 → 4 → 4 | 0.45 | 5.1 → 5.1 → 6.5 → 6.8 → 6.8 |
+| grid | smoothed K d2 p3 α10 | 2 → 2 → 3 → 4 → 4 | 0.45 | 5.1 → 5.1 → 7.4 → 9.2 → 8.9 |
+| irregular | plain V d1 p1 | 2 → 4 → 5 → 7 → 8 | 0.85 | 3.1 → 4.5 → 4.6 → 4.7 → 4.7 |
+| irregular | plain V d2 p2 | 2 → 3 → 3 → 4 → 5 | 0.25 | 5.1 → 5.9 → 5.9 → 6.0 → 6.1 |
+| irregular | plain K d2 p1 | 2 → 4 → 5 → 7 → 8 | 0.85 | 5.1 → 12.0 → 15.3 → 21.2 → 23.1 |
+| irregular | plain K d2 p2 | 2 → 3 → 3 → 4 → 5 | 0.25 | 5.1 → 7.1 → 7.1 → 8.0 → 8.3 |
+| irregular | smoothed V d2 p3 α10 | 2 → 2 → 3 → 3 → 4 | 0.27 | 5.2 → 5.2 → 6.1 → 6.1 → 6.2 |
+| irregular | smoothed K d2 p3 α10 | 2 → 2 → 3 → 3 → 4 | 0.27 | 5.2 → 5.2 → 6.4 → 6.4 → 6.6 |
+| dome | plain V d1 p1 | 2 → 4 → 5 → 7 → 9 | 0.97 | 3.1 → 4.5 → 4.7 → 4.9 → 5.0 |
+| dome | plain V d2 p2 | 2 → 3 → 3 → 4 → 5 | 0.32 | 5.1 → 6.0 → 6.0 → 6.2 → 6.3 |
+| dome | plain K d2 p1 | 2 → 4 → 5 → 7 → 9 | 0.97 | 5.1 → 14.7 → 19.4 → 28.6 → 37.3 |
+| dome | plain K d2 p2 | 2 → 3 → 3 → 4 → 5 | 0.32 | 5.1 → 7.4 → 7.5 → 8.7 → 9.3 |
+| dome | smoothed V d2 p3 α10 | 2 → 2 → 3 → 3 → 4 | 0.34 | 5.2 → 5.2 → 6.2 → 6.2 → 6.5 |
+| dome | smoothed K d2 p3 α10 | 2 → 2 → 3 → 3 → 4 | 0.34 | 5.2 → 5.2 → 6.6 → 6.6 → 7.2 |
+
+### Iterations and wall time per configuration
+
+`V`/`K` cycle, `d` Chebyshev degree, `p` matching passes per level, α = 30
+unless shown, coarsest ≤ 2,000 nodes. Each cell is iterations to `1e-8`
+for the x and z columns · solve time in ms (min over runs of the median of
+3 solves). Setup is not included; it is 0.13–0.21 s (plain) and 0.46–0.64
+s (smoothed) at 1M edges and paid once per topology.
+
+**grid, cold start** — iterations (x column / z column) · solve ms
+
+| method | config | 64 | 128 | 224 | 448 | 708 |
+|---|---|---:|---:|---:|---:|---:|
+| plain | V d1 p1 | 27/34 · 6.9 | 32/41 · 39.6 | 42/56 · 196 | 60/84 · 1,204 | 72/105 · 4,760 |
+| plain | V d2 p1 | 20/24 · 8.3 | 24/31 · 46.0 | 34/45 · 246 | 51/69 · 1,554 | 62/88 · 5,702 |
+| plain | V d3 p1 | 15/19 · 7.8 | 20/26 · 52.9 | 29/38 · 299 | 44/59 · 1,814 | 54/78 · 6,805 |
+| plain | K d1 p1 | 26/32 · 10.8 | 28/37 · 79.7 | 29/39 · 594 | 30/42 · 2,576 | 30/43 · 8,957 |
+| plain | K d2 p1 | 18/22 · 10.3 | 19/25 · 78.7 | 20/26 · 601 | 20/28 · 2,552 | 20/29 · 9,100 |
+| plain | K d3 p1 | 13/16 · 10.2 | 14/18 · 72.9 | 15/20 · 429 | 15/21 · 2,559 | 15/22 · 8,555 |
+| plain | V d1 p2 | 27/35 · 6.2 | 36/48 · 33.4 | 51/67 · 161 | 75/103 · 1,045 | 77/112 · 3,274 |
+| plain | V d2 p2 | 23/29 · 6.6 | 33/41 · 43.1 | 45/58 · 210 | 65/88 · 1,348 | 68/100 · 4,304 |
+| plain | V d3 p2 | 17/21 · 6.1 | 26/32 · 44.9 | 37/47 · 235 | 54/75 · 1,537 | 60/87 · 4,530 |
+| plain | K d1 p2 | 27/35 · 5.9 | 31/41 · 40.9 | 33/45 · 162 | 35/49 · 808 | 35/50 · 2,668 |
+| plain | K d2 p2 | 23/29 · 6.7 | 30/40 · 55.9 | 33/45 · 238 | 35/50 · 1,232 | 36/51 · 3,788 |
+| plain | K d3 p2 | 17/21 · 6.4 | 20/26 · 47.8 | 21/29 · 201 | 23/33 · 1,045 | 23/33 · 2,806 |
+| smoothed | V d2 p3 α10 | 12/15 · 4.4 | 13/16 · 17.5 | 14/19 · 74.0 | 16/22 · 353 | 15/22 · 920 |
+| smoothed | V d3 p3 α10 | 10/12 · 3.6 | 11/14 · 19.7 | 12/16 · 80.6 | 13/18 · 381 | 13/18 · 982 |
+| smoothed | K d2 p3 α10 | 12/15 · 3.7 | 13/16 · 19.3 | 14/19 · 84.4 | 15/21 · 440 | 15/21 · 1,144 |
+| smoothed | K d3 p3 α10 | 10/12 · 3.7 | 11/14 · 22.9 | 12/16 · 86.7 | 12/17 · 393 | 12/17 · 1,009 |
+| smoothed | V d2 p3 α30 | 16/20 · 4.6 | 17/22 · 25.0 | 19/25 · 97.0 | 21/29 · 475 | 21/29 · 1,302 |
+| smoothed | V d3 p3 α30 | 12/14 · 5.6 | 12/16 · 22.7 | 14/18 · 89.3 | 15/20 · 429 | 15/21 · 1,192 |
+| smoothed | K d2 p3 α30 | 16/20 · 4.8 | 17/22 · 25.5 | 19/26 · 125 | 21/29 · 639 | 21/29 · 1,754 |
+| smoothed | K d3 p3 α30 | 12/14 · 4.7 | 12/16 · 23.2 | 13/18 · 104 | 14/18 · 490 | 14/19 · 1,468 |
+
+**grid, warm start after a 2% `q` step** — iterations (x / z) · solve ms
+
+| method | config | 64 | 128 | 224 | 448 | 708 |
+|---|---|---:|---:|---:|---:|---:|
+| plain | V d1 p1 | 19/26 · 5.3 | 21/32 · 32.1 | 27/41 · 141 | 40/65 · 928 | 41/77 · 3,282 |
+| plain | V d2 p1 | 14/19 · 5.9 | 17/24 · 37.8 | 22/35 · 231 | 34/54 · 1,216 | 36/67 · 4,337 |
+| plain | V d3 p1 | 11/15 · 6.2 | 14/20 · 41.4 | 19/29 · 300 | 29/47 · 1,437 | 31/60 · 5,347 |
+| plain | K d1 p1 | 18/25 · 8.2 | 19/28 · 60.1 | 19/30 · 504 | 20/32 · 1,939 | 19/33 · 7,540 |
+| plain | K d2 p1 | 13/18 · 9.2 | 13/19 · 61.0 | 13/20 · 314 | 13/21 · 1,915 | 13/22 · 6,727 |
+| plain | K d3 p1 | 9/12 · 7.3 | 10/14 · 54.3 | 9/14 · 282 | 10/17 · 2,025 | 10/17 · 7,084 |
+| plain | V d1 p2 | 19/27 · 4.7 | 25/37 · 26.8 | 32/50 · 121 | 49/80 · 814 | 45/83 · 2,386 |
+| plain | V d2 p2 | 16/23 · 5.3 | 22/32 · 33.6 | 29/44 · 162 | 42/69 · 1,060 | 39/74 · 3,166 |
+| plain | V d3 p2 | 12/16 · 5.0 | 17/26 · 39.0 | 23/36 · 176 | 36/59 · 1,238 | 34/66 · 3,626 |
+| plain | K d1 p2 | 19/27 · 4.6 | 21/31 · 29.1 | 22/34 · 121 | 23/37 · 611 | 22/37 · 1,753 |
+| plain | K d2 p2 | 16/23 · 5.5 | 20/30 · 42.0 | 21/32 · 171 | 23/38 · 918 | 21/38 · 2,463 |
+| plain | K d3 p2 | 12/16 · 5.2 | 13/20 · 36.1 | 13/21 · 146 | 15/25 · 791 | 14/25 · 2,206 |
+| smoothed | V d2 p3 α10 | 8/11 · 2.6 | 9/13 · 14.5 | 9/14 · 54.5 | 10/17 · 276 | 10/17 · 743 |
+| smoothed | V d3 p3 α10 | 7/10 · 3.3 | 7/11 · 15.1 | 8/12 · 61.5 | 9/14 · 310 | 8/14 · 774 |
+| smoothed | K d2 p3 α10 | 8/11 · 2.9 | 9/13 · 14.9 | 9/14 · 59.8 | 10/16 · 328 | 9/16 · 856 |
+| smoothed | K d3 p3 α10 | 7/10 · 3.1 | 7/11 · 16.9 | 7/12 · 64.6 | 8/13 · 305 | 7/13 · 774 |
+| smoothed | V d2 p3 α30 | 11/16 · 3.8 | 12/17 · 19.1 | 13/19 · 74.0 | 14/23 · 382 | 13/23 · 1,036 |
+| smoothed | V d3 p3 α30 | 8/11 · 3.5 | 9/12 · 16.7 | 9/14 · 69.4 | 10/16 · 353 | 10/16 · 913 |
+| smoothed | K d2 p3 α30 | 11/16 · 4.4 | 12/17 · 19.6 | 13/20 · 96.1 | 13/22 · 491 | 13/22 · 1,343 |
+| smoothed | K d3 p3 α30 | 8/11 · 3.6 | 9/12 · 17.6 | 9/14 · 80.0 | 9/15 · 418 | 9/15 · 1,131 |
+
+**irregular, cold start** — iterations (x column / z column) · solve ms
+
+| method | config | 64 | 128 | 224 | 448 | 708 |
+|---|---|---:|---:|---:|---:|---:|
+| plain | V d1 p1 | 15/18 · 2.4 | 18/22 · 17.3 | 22/27 · 75.2 | 32/41 · 527 | 39/51 · 1,792 |
+| plain | V d2 p1 | 12/14 · 2.7 | 16/19 · 24.4 | 20/24 · 108 | 30/36 · 758 | 36/46 · 2,590 |
+| plain | V d3 p1 | 11/12 · 2.9 | 15/17 · 30.1 | 19/23 · 143 | 28/34 · 988 | 34/43 · 3,274 |
+| plain | K d1 p1 | 15/18 · 2.5 | 16/21 · 32.5 | 18/24 · 158 | 17/23 · 896 | 17/24 · 2,780 |
+| plain | K d2 p1 | 12/14 · 2.8 | 13/15 · 30.4 | 13/16 · 138 | 13/16 · 837 | 13/17 · 2,597 |
+| plain | K d3 p1 | 11/12 · 3.0 | 11/13 · 40.2 | 11/14 · 186 | 11/14 · 1,117 | 11/15 · 3,587 |
+| plain | V d1 p2 | 18/21 · 2.2 | 23/28 · 16.3 | 24/30 · 61.5 | 34/44 · 421 | 49/65 · 1,597 |
+| plain | V d2 p2 | 15/17 · 2.8 | 21/24 · 22.6 | 22/26 · 84.3 | 32/39 · 586 | 45/58 · 2,311 |
+| plain | V d3 p2 | 13/14 · 3.0 | 18/21 · 26.4 | 20/24 · 106 | 30/36 · 734 | 42/54 · 2,782 |
+| plain | K d1 p2 | 18/21 · 2.4 | 20/24 · 17.8 | 21/27 · 71.7 | 20/28 · 371 | 22/30 · 1,073 |
+| plain | K d2 p2 | 15/17 · 2.8 | 17/19 · 21.6 | 17/20 · 80.6 | 17/21 · 445 | 17/22 · 1,195 |
+| plain | K d3 p2 | 13/14 · 3.2 | 15/17 · 25.5 | 15/18 · 96.7 | 15/19 · 526 | 15/19 · 1,368 |
+| smoothed | V d2 p3 α10 | 9/10 · 1.9 | 10/11 · 10.8 | 10/12 · 43.2 | 10/12 · 199 | 10/13 · 556 |
+| smoothed | V d3 p3 α10 | 8/9 · 2.1 | 8/10 · 12.5 | 8/10 · 46.9 | 9/11 · 234 | 9/11 · 606 |
+| smoothed | K d2 p3 α10 | 9/10 · 1.8 | 10/11 · 11.0 | 9/12 · 45.6 | 10/12 · 207 | 10/13 · 634 |
+| smoothed | K d3 p3 α10 | 8/9 · 2.2 | 8/10 · 12.7 | 8/10 · 49.0 | 9/10 · 226 | 8/10 · 598 |
+| smoothed | V d2 p3 α30 | 13/15 · 2.7 | 13/16 · 15.6 | 14/16 · 57.6 | 14/17 · 278 | 14/18 · 766 |
+| smoothed | V d3 p3 α30 | 9/10 · 2.4 | 10/11 · 13.8 | 10/12 · 56.1 | 10/13 · 278 | 10/13 · 710 |
+| smoothed | K d2 p3 α30 | 13/15 · 2.8 | 13/16 · 15.9 | 14/17 · 70.0 | 14/17 · 338 | 14/18 · 906 |
+| smoothed | K d3 p3 α30 | 9/10 · 2.5 | 10/11 · 14.1 | 10/12 · 58.1 | 10/12 · 279 | 10/13 · 744 |
+
+**irregular, warm start after a 2% `q` step** — iterations (x / z) · solve ms
+
+| method | config | 64 | 128 | 224 | 448 | 708 |
+|---|---|---:|---:|---:|---:|---:|
+| plain | V d1 p1 | 10/14 · 2.0 | 11/16 · 12.7 | 13/20 · 55.7 | 16/29 · 375 | 17/36 · 1,222 |
+| plain | V d2 p1 | 7/10 · 2.0 | 9/14 · 18.1 | 10/18 · 81.9 | 13/27 · 570 | 15/33 · 1,824 |
+| plain | V d3 p1 | 6/9 · 2.3 | 8/13 · 23.1 | 9/16 · 100 | 12/25 · 726 | 13/31 · 2,368 |
+| plain | K d1 p1 | 10/14 · 2.1 | 10/15 · 23.3 | 11/18 · 118 | 10/17 · 660 | 11/19 · 2,259 |
+| plain | K d2 p1 | 7/10 · 2.0 | 8/12 · 24.4 | 8/12 · 101 | 7/13 · 646 | 7/13 · 1,901 |
+| plain | K d3 p1 | 6/9 · 2.3 | 7/10 · 28.9 | 7/11 · 134 | 7/11 · 799 | 6/11 · 2,366 |
+| plain | V d1 p2 | 11/16 · 1.8 | 13/21 · 12.4 | 14/22 · 45.9 | 17/32 · 305 | 22/45 · 1,114 |
+| plain | V d2 p2 | 9/13 · 2.2 | 11/18 · 16.9 | 11/19 · 62.2 | 15/29 · 436 | 18/41 · 1,620 |
+| plain | V d3 p2 | 8/11 · 2.5 | 10/16 · 20.5 | 10/18 · 79.7 | 13/26 · 538 | 16/38 · 1,974 |
+| plain | K d1 p2 | 11/16 · 1.9 | 12/18 · 13.4 | 13/20 · 53.4 | 12/21 · 287 | 12/23 · 810 |
+| plain | K d2 p2 | 9/13 · 2.2 | 9/15 · 17.0 | 9/15 · 60.1 | 9/16 · 335 | 9/16 · 858 |
+| plain | K d3 p2 | 8/11 · 2.5 | 8/13 · 19.7 | 8/13 · 69.4 | 8/14 · 377 | 8/15 · 1,056 |
+| smoothed | V d2 p3 α10 | 5/8 · 1.5 | 6/8 · 8.0 | 6/9 · 32.8 | 5/9 · 150 | 5/10 · 434 |
+| smoothed | V d3 p3 α10 | 5/6 · 1.5 | 5/7 · 9.0 | 5/7 · 33.5 | 5/8 · 174 | 5/8 · 454 |
+| smoothed | K d2 p3 α10 | 5/8 · 1.6 | 6/8 · 8.2 | 5/9 · 34.2 | 5/9 · 161 | 5/10 · 467 |
+| smoothed | K d3 p3 α10 | 5/6 · 1.5 | 5/7 · 9.1 | 5/7 · 34.5 | 4/8 · 185 | 4/8 · 484 |
+| smoothed | V d2 p3 α30 | 8/12 · 2.2 | 8/12 · 11.8 | 8/13 · 46.5 | 8/13 · 217 | 8/14 · 602 |
+| smoothed | V d3 p3 α30 | 6/8 · 1.9 | 6/9 · 11.3 | 6/9 · 42.6 | 6/10 · 222 | 6/10 · 567 |
+| smoothed | K d2 p3 α30 | 8/12 · 2.3 | 8/12 · 11.8 | 8/13 · 52.3 | 8/13 · 240 | 8/15 · 685 |
+| smoothed | K d3 p3 α30 | 6/8 · 1.9 | 6/9 · 11.8 | 6/9 · 43.4 | 6/10 · 236 | 6/10 · 586 |
+
+**dome, cold start** — iterations (x column / z column) · solve ms
+
+| method | config | 64 | 128 | 224 | 448 | 708 |
+|---|---|---:|---:|---:|---:|---:|
+| plain | V d1 p1 | 16/19 · 2.6 | 21/26 · 16.9 | 27/33 · 78.3 | 38/50 · 531 | 53/72 · 2,020 |
+| plain | V d2 p1 | 13/14 · 2.7 | 17/20 · 20.6 | 22/26 · 93.8 | 31/41 · 687 | 46/59 · 2,582 |
+| plain | V d3 p1 | 12/13 · 3.1 | 16/19 · 26.6 | 21/25 · 124 | 30/37 · 847 | 42/54 · 3,286 |
+| plain | K d1 p1 | 16/19 · 2.7 | 17/21 · 28.9 | 18/23 · 135 | 18/24 · 920 | 18/25 · 3,366 |
+| plain | K d2 p1 | 13/14 · 2.7 | 14/16 · 32.3 | 14/16 · 139 | 14/17 · 988 | 14/17 · 3,565 |
+| plain | K d3 p1 | 12/13 · 3.1 | 13/15 · 40.4 | 13/16 · 187 | 14/17 · 1,318 | 14/18 · 5,003 |
+| plain | V d1 p2 | 18/21 · 2.2 | 26/32 · 15.4 | 29/37 · 62.4 | 43/56 · 429 | 58/83 · 1,686 |
+| plain | V d2 p2 | 16/17 · 2.7 | 21/24 · 17.7 | 24/30 · 78.0 | 36/45 · 530 | 50/66 · 2,132 |
+| plain | V d3 p2 | 13/15 · 3.2 | 20/22 · 22.1 | 23/27 · 93.7 | 33/41 · 646 | 47/59 · 2,487 |
+| plain | K d1 p2 | 18/21 · 2.4 | 22/27 · 17.2 | 23/30 · 67.7 | 24/32 · 365 | 25/35 · 1,233 |
+| plain | K d2 p2 | 16/17 · 2.9 | 17/20 · 19.1 | 18/22 · 74.4 | 19/24 · 400 | 20/25 · 1,265 |
+| plain | K d3 p2 | 13/15 · 3.2 | 16/19 · 24.2 | 17/20 · 88.7 | 18/22 · 484 | 18/24 · 1,534 |
+| smoothed | V d2 p3 α10 | 9/11 · 1.9 | 9/11 · 8.9 | 11/13 · 38.4 | 11/14 · 174 | 11/14 · 463 |
+| smoothed | V d3 p3 α10 | 8/9 · 2.0 | 8/10 · 10.2 | 10/12 · 46.7 | 10/12 · 193 | 10/13 · 559 |
+| smoothed | K d2 p3 α10 | 9/11 · 2.0 | 9/11 · 9.2 | 11/13 · 42.3 | 11/13 · 182 | 11/14 · 517 |
+| smoothed | K d3 p3 α10 | 8/9 · 2.1 | 8/10 · 10.3 | 9/11 · 45.4 | 10/12 · 209 | 10/12 · 573 |
+| smoothed | V d2 p3 α30 | 13/15 · 2.5 | 14/16 · 12.6 | 14/17 · 50.3 | 15/19 · 236 | 18/22 · 723 |
+| smoothed | V d3 p3 α30 | 10/11 · 2.5 | 10/12 · 12.1 | 14/16 · 61.5 | 18/21 · 336 | 25/30 · 1,290 |
+| smoothed | K d2 p3 α30 | 13/15 · 2.7 | 14/16 · 13.2 | 14/17 · 62.8 | 14/18 · 281 | 15/19 · 842 |
+| smoothed | K d3 p3 α30 | 10/11 · 2.5 | 10/12 · 12.3 | 12/14 · 65.6 | 12/15 · 298 | 14/20 · 1,116 |
+
+**dome, warm start after a 2% `q` step** — iterations (x / z) · solve ms
+
+| method | config | 64 | 128 | 224 | 448 | 708 |
+|---|---|---:|---:|---:|---:|---:|
+| plain | V d1 p1 | 10/14 · 1.9 | 13/19 · 12.4 | 15/24 · 55.9 | 19/35 · 371 | 25/50 · 1,397 |
+| plain | V d2 p1 | 8/11 · 2.1 | 10/15 · 15.5 | 12/19 · 68.8 | 16/29 · 480 | 20/42 · 1,864 |
+| plain | V d3 p1 | 7/10 · 2.4 | 9/14 · 20.0 | 10/18 · 90.2 | 15/27 · 611 | 18/38 · 2,359 |
+| plain | K d1 p1 | 10/14 · 2.0 | 11/16 · 22.0 | 11/17 · 100 | 10/18 · 699 | 10/18 · 2,535 |
+| plain | K d2 p1 | 8/11 · 2.1 | 8/12 · 21.4 | 8/13 · 97.7 | 8/13 · 666 | 8/14 · 2,524 |
+| plain | K d3 p1 | 7/10 · 2.5 | 8/12 · 30.0 | 8/12 · 129 | 8/13 · 908 | 8/13 · 3,231 |
+| plain | V d1 p2 | 12/16 · 1.7 | 16/24 · 11.5 | 17/27 · 45.5 | 21/40 · 307 | 27/56 · 1,166 |
+| plain | V d2 p2 | 10/13 · 2.1 | 12/18 · 13.5 | 13/22 · 57.9 | 16/32 · 382 | 23/46 · 1,501 |
+| plain | V d3 p2 | 9/11 · 2.3 | 11/17 · 17.2 | 11/19 · 65.7 | 15/29 · 460 | 20/42 · 1,785 |
+| plain | K d1 p2 | 12/16 · 1.8 | 13/20 · 12.8 | 13/22 · 50.9 | 13/23 · 264 | 14/25 · 889 |
+| plain | K d2 p2 | 10/13 · 2.2 | 10/15 · 14.2 | 10/16 · 53.2 | 10/18 · 305 | 10/19 · 942 |
+| plain | K d3 p2 | 9/11 · 2.4 | 9/14 · 17.6 | 9/15 · 64.7 | 9/16 · 346 | 9/17 · 1,060 |
+| smoothed | V d2 p3 α10 | 6/8 · 1.4 | 6/8 · 6.6 | 6/10 · 29.6 | 6/10 · 131 | 6/10 · 342 |
+| smoothed | V d3 p3 α10 | 5/7 · 1.6 | 5/7 · 7.3 | 5/9 · 35.2 | 5/9 · 152 | 5/9 · 400 |
+| smoothed | K d2 p3 α10 | 6/8 · 1.5 | 6/8 · 6.6 | 6/9 · 29.4 | 6/10 · 142 | 6/10 · 368 |
+| smoothed | K d3 p3 α10 | 5/7 · 1.6 | 5/7 · 7.4 | 5/8 · 32.6 | 5/9 · 159 | 5/9 · 422 |
+| smoothed | V d2 p3 α30 | 9/12 · 2.1 | 9/12 · 9.5 | 8/13 · 39.0 | 9/14 · 176 | 11/18 · 611 |
+| smoothed | V d3 p3 α30 | 7/9 · 2.1 | 6/9 · 9.2 | 8/12 · 46.2 | 12/17 · 276 | 17/24 · 1,057 |
+| smoothed | K d2 p3 α30 | 9/12 · 2.2 | 9/12 · 10.2 | 8/13 · 47.8 | 8/14 · 221 | 8/15 · 672 |
+| smoothed | K d3 p3 α30 | 7/9 · 2.1 | 6/9 · 9.5 | 7/10 · 47.1 | 6/11 · 222 | 7/15 · 840 |
+
+### 1M edges: the candidates against the direct solver
+
+Setup, per-`q` hierarchy update and solve times in ms. The direct column is
+the refactor + one 3-rhs solve on the same system; "/ direct" is the solve
+time alone over that.
+
+| fixture | direct | config | setup | q-update | cold it x/y/z | cold ms | cold / direct | warm it x/y/z | warm ms | warm / direct |
+|---|---:|---|---:|---:|---|---:|---:|---|---:|---:|
+| grid 708 | 756 | plain V d3 p2 | 163 | 7.6 | 60/62/87 | 4,530 | 6.00× | 34/37/66 | 3,626 | 4.80× |
+| grid 708 | 756 | plain K d1 p2 | 164 | 8.0 | 35/34/50 | 2,668 | 3.53× | 22/22/37 | 1,753 | 2.32× |
+| grid 708 | 756 | plain K d3 p2 | 161 | 7.8 | 23/23/33 | 2,806 | 3.71× | 14/14/25 | 2,206 | 2.92× |
+| grid 708 | 756 | smoothed V d1 p3 α10 | 640 | 395 | 20/20/29 | 1,049 | 1.39× | 14/14/23 | 814 | 1.08× |
+| grid 708 | 756 | smoothed V d2 p3 α10 | 548 | 367 | 15/15/22 | 920 | 1.22× | 10/10/17 | 743 | 0.98× |
+| grid 708 | 756 | smoothed V d3 p3 α10 | 543 | 367 | 13/13/18 | 982 | 1.30× | 8/8/14 | 774 | 1.03× |
+| grid 708 | 756 | smoothed K d3 p3 α10 | 543 | 368 | 12/12/17 | 1,009 | 1.34× | 7/7/13 | 774 | 1.03× |
+| irregular 546 | 358 | plain V d3 p2 | 186 | 10.0 | 42/42/54 | 2,782 | 7.78× | 16/15/38 | 1,974 | 5.52× |
+| irregular 546 | 358 | plain K d1 p2 | 187 | 9.7 | 22/21/30 | 1,073 | 3.00× | 12/12/23 | 810 | 2.27× |
+| irregular 546 | 358 | plain K d3 p2 | 185 | 9.9 | 15/15/19 | 1,368 | 3.82× | 8/7/15 | 1,056 | 2.95× |
+| irregular 546 | 358 | smoothed V d1 p3 α10 | 538 | 367 | 14/14/20 | 596 | 1.67× | 8/8/15 | 470 | 1.32× |
+| irregular 546 | 358 | smoothed V d2 p3 α10 | 534 | 322 | 10/10/13 | 556 | 1.55× | 5/5/10 | 434 | 1.21× |
+| irregular 546 | 358 | smoothed V d3 p3 α10 | 521 | 335 | 9/9/11 | 606 | 1.69× | 5/4/8 | 454 | 1.27× |
+| irregular 546 | 358 | smoothed K d3 p3 α10 | 532 | 358 | 8/8/10 | 598 | 1.67× | 4/4/8 | 484 | 1.35× |
+| dome 342 | 458 | plain V d3 p2 | 134 | 7.1 | 47/45/59 | 2,487 | 5.44× | 20/19/42 | 1,785 | 3.90× |
+| dome 342 | 458 | plain K d1 p2 | 138 | 7.3 | 25/25/35 | 1,233 | 2.70× | 14/13/25 | 889 | 1.94× |
+| dome 342 | 458 | plain K d3 p2 | 131 | 7.1 | 18/18/24 | 1,534 | 3.35× | 9/9/17 | 1,060 | 2.32× |
+| dome 342 | 458 | smoothed V d1 p3 α10 | 536 | 382 | 15/15/20 | 506 | 1.11× | 8/8/15 | 392 | 0.86× |
+| dome 342 | 458 | smoothed V d2 p3 α10 | 471 | 323 | 11/11/14 | 463 | 1.01× | 6/6/10 | 342 | 0.75× |
+| dome 342 | 458 | smoothed V d3 p3 α10 | 462 | 321 | 10/10/13 | 559 | 1.22× | 5/5/9 | 400 | 0.87× |
+| dome 342 | 458 | smoothed K d3 p3 α10 | 461 | 323 | 10/10/12 | 573 | 1.25× | 5/5/9 | 422 | 0.92× |
+
+### α sweep, smoothed aggregation, grid
+
+Cold iterations x/z · ms (warm iterations in parentheses).
+
+| grid | config | α = 5 | α = 10 | α = 30 | α = 100 |
+|---:|---|---:|---:|---:|---:|
+| 224 | smoothed V d2 p3 | 13/18 · 70.1 (warm 9/13) | 14/19 · 74.0 (warm 9/14) | 19/25 · 97.0 (warm 13/19) | 30/40 · 152 (warm 21/31) |
+| 224 | smoothed V d3 p3 | 12/17 · 86.2 (warm 8/12) | 12/16 · 80.6 (warm 8/12) | 14/18 · 89.3 (warm 9/14) | 20/26 · 131 (warm 14/20) |
+| 708 | smoothed V d2 p3 | 14/21 · 948 (warm 9/16) | 15/22 · 920 (warm 10/17) | 21/29 · 1,302 (warm 13/23) | 33/45 · 1,932 (warm 21/36) |
+| 708 | smoothed V d3 p3 | 13/19 · 1,097 (warm 8/14) | 13/18 · 982 (warm 8/14) | 15/21 · 1,192 (warm 10/16) | 22/30 · 1,716 (warm 14/24) |
+
+### 100× force-density ratio
+
+Same fixtures at 224 with `q` spanning 100× instead of 10× across the
+domain (plus the grid at 708). Iteration counts are within ±1 of the 10×
+runs for every configuration (the 708 timings here were taken under load
+and are 15–25% above the table above).
+
+| fixture | config | cold it x/z · ms | warm it x/z · ms |
+|---|---|---:|---:|
+| grid 224 | plain V d2 p2 | 42/55 · 208 | 27/42 · 159 |
+| grid 224 | plain V d3 p2 | 33/45 · 230 | 21/34 · 174 |
+| grid 224 | plain K d2 p2 | 31/42 · 232 | 19/31 · 172 |
+| grid 224 | plain K d3 p2 | 20/27 · 203 | 13/20 · 148 |
+| grid 224 | smoothed V d2 p3 α10 | 13/18 · 74.1 | 9/14 · 57.8 |
+| grid 224 | smoothed V d3 p3 α10 | 12/15 · 78.4 | 7/12 · 63.8 |
+| grid 224 | smoothed K d2 p3 α10 | 13/17 · 80.1 | 9/13 · 56.9 |
+| grid 224 | smoothed K d3 p3 α10 | 11/15 · 84.1 | 7/11 · 61.4 |
+| irregular 172 | plain V d2 p2 | 22/27 · 89.7 | 11/20 · 66.4 |
+| irregular 172 | plain V d3 p2 | 20/24 · 108 | 10/18 · 81.5 |
+| irregular 172 | plain K d2 p2 | 17/21 · 86.2 | 10/16 · 65.4 |
+| irregular 172 | plain K d3 p2 | 15/18 · 98.4 | 8/14 · 76.0 |
+| irregular 172 | smoothed V d2 p3 α10 | 10/12 · 44.7 | 6/9 · 33.0 |
+| irregular 172 | smoothed V d3 p3 α10 | 9/10 · 48.4 | 5/8 · 40.1 |
+| irregular 172 | smoothed K d2 p3 α10 | 10/12 · 47.1 | 6/9 · 34.8 |
+| irregular 172 | smoothed K d3 p3 α10 | 8/10 · 53.9 | 5/7 · 38.4 |
+| dome 103 | plain V d2 p2 | 23/30 · 76.8 | 12/22 · 57.2 |
+| dome 103 | plain V d3 p2 | 22/27 · 93.8 | 11/19 · 66.9 |
+| dome 103 | plain K d2 p2 | 17/22 · 73.6 | 10/16 · 53.5 |
+| dome 103 | plain K d3 p2 | 16/20 · 87.4 | 9/15 · 64.9 |
+| dome 103 | smoothed V d2 p3 α10 | 11/13 · 38.4 | 6/10 · 29.9 |
+| dome 103 | smoothed V d3 p3 α10 | 10/12 · 46.7 | 5/8 · 31.7 |
+| dome 103 | smoothed K d2 p3 α10 | 10/13 · 41.9 | 6/9 · 29.0 |
+| dome 103 | smoothed K d3 p3 α10 | 9/11 · 45.4 | 5/8 · 32.9 |
+| grid 708 | plain K d3 p2 | 22/32 · 3,203 | 14/24 · 2,521 |
+| grid 708 | smoothed V d2 p3 α10 | 15/21 · 1,141 | 9/16 · 888 |
+| grid 708 | smoothed V d3 p3 α10 | 13/18 · 1,261 | 8/14 · 1,022 |
+
+### Over-correction of the coarse-grid correction, plain V d3 p2, grid
+
+| grid | over-correction | cold it x/z · ms | warm it x/z · ms |
+|---:|---:|---:|---:|
+| 224 | 1.0 | 37/47 · 236 | 23/36 · 181 |
+| 224 | 1.3 | 29/38 · 190 | 18/28 · 140 |
+| 224 | 1.5 | 26/34 · 170 | 17/26 · 131 |
+| 224 | 1.8 | 25/33 · 167 | 16/24 · 129 |
+| 708 | 1.0 | 60/87 · 5,052 | 34/66 · 3,725 |
+| 708 | 1.5 | 35/51 · 2,775 | 20/38 · 2,054 |
+
+### Reading the tables
+
+Iteration counts below are for the x and z columns (y behaves like x); the
+z column (the load) always needs the most iterations and is what decides the
+wall time.
+
+**Plain aggregation, V-cycle** is not size-independent on any fixture. On
+the grid the best plain V configuration (d3 p2) goes from 17/21 iterations
+at 64 to 60/87 at 708 (3.5–4×); irregular 13/14 → 42/54, dome 13/15 →
+47/59. The growth is with the number of levels (2 → 5), the signature of an
+aggregation hierarchy whose coarse operators under-represent the fine ones
+(piecewise-constant `P` on a Laplacian gives coarse operators about a
+factor ~2 too stiff per level); more smoothing (d1 → d3) or one matching
+pass (~2× coarsening, 8–9 levels) moves the counts but not the trend.
+Over-correction of the coarse-grid correction (`--over`, the textbook
+remedy for plain aggregation; the preconditioner stays symmetric) helps
+more than any smoother change — a factor 1.5 takes the grid from 37/47 to
+26/34 iterations at 224 and from 60/87 to 35/51 at 708 — but the growth
+with size remains (+35% / +50% from 224 to 708 against +62% / +85%
+without) and the 708 solve is still 2.8 s, 3.7× the direct reference.
+
+**Plain aggregation, K-cycle** does what `AMG_PLAN.md` says it does for the
+iteration counts: with two matching passes, d3, they are 17/21 → 23/33 on
+the grid (+35% / +57%), 13/14 → 15/19 on irregular (+15% / +36%), 13/15 →
+18/24 on the dome (+38% / +60%). That is inside the ±50% acceptance band
+on the x column for irregular and dome and just outside ±30% on the grid,
+and outside on the z column everywhere but irregular. The cost is the
+problem: a K-cycle on a 5-level hierarchy is 8–15 fine-operator
+applications per outer iteration (d2–d3, two passes; the `ktol` early exit
+keeps it from doubling per level), about twice the V-cycle's 6–7, and with
+one matching pass (8–9 levels) the recursion runs away (23–53 applications
+per iteration). At 1M edges the plain K-cycle with two passes needs
+2.7–2.8 s (grid), 1.1–1.4 s (irregular) and 1.2–1.5 s (dome) cold
+(degree 1 is the cheapest in wall time, degree 3 in iterations) against
+756 / 358 / 458 ms for the direct refactor + solve: 2.7–3.8× slower cold,
+1.9–3.0× slower warm.
+
+**Smoothed aggregation** removes the level dependence. `P = (I − ω D⁻¹A)
+P₀` with three matching passes (aggregates of ~8, coarsening ~8× per level,
+4 levels at 500k nodes), Chebyshev degree 2, α = 10, V-cycle inside plain
+PCG: grid 12/15 → 15/22 (64 → 708; flat from 448 to 708 at 15–16/22),
+irregular 9/10 → 10/13, dome 9/11 → 11/14; warm 8/11 → 10/17, 5/8 → 5/10,
+6/8 → 6/10. x/y columns are within ±30% on the grid and ±25% elsewhere;
+the z column is +47% on the grid (three levels added between 64 and 448,
+then flat) and +27–30% on irregular and dome. The K-cycle buys at most one
+iteration on top of smoothed aggregation at 1.3–1.5× the work per
+iteration, so PCG + V-cycle is the right pairing and flexible CG is not
+needed. Degree 3 saves 1–4 iterations but costs 40% more per iteration and
+is slower in wall time on all three fixtures at 1M; degree 1 (1M-edge
+table) needs 30–45% more iterations than degree 2 and is 7–10% slower in
+wall time. α = 5 and α = 10 give the same counts, α = 30 costs +40%
+iterations and α = 100 doubles them
+(`[λ_max/α, λ_max]` is the range the smoother damps; the aggregates of 8
+leave nothing below `λ_max/10` for the smoother to do). α also matters for
+robustness: with α = 30 the degree-3 V-cycle on the dome loses its
+size-independence (10/11 → 25/30 iterations) where α = 10 keeps it (8/9 →
+10/13). The 100× `q` ratio changes nothing (±1 iteration on every
+configuration); a 1e4 ratio was not run.
+
+Wall time at 1M edges, smoothed V d2 p3 α10: 920 ms cold / 743 ms warm on
+the grid against 756 ms direct (1.22× / 0.98×), 556 / 434 against 358 on
+irregular (1.55× / 1.21×), 463 / 342 against 458 on the dome (1.01× /
+0.75×). To that the smoothed hierarchy adds 320–375 ms per `q` change
+(rebuilding `P` and the three Galerkin products), where plain aggregation
+needs 7–10 ms. Per optimizer evaluation (one `q` update, a
+forward and an adjoint solve, both counted cold) that is ~2.2 s on the
+grid against the direct path's 0.83 s (661 ms factor + two 86 ms solves,
+table above), 1.4 s against ~0.39 s on irregular and 1.25 s against
+~0.50 s on the dome: the single-threaded prototype is 2.5–3.6× slower than
+the direct solver per evaluation at 1M edges, not at parity. Where the time
+goes at grid 708: the operator application on three right-hand sides costs
+4.2 ms (memory bound: ~24 MB of CSR adjacency plus ~24 MB of vector
+traffic per application, ~11 GB/s); a V-cycle iteration is 6.8
+operator-equivalents ≈ 29 ms of operator time and 42 ms measured, the
+remainder being the
+Chebyshev vector updates, the smoothed prolongation/restriction (several
+entries per fine row instead of one) and the PCG dot products. Setup
+(aggregation, power iterations, `P`, Galerkin products, coarsest factor)
+is 0.48–0.64 s at 1M and is paid once per topology.
+
+### Recommendation
+
+* **Plain (unsmoothed) aggregation: no-go.** V-cycle iteration counts grow
+  3.5–4× from 8k to 1M edges on every fixture; the K-cycle keeps them
+  roughly flat (+35% x / +57% z on the grid, +15–38% x on irregular and
+  dome) but at 8–15 operator applications per iteration it is 2.7–3.8×
+  slower than the direct refactor + solve at 1M edges single-threaded and
+  fails the wall-time criterion of Phase 0 by that margin. Nothing in the
+  parameter space measured (degree 1–3, 1–2 passes, α 10–100, ktol,
+  over-correction) changes this.
+* **Smoothed aggregation: fixes the growth, go for WS-C with it.**
+  Recommended parameters: `P = (I − ω D⁻¹A) P₀`, `ω = 4/(3 λ_max)`; three
+  pairwise matching passes per level (coarsening ~8×, 4 levels at 500k free
+  nodes, coarse operators 0.27–0.45× the fine edge count, 18–28 MB at 1M);
+  Chebyshev degree 2 with Jacobi scaling and α = 10; V-cycle as a fixed
+  preconditioner inside standard PCG on the block of three right-hand
+  sides with per-column convergence; coarsest level ≤ 2,000 nodes through
+  faer's sparse Cholesky. Drop the K-cycle and flexible CG.
+* Iteration flatness against the acceptance bands: grid x/y +25% (inside
+  ±30%), grid z +47% (outside, but flat from 448 to 708); irregular and
+  dome +11–30% on every column (inside ±50%). Warm starts after a 2% `q`
+  step save 33–50% of the x/y iterations but only 23–29% of the z
+  iterations that set the wall time, hence 19–26% of the solve time.
+* The `hierarchy.rs` of the program document needs the general sparse
+  level type of its risk register (CSR values, `A·x` as a sparse matvec on
+  three right-hand sides, restriction/prolongation through a sparse `P`,
+  `Pᵀ A P` per level per `q` update), not only the graph-Laplacian level.
+  Keep the plain level type as the cheap `q`-update path only if WS-C finds
+  a way to reuse it (below).
+* Wall time at 1M edges single-threaded is 1.0–1.55× the direct refactor
+  + solve for the solve alone and 2.5–3.6× per evaluation once the
+  0.32–0.38 s smoothed-hierarchy update and the second (adjoint) solve are
+  counted. The single-thread parity that `AMG_PLAN.md` expected at 1M is
+  therefore not reached; the case for the
+  iterative path at 1M rests on the parallel scaling of memory-bound
+  kernels that faer's factorization does not have (WS-B), and on the
+  linear scaling beyond 1M where the direct factor's `n^1.5` flops take
+  over.
+
+### Where the measurements disagree with the plans
+
+* `AMG_PLAN.md`: "aggregation AMG on graph Laplacians converges in 10–20
+  iterations independently of size". True only for the K-cycle or for
+  smoothed aggregation; the plain V-cycle needs 34 → 105 iterations (d1
+  p1, z column, grid 64 → 708).
+* `AMG_PLAN.md` budgets the K-cycle at "≈ 10 operator-equivalents" and an
+  FCG iteration at 17 ms with 4 threads at 1M. Measured: 11–15.4
+  operator-equivalents with two matching passes, 23–53 with one, and 85 ms
+  per iteration single-threaded (grid, d3 p2). Its Phase-0 exit criterion
+  "wall time at 708 beats the direct 757 ms single-threaded" is missed by
+  plain aggregation by 3–6× and met by smoothed aggregation only for warm
+  solves on the grid and dome, and by nothing once the hierarchy update is
+  counted.
+* `AMG_PLAN.md`: coarse weights "recomputed per evaluation in one `O(nnz)`
+  pass per level — no sparse matrix products". Holds for plain aggregation
+  (7–10 ms at 1M) and not for the variant that converges: the smoothed
+  hierarchy costs 320–380 ms per `q` change at 1M in this prototype, 40–70%
+  of a cold solve.
+* `AMG_PLAN.md`: warm start "cuts iterations by 2–3×" late in an
+  optimisation. For a 2% `q` step the x/y columns drop 1.5–2× (15 → 10 on
+  the grid, 10 → 5 on irregular, 11 → 6 on the dome) but the z column,
+  which sets the wall time, only 1.3–1.4× (22 → 17, 13 → 10, 14 → 10); a
+  10% step costs one or two iterations more than 2%. Smaller late-stage
+  steps were not measured.
+* `ITERATIVE_SOLVER_PROGRAM.md` WS-A acceptance band ±30% (grid) and ±50%
+  (irregular): the smoothed V-cycle meets the x/y column on every fixture
+  and the z column on irregular and dome; grid z is +47%. The plain
+  K-cycle meets the irregular band and misses the grid band.
+* What the plans got right: `A·x` on three right-hand sides costs
+  3.0–5.1 ms at 1M (plan: 0.4 ms per 100k edges); two matching passes give
+  5 levels at 500k nodes (plan: 7–8 at 5M); the hierarchy holds 0.25–0.45×
+  the fine edges (plan: ~1/3); 100× `q` ratios are harmless; strength-based
+  matching, the Chebyshev/Jacobi smoother and the faer coarsest solve work
+  as described; the V-cycle preconditioner is symmetric to 1e-10 and the
+  coarse operators equal `PᵀAP` (`--self-test`).
+
+### Open questions
+
+* The smoothed-hierarchy `q` update. Options to measure in WS-C: keep `P`
+  (pattern and values) from the previous `q` and redo only the numeric
+  triple product on the fixed pattern (any fixed `P` gives a valid SPD
+  Galerkin operator, and a 2% `q` step barely moves `D⁻¹A`); recompute `P`
+  only when `q` has drifted by more than a threshold; or a plain-aggregation
+  update of the coarse *graph* combined with smoothing applied on the fly
+  in prolongation/restriction (`P₀ᵀ(I − ωAD⁻¹) r`) with the coarse operator
+  taken as the quotient graph, which changes the coarse operator and would
+  have to be re-measured for convergence.
+* The z column's +47% on the grid 64 → 708 comes with the levels added
+  between 64 and 448 and is flat afterwards; whether a coarser stop
+  (`coarsest` 5,000–10,000 with a sparse Cholesky coarsest solve) or a
+  W-cycle on the two coarsest levels removes it is cheap to test in the
+  same example.
+* Parallel scaling. Every kernel here is memory bound (the operator streams
+  ~50 MB per application at 1M); 4 threads on this VM buy at most the
+  bandwidth ratio, to be measured by WS-B. The direct factorization had
+  nothing to gain from faer's parallel path (table above), so the crossover
+  per evaluation is expected between 1M and 3M edges on 4 threads, and
+  only beyond ~3M edges single-threaded (direct `n^1.5`, iterative `n`).
+* The direct reference is 2× cheaper on the irregular and dome fixtures than
+  on the grid at equal edge count (fewer free nodes, less fill), so the
+  crossover is topology dependent; a fixture with very few supports and
+  long cables (small `anchor` mass, near-singular `A`) was not measured and
+  is where aggregation AMG is known to slow down.
+* Not measured: `q` ratios of 1e4 (`--qratio`), tolerances looser than 1e-8
+  (the adaptive tolerance of `AMG_PLAN.md` would take the typical solve to
+  1e-6, roughly 60% of the iterations), and the accuracy of the gradient
+  computed from an inexact adjoint.
+
 # Basin optimizer comparison
 
 This compares the integration for [issue #12](https://github.com/adam-t-burke/Ariadne/issues/12)
