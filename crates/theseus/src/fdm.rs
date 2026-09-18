@@ -1,9 +1,7 @@
 //! Forward FDM solver: assemble A(q), build RHS, factorise, triangular solve.
 
-use crate::types::{
-    Factorization, FactorizationStrategy, FdmCache, PressureParams, Problem, SelfWeightParams,
-    TheseusError,
-};
+use crate::linear_solver::direct;
+use crate::types::{FdmCache, PressureParams, Problem, SelfWeightParams, TheseusError};
 use ndarray::Array2;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -115,7 +113,9 @@ pub fn assemble_rhs(cache: &mut FdmCache, problem: &Problem) {
 ///
 /// If the preferred strategy (Cholesky) fails because the matrix is no longer
 /// SPD (e.g. q values drifted negative during optimisation), we automatically
-/// fall back to LDL and rebuild the factorization from scratch.
+/// fall back to LDL and rebuild the factorization from scratch. The factor
+/// step is the direct path shared with
+/// [`crate::linear_solver::DirectSolver`] (`linear_solver::direct::refactor`).
 pub fn factor_and_solve(cache: &mut FdmCache, perturbation: f64) -> Result<(), TheseusError> {
     // Add diagonal perturbation if requested
     if perturbation > 0.0 {
@@ -123,40 +123,12 @@ pub fn factor_and_solve(cache: &mut FdmCache, perturbation: f64) -> Result<(), T
     }
 
     // Try the current factorization, falling back to LDL on Cholesky failure.
-    let mut need_ldl_fallback = false;
-
-    match &mut cache.factorization {
-        Some(fac) => {
-            if let Err(_e) = fac.update(&cache.a_matrix, &mut cache.factor_stack) {
-                if fac.strategy() == FactorizationStrategy::Cholesky {
-                    need_ldl_fallback = true;
-                } else {
-                    return Err(_e.into());
-                }
-            }
-        }
-        None => {
-            match Factorization::new(&cache.a_matrix, cache.strategy, &mut cache.factor_stack) {
-                Ok(fac) => {
-                    cache.factorization = Some(fac);
-                }
-                Err(_e) if cache.strategy == FactorizationStrategy::Cholesky => {
-                    need_ldl_fallback = true;
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-    }
-
-    if need_ldl_fallback {
-        cache.strategy = FactorizationStrategy::LDL;
-        cache.factorization = None;
-        cache.factorization = Some(Factorization::new(
-            &cache.a_matrix,
-            FactorizationStrategy::LDL,
-            &mut cache.factor_stack,
-        )?);
-    }
+    direct::refactor(
+        &mut cache.factorization,
+        &mut cache.strategy,
+        &cache.a_matrix,
+        &mut cache.factor_stack,
+    )?;
 
     let fac = cache
         .factorization
@@ -172,10 +144,7 @@ pub fn factor_and_solve(cache: &mut FdmCache, perturbation: f64) -> Result<(), T
     for d in 0..3 {
         for i in 0..n {
             if !cache.x[[i, d]].is_finite() {
-                return Err(TheseusError::Solver(
-                    "FDM linear solve produced non-finite solution (singular or ill-conditioned equilibrium matrix). \
-                     Check network connectivity, supports, and initial force densities.".into(),
-                ));
+                return Err(TheseusError::Solver(direct::NON_FINITE_SOLUTION_MSG.into()));
             }
         }
     }
