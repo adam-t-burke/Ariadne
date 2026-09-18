@@ -830,6 +830,170 @@ is 0.48–0.64 s at 1M and is paid once per topology.
   1e-6, roughly 60% of the iterations), and the accuracy of the gradient
   computed from an inexact adjoint.
 
+## WS-C: smoothed-aggregation AMG solver
+
+Workstream WS-C of `ITERATIVE_SOLVER_PROGRAM.md`: the production
+`AmgSolver<CpuBackend>` in `src/amg/` behind `LinearSolverKind::IterativeCpu`,
+measured against `DirectSolver` on the same systems and against the WS-A
+prototype numbers above. The configuration is the Phase-0 recommendation and
+the crate defaults: smoothed aggregation, 3 matching passes per level,
+`P = (I − ω D⁻¹A) P₀` with `ω = 4/(3 λ_max)`, Chebyshev degree 2 on
+`[λ_max/10, λ_max]`, V-cycle (1 pre, 1 post), coarsest level ≤ 2,000 nodes
+solved by faer's LLᵀ, PCG on the three columns to a fixed `1e-8` relative
+residual.
+
+```sh
+# Ignored benchmark test; one markdown row per fixture.
+for th in 1 4; do
+  env RAYON_NUM_THREADS=$th THESEUS_AMG_SIZES=224,448,708 \
+      THESEUS_AMG_FIXTURES=grid,irregular,dome THESEUS_AMG_REPS=5 \
+      RUSTUP_TOOLCHAIN=1.89.0 \
+      cargo test -p theseus --release --test amg_bench amg_vs_direct -- --ignored --nocapture
+done
+# Per-level breakdown of the numeric update:
+env RAYON_NUM_THREADS=1 THESEUS_AMG_SIZES=708 THESEUS_AMG_FIXTURES=grid,irregular,dome \
+    RUSTUP_TOOLCHAIN=1.89.0 \
+    cargo test -p theseus --release --test amg_bench update_breakdown -- --ignored --nocapture
+```
+
+Method. Fixtures are the WS-B generators in `tests/support/fixtures`
+(`grid`, `irregular`, `dome`, matched to the grid by edge count; their node
+counts differ slightly from the prototype's own generators — the dome here
+has 250k free nodes at 1M edges, the prototype's had 337k), with the smooth
+10× force-density field `smooth_q_star` and unit downward loads. The direct
+column is `DirectSolver::update` + one 3-rhs `solve` (numeric
+refactorization + solve, the per-`q` cost the optimizer pays today). "Setup"
+is the first `update(q)` on a fresh solver (aggregation, `P`, symbolic and
+numeric Galerkin products, `λ_max`, coarsest factorization). "update(q)" is
+`update` on a ±2% uniformly perturbed `q` (the pattern of `P` and of every
+coarse operator is frozen; only the numeric products, the device weight
+uploads, the coarsest refactorization and — when some `q_e` drifted more
+than 50% since the last estimate, which a 2% step never does — `λ_max` are
+redone).
+"Cold" solves from `x = 0`; "warm" solves from the cold solution against
+the right-hand side of the perturbed `q`. Every number is the median of 5
+runs; the machine (4 vCPU Xeon, 15 GiB) was shared with one other build
+during the sweep (load average 1.2–2.0 including this process; the direct
+reference at grid 708 came out at 776–791 ms against the 756 ms of the
+Phase-0 table taken at load ≈ 1). Iteration counts are deterministic and
+identical across thread counts; the iterative solutions agree with the
+direct ones to `1e-11`–`2e-9` relative (max-norm) at the `1e-8` residual
+tolerance.
+
+### update(q) — the headline number
+
+Milliseconds for the numeric hierarchy update on a 2% `q` change, 1M edges
+(grid 708 and matched fixtures), against the targets of §7.3 (≤ 100 ms on
+one thread, ≤ 40 ms on four) and the prototype, which rebuilt `P` and the
+coarse operators from scratch.
+
+| fixture | edges | levels | update(q) 1 thread | update(q) 4 threads | prototype q-update (1 thread) | target |
+|---|---:|---|---:|---:|---:|---|
+| grid 708 | 1,001,112 | 501,260 → 62,577 → 7,772 → 929 | **34.5** | **20.1** | 367 | met |
+| irregular 708 | 997,990 | 294,849 → 30,849 → 3,291 → 377 | **53.7** | **23.7** | 322 | met |
+| dome 708 | 1,001,112 | 249,925 → 30,951 → 3,721 → 442 | **34.8** | **22.7** | 323 | met |
+
+Where the single-threaded time goes (grid 708, 33 ms in this run): the
+level-0 → 1 product 15.1 ms (the graph operator over `Level0Map` times
+`P`, 2.4M entries in `AP`, then `Pᵀ(AP)` into 758k entries), level 1 → 2
+4.1 ms, level 2 → 3 1.6 ms; the remaining ~12 ms are the level-0
+weight/anchor pass over `Level0Map` and its device copy, the CSR value
+uploads of the coarse operators, and the coarsest LLᵀ refactorization (929
+nodes, ~1.5 ms). The irregular fixture spends 31 ms on the
+first product against the grid's 15 ms for 0.6× the rows: its rows are
+longer (14.7 vs 12.1 entries of `A_c` per coarse row, 5–9 neighbours per
+fine node) and its neighbour accesses are not contiguous, so the product is
+bound by cache misses rather than by arithmetic. The dome is the opposite:
+its first product is cheaper than the grid's, its deeper levels dearer
+(35–54 entries per coarse row). Four threads buy 1.5–2.3× on the update;
+the products are row-parallel with a per-row deterministic accumulation
+order, so the gain is bounded by memory bandwidth like everything else here.
+
+The product is done in two stages on frozen patterns — `AP` row-parallel
+over fine rows, then `Pᵀ(AP)` row-parallel over coarse rows — rather than
+as a single triple loop per coarse row. The single loop visited every
+`(u, v, j)` triple and was quadratic in the neighbourhood size: 529 ms on
+the dome at 1M edges, 126 ms on the irregular fixture. Two stages cost one
+extra matrix (`AP`, 2.4M entries / 27 MiB at level 0 of grid 708) and are
+15× cheaper on the dome.
+
+### Setup, solves and the direct reference
+
+Single thread (`RAYON_NUM_THREADS=1`), coarsest ≤ 2,000 nodes.
+
+| fixture | edges | free nodes | direct update + solve | AMG setup | AMG update(q) | cold it x/y/z | cold ms | cold / direct | warm it x/y/z | warm ms | warm / direct | host MiB |
+|---|---:|---:|---:|---:|---:|---|---:|---:|---|---:|---:|---:|
+| grid 224 | 99,904 | 50,172 | 43.3 | 31.2 | 3.7 | 15/15/20 | 99.0 | 2.29× | 10/10/15 | 74.3 | 1.72× | 36 |
+| irregular 224 | 99,695 | 28,900 | 22.5 | 35.6 | 5.1 | 10/10/12 | 49.0 | 2.18× | 5/5/9 | 37.1 | 1.65× | 23 |
+| dome 224 | 99,904 | 24,865 | 22.4 | 22.6 | 3.1 | 9/9/11 | 32.1 | 1.43× | 5/5/9 | 26.7 | 1.19× | 23 |
+| grid 448 | 400,512 | 200,700 | 235.0 | 148.5 | 13.9 | 16/16/22 | 458.1 | 1.95× | 10/10/17 | 351.1 | 1.49× | 143 |
+| irregular 448 | 400,357 | 117,649 | 113.3 | 152.6 | 21.2 | 10/10/13 | 232.4 | 2.05× | 5/5/10 | 178.6 | 1.58× | 96 |
+| dome 448 | 400,512 | 99,905 | 122.6 | 96.1 | 13.3 | 9/9/12 | 152.1 | 1.24× | 5/5/9 | 113.7 | 0.93× | 95 |
+| grid 708 | 1,001,112 | 501,260 | 791.4 | 407.3 | 34.5 | 17/16/23 | 1,318 | 1.67× | 10/10/18 | 1,034 | 1.31× | 358 |
+| irregular 708 | 997,990 | 294,849 | 404.5 | 419.3 | 53.7 | 10/10/13 | 623.6 | 1.54× | 5/5/10 | 477.7 | 1.18× | 239 |
+| dome 708 | 1,001,112 | 249,925 | 385.4 | 275.0 | 34.8 | 9/9/12 | 423.8 | 1.10× | 5/5/9 | 296.6 | 0.77× | 234 |
+
+Four threads (`RAYON_NUM_THREADS=4`), same systems. The direct solver does
+not benefit from threads (see the Phase-0 table); iteration counts are
+identical to the single-threaded run, bitwise.
+
+| fixture | direct update + solve | AMG setup | AMG update(q) | cold ms | cold / direct | warm ms | warm / direct |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| grid 224 | 43.2 | 29.1 | 3.0 | 52.1 | 1.21× | 34.8 | 0.81× |
+| irregular 224 | 22.2 | 32.0 | 3.3 | 25.3 | 1.14× | 18.5 | 0.83× |
+| dome 224 | 22.5 | 20.4 | 2.7 | 18.6 | 0.83× | 15.1 | 0.67× |
+| grid 448 | 232.6 | 110.9 | 8.1 | 174.6 | 0.75× | 133.9 | 0.58× |
+| irregular 448 | 113.6 | 125.2 | 13.5 | 84.8 | 0.75× | 66.4 | 0.58× |
+| dome 448 | 119.3 | 80.1 | 10.2 | 60.0 | 0.50× | 45.9 | 0.38× |
+| grid 708 | 775.7 | 316.5 | 20.1 | 416.3 | 0.54× | 336.6 | 0.43× |
+| irregular 708 | 397.5 | 373.6 | 23.7 | 202.9 | 0.51× | 161.1 | 0.41× |
+| dome 708 | 392.8 | 236.3 | 22.7 | 139.6 | 0.36× | 106.3 | 0.27× |
+
+Coarsest level ≤ 8,000 nodes instead of 2,000 (one level fewer at 1M
+edges), single thread / four threads: update(q) 41.1 / 26.1 ms (grid),
+55.3 / 26.3 (irregular), 37.5 / 24.6 (dome); cold solves 1,207 / 403,
+609 / 197, 401 / 141 ms. The grid drops from 17/16/23 to 14/15/21
+iterations, the other fixtures are unchanged; the larger LLᵀ (7.7k nodes,
+31 entries per row) costs more in the update than the level it removes and
+the solve time moves by ≤ 8%. The default stays at 2,000.
+
+### Reading the tables
+
+* The `update(q)` targets are met on every fixture with margin: 35–54 ms
+  on one thread against 100, 20–24 ms on four against 40. Relative to the
+  prototype's rebuild-everything update (322–367 ms) the frozen-pattern
+  numeric product is 6–10× cheaper; relative to the direct update + solve
+  it is 7–23× cheaper on one thread.
+* Iteration counts match the prototype within one or two (grid 708:
+  17/16/23 cold, 10/10/18 warm, against 15/15/22 and 10/10/17; the WS-B
+  fixtures are not the prototype's generators, so the irregular and dome
+  rows are not the same systems). The grid's z column still costs ~40%
+  more iterations than x/y, as in Phase 0; the x/y counts at 64/128/224
+  are within the +30% band checked by `tests/amg_solver.rs`.
+* Per iteration the production solve is 25–35% dearer than the prototype's
+  on one thread (grid 708: 57 ms per z-iteration against 42; grid 224: 5.0
+  against 3.9). Part of this is load (the direct reference is 5% slower in
+  the same runs), the rest is the generic kernel path: the smoothed
+  restriction and prolongation are `apply_csr` products on `Pᵀ` and `P`
+  (1.3M entries each at grid 708, one extra pass over the fine vectors
+  compared with the prototype's fused aggregate-map form), and the three
+  columns are interleaved so every kernel streams 3× the operator's
+  vectors. The kernels are memory bound; four threads buy 3.0–3.2× on the
+  cold solve at 1M edges.
+* Against the direct solver per `q` evaluation (update + one 3-rhs solve),
+  the AMG is 1.1–1.7× slower on one thread at 1M edges cold and 0.8–1.3×
+  warm, and 0.36–0.54× (cold) / 0.27–0.43× (warm) on four threads; the
+  crossover on one thread is the dome at 448 warm and lies beyond 1M
+  edges for the grid (Phase 0 predicted 1–3M). The optimizer pays the
+  adjoint solve on top of both, which favours the direct solver's second
+  solve (a fraction of its refactorization) against a second PCG of the
+  same cost — the accounting of §9 stands.
+* Host memory (all level operators, `P`, `Pᵀ`, `AP`, the coarsest factor
+  and the PCG/cycle buffers on the CPU backend): 358 MiB at grid 708, of
+  which the level-0 `AP` product buffer is 27 MiB and `P` plus `Pᵀ` at
+  level 0 are 30 MiB. The `f32` preconditioner option halves the device-side operators
+  and vectors; it is not measured here.
+
 # Basin optimizer comparison
 
 This compares the integration for [issue #12](https://github.com/adam-t-burke/Ariadne/issues/12)
