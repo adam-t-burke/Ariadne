@@ -7,6 +7,92 @@ using Ariadne.FDM;
 using Ariadne.Graphs;
 using Ariadne.Utilities;
 using Rhino.Geometry;
+using Theseus.Interop;
+
+/// <summary>
+/// Persistence, labels and defaults of the linear-solver toggle shared by the
+/// OptConfig component and its tests. <see cref="LinearSolverKind.Direct"/> is
+/// the default everywhere; a saved definition without the key loads as Direct.
+/// </summary>
+public static class LinearSolverSelection
+{
+    /// <summary>Key under which the component persists the selection.</summary>
+    public const string PersistenceKey = "LinearSolverKind";
+
+    /// <summary>The default selection.</summary>
+    public const LinearSolverKind Default = LinearSolverKind.Direct;
+
+    /// <summary>All selectable kinds in menu order.</summary>
+    public static readonly IReadOnlyList<LinearSolverKind> All =
+    [
+        LinearSolverKind.Direct,
+        LinearSolverKind.IterativeCpu,
+        LinearSolverKind.IterativeGpu,
+    ];
+
+    /// <summary>
+    /// Resolve a persisted value: null (key missing) or an unknown value yields
+    /// <see cref="Default"/>.
+    /// </summary>
+    public static LinearSolverKind FromPersisted(int? stored) =>
+        stored is { } value && Enum.IsDefined(typeof(LinearSolverKind), value)
+            ? (LinearSolverKind)value
+            : Default;
+
+    /// <summary>Context-menu label of a kind.</summary>
+    public static string MenuLabel(LinearSolverKind kind) => kind switch
+    {
+        LinearSolverKind.Direct => "Direct",
+        LinearSolverKind.IterativeCpu => "Iterative (CPU)",
+        LinearSolverKind.IterativeGpu => "Iterative (GPU)",
+        _ => kind.ToString(),
+    };
+
+    /// <summary>Component message suffix (<c>lin: Direct | Iter-CPU | Iter-GPU</c>).</summary>
+    public static string MessageSuffix(LinearSolverKind kind) => kind switch
+    {
+        LinearSolverKind.Direct => "lin: Direct",
+        LinearSolverKind.IterativeCpu => "lin: Iter-CPU",
+        LinearSolverKind.IterativeGpu => "lin: Iter-GPU",
+        _ => "lin: Direct",
+    };
+}
+
+/// <summary>
+/// Range checks for the numeric inputs of the Iterative Solver Options
+/// component, mirroring the native validation so bad values fail in the
+/// component rather than at solve time.
+/// </summary>
+public static class IterativeSolverOptionsInput
+{
+    /// <summary>Returns an error message, or null when every value is acceptable.</summary>
+    public static string? Validate(
+        bool hasFixedTolerance, double fixedTolerance,
+        double floor, double ceiling, double factor,
+        int maxIter, int smoother, int aggPasses, int coarsest)
+    {
+        static bool Positive(double v) => double.IsFinite(v) && v > 0.0;
+
+        if (hasFixedTolerance && !Positive(fixedTolerance))
+            return "Fixed Tolerance must be finite and > 0.";
+        if (!hasFixedTolerance)
+        {
+            if (!Positive(floor) || !Positive(ceiling) || !Positive(factor))
+                return "Tolerance Floor, Ceiling and Factor must be finite and > 0.";
+            if (floor > ceiling)
+                return "Tolerance Floor must not exceed Tolerance Ceiling.";
+        }
+        if (maxIter < 1)
+            return "Max Iterations must be >= 1.";
+        if (smoother is < 1 or > 255)
+            return "Smoother Degree must be in 1–255.";
+        if (aggPasses is < 1 or > 255)
+            return "Aggregation Passes must be in 1–255.";
+        if (coarsest < 1)
+            return "Coarsest Size must be >= 1.";
+        return null;
+    }
+}
 
 /// <summary>
 /// Shared L-BFGS tuning parameters used by solver service and optimization config.
@@ -66,6 +152,10 @@ public sealed record OptimizationConfig : SolverTuningOptions
     public bool StreamPreview { get; init; } = true;
     /// <summary>Variable support definitions (optional).</summary>
     public IReadOnlyList<VariableSupportConfig> VariableSupports { get; init; } = [];
+    /// <summary>Linear solver for the FDM and adjoint systems; Direct unless explicitly toggled.</summary>
+    public LinearSolverKind LinearSolver { get; init; } = LinearSolverSelection.Default;
+    /// <summary>Iterative solver parameters (null = native defaults); ignored when <see cref="LinearSolver"/> is Direct.</summary>
+    public IterativeSolverOptions? IterativeOptions { get; init; }
 
     /// <summary>Maps optimization UI config to solver service options.</summary>
     public SolverOptions ToSolverOptions() => new()
@@ -393,6 +483,10 @@ public sealed record SolverInputs
     public PressureConfig? Pressure { get; init; }
     /// <summary>Variable support definitions (null/empty = no variable anchors).</summary>
     public List<VariableSupportConfig>? VariableSupports { get; init; }
+    /// <summary>Linear solver for the FDM and adjoint systems (default Direct).</summary>
+    public LinearSolverKind LinearSolver { get; init; } = LinearSolverSelection.Default;
+    /// <summary>Iterative solver parameters (null = native defaults); ignored when <see cref="LinearSolver"/> is Direct.</summary>
+    public IterativeSolverOptions? IterativeOptions { get; init; }
 }
 
 /// <summary>
@@ -425,6 +519,8 @@ public sealed record SolveResult
     /// geometry to the target. NaN when unavailable.
     /// </summary>
     public double GeometricError { get; init; } = double.NaN;
+    /// <summary>Linear-solver totals (backend used, solves, iterations); null when unavailable.</summary>
+    public LinearSolverStats? LinearSolver { get; init; }
 
     /// <summary>
     /// Node positions as Point3d list (convenience accessor).

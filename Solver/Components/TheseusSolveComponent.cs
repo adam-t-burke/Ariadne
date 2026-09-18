@@ -454,8 +454,10 @@ public class TheseusSolveComponent : GH_Component
         {
             var ex = _pendingError;
             _pendingError = null;
+            // Linear-solver failures (unsupported backend, no GPU adapter, no
+            // convergence) are errors, never a silent fallback to Direct.
             string message = ex is TheseusException tex && tex.NativeCode != 0
-                ? $"{ex.Message} (native code {tex.NativeCode})"
+                ? $"{(TheseusSolverService.IsLinearSolverErrorCode(tex.NativeCode) ? "Linear solver: " : "")}{ex.Message} (native code {tex.NativeCode})"
                 : ex.Message;
             AddRuntimeMessage(GH_RuntimeMessageLevel.Error, message);
             if (_cachedResult != null)
@@ -470,6 +472,9 @@ public class TheseusSolveComponent : GH_Component
             UpdateQCacheIfNeeded(_cachedResult, _pendingCacheUpdate);
             _pendingCacheUpdate = null;
             OutputResult(DA, _cachedResult);
+
+            if (_cachedResult.LinearSolver is { } linearSolver)
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Remark, linearSolver.Describe());
 
             if (_lastWasOptimization)
             {
@@ -619,6 +624,8 @@ public class TheseusSolveComponent : GH_Component
             hash.Add(config.BarrierSharpness);
             hash.Add(config.ReportFrequency);
             hash.Add(config.QParameterizationMode);
+            hash.Add(config.LinearSolver);
+            hash.Add(config.IterativeOptions?.GetContentHashCode() ?? 0);
             hash.Add(config.StreamPreview);
             foreach (var obj in config.Objectives)
                 hash.Add(obj.GetContentHashCode());
@@ -739,6 +746,8 @@ public class TheseusSolveComponent : GH_Component
                 SelfWeight = snap.SelfWeight,
                 Pressure = snap.Pressure,
                 VariableSupports = cfg.VariableSupports.ToList(),
+                LinearSolver = cfg.LinearSolver,
+                IterativeOptions = cfg.IterativeOptions,
             };
             var options = cfg.ToSolverOptions();
             return TheseusSolverService.Solve(
@@ -752,6 +761,10 @@ public class TheseusSolveComponent : GH_Component
             LoadNodeIndices = loadNodeIndices,
             SelfWeight = snap.SelfWeight,
             Pressure = snap.Pressure,
+            // A config without objectives still carries the toggle, so the
+            // forward fallback honours it instead of silently using Direct.
+            LinearSolver = snap.Config?.LinearSolver ?? LinearSolverSelection.Default,
+            IterativeOptions = snap.Config?.IterativeOptions,
         };
         return TheseusSolverService.SolveForward(
             snap.Network, fwdInputs, cancellationToken);

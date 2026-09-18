@@ -8,6 +8,7 @@ using Grasshopper.Kernel;
 using Grasshopper.Kernel.Data;
 using Grasshopper.Kernel.Parameters;
 using Grasshopper.Kernel.Types;
+using Theseus.Interop;
 using Objective = Ariadne.Solver.Objective;
 
 namespace Ariadne.Solver.Components;
@@ -16,13 +17,22 @@ namespace Ariadne.Solver.Components;
 /// Grasshopper component that bundles optimization settings into an
 /// <see cref="OptimizationConfig"/> object for the Theseus Solve component.
 /// Objectives are always flattened so a single solve runs (avoids multiple concurrent solves from tree branches).
+/// The linear solver is chosen from the right-click menu ("Linear solver"); it
+/// is <see cref="LinearSolverKind.Direct"/> unless explicitly changed, and an
+/// iterative selection adds an optional "Iterative Options" input fed by the
+/// <see cref="IterativeSolverOptionsComponent"/>.
 /// </summary>
 public class OptConfigComponent : GH_Component
 {
     private const string QParameterizationModeKey = "QParameterizationMode";
+    private const string IterativeOptionsParamName = "Iterative Options";
     private const int CoreInputCount = 10;
     private QParameterizationMode _qParameterizationMode = QParameterizationMode.DirectBoxBounds;
+    private LinearSolverKind _linearSolver = LinearSolverSelection.Default;
     private bool _hasLegacyImplicitBoundedMode;
+
+    /// <summary>The linear solver currently selected in the context menu.</summary>
+    public LinearSolverKind LinearSolver => _linearSolver;
 
     public OptConfigComponent()
         : base("Optimization Config", "OptConfig",
@@ -120,6 +130,18 @@ public class OptConfigComponent : GH_Component
         if (barrierSharpnessIndex >= 0)
             DA.GetData(barrierSharpnessIndex, ref barrierSharpness);
 
+        IterativeSolverOptions? iterativeOptions = null;
+        int iterativeOptionsIndex = Params.IndexOfInputParam(IterativeOptionsParamName);
+        if (iterativeOptionsIndex >= 0)
+        {
+            DA.GetData(iterativeOptionsIndex, ref iterativeOptions);
+            if (iterativeOptions is null && _linearSolver != LinearSolverKind.Direct)
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
+                    $"Linear solver {LinearSolverSelection.MenuLabel(_linearSolver)} uses the default iterative options; connect an Iterative Solver Options component to change them.");
+            }
+        }
+
         if (objectives.Count == 0)
         {
             AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
@@ -147,6 +169,8 @@ public class OptConfigComponent : GH_Component
             Run = run,
             StreamPreview = streamPreview,
             VariableSupports = variableSupports.AsReadOnly(),
+            LinearSolver = _linearSolver,
+            IterativeOptions = iterativeOptions,
         };
 
         DA.SetData(0, config);
@@ -168,6 +192,34 @@ public class OptConfigComponent : GH_Component
             (_, _) => SetQParameterizationMode(QParameterizationMode.DirectSoftBounds),
             true,
             _qParameterizationMode == QParameterizationMode.DirectSoftBounds);
+
+        Menu_AppendSeparator(menu);
+        var linearSolverMenu = Menu_AppendItem(menu, "Linear solver");
+        linearSolverMenu.ToolTipText =
+            "Linear solver for the FDM and adjoint systems. Direct (sparse Cholesky) is the default; " +
+            "the iterative backends are opt-in and fail with an error when unavailable instead of falling back.";
+        foreach (var kind in LinearSolverSelection.All)
+        {
+            var captured = kind;
+            Menu_AppendItem(
+                linearSolverMenu.DropDown,
+                LinearSolverSelection.MenuLabel(kind),
+                (_, _) => SetLinearSolver(captured),
+                true,
+                _linearSolver == kind);
+        }
+    }
+
+    private void SetLinearSolver(LinearSolverKind kind)
+    {
+        if (_linearSolver == kind)
+            return;
+
+        RecordUndoEvent("Set Linear Solver");
+        _linearSolver = kind;
+        UpdateParameterVisibility();
+        UpdateMessage();
+        ExpireSolution(true);
     }
 
     private void SetQParameterizationMode(QParameterizationMode mode)
@@ -185,12 +237,22 @@ public class OptConfigComponent : GH_Component
 
     private void UpdateMessage()
     {
-        Message = _qParameterizationMode switch
+        Message = BuildMessage(_qParameterizationMode, _linearSolver);
+    }
+
+    /// <summary>
+    /// Component message: the q mode followed by the linear-solver suffix
+    /// (<c>lin: Direct | Iter-CPU | Iter-GPU</c>).
+    /// </summary>
+    internal static string BuildMessage(QParameterizationMode qMode, LinearSolverKind linearSolver)
+    {
+        string q = qMode switch
         {
             QParameterizationMode.DirectSoftBounds => "q: SoftBounds",
             QParameterizationMode.DirectBoxBounds => "q: BoxBounds",
             _ => "q: SoftBounds",
         };
+        return $"{q}, {LinearSolverSelection.MessageSuffix(linearSolver)}";
     }
 
     private void UpdateParameterVisibility()
@@ -207,6 +269,18 @@ public class OptConfigComponent : GH_Component
                 "Barrier Weight", "BW", "Soft-bound barrier function weight"));
             Params.RegisterInputParam(NumberParam(
                 "Barrier Sharpness", "BS", "Soft-bound barrier function sharpness"));
+        }
+
+        if (_linearSolver != LinearSolverKind.Direct)
+        {
+            Params.RegisterInputParam(new Param_GenericObject
+            {
+                Name = IterativeOptionsParamName,
+                NickName = "IterOpt",
+                Description = "Iterative linear solver options from the Iterative Solver Options component (optional; defaults apply when empty)",
+                Access = GH_ParamAccess.item,
+                Optional = true,
+            });
         }
 
         Params.OnParametersChanged();
@@ -229,6 +303,7 @@ public class OptConfigComponent : GH_Component
     public override bool Write(GH_IWriter writer)
     {
         writer.SetInt32(QParameterizationModeKey, (int)_qParameterizationMode);
+        writer.SetInt32(LinearSolverSelection.PersistenceKey, (int)_linearSolver);
         return base.Write(writer);
     }
 
@@ -247,6 +322,11 @@ public class OptConfigComponent : GH_Component
                 _qParameterizationMode = (QParameterizationMode)value;
             }
         }
+        // Definitions saved before the toggle existed have no key and load as Direct.
+        _linearSolver = LinearSolverSelection.FromPersisted(
+            reader.ItemExists(LinearSolverSelection.PersistenceKey)
+                ? reader.GetInt32(LinearSolverSelection.PersistenceKey)
+                : null);
         UpdateParameterVisibility();
         UpdateMessage();
         return base.Read(reader);
