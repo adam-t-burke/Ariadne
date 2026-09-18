@@ -411,6 +411,70 @@ impl SolveStats {
     }
 }
 
+/// Running totals over the [`SolveStats`] of one optimisation or forward
+/// solve, as exported through the FFI (`theseus_get_linear_solver_stats`).
+///
+/// `converged_all` starts `true` and is cleared by the first recorded solve
+/// that did not converge, so a run with no recorded solves reports
+/// `converged_all == true` and `solves == 0`.
+///
+/// TODO(WS-D): nothing calls [`LinearSolverTotals::record`] yet. The FFI
+/// resets the totals at the start of every run, but `factor_and_solve`
+/// (`fdm.rs`) does not produce a [`SolveStats`], so `Direct` runs report
+/// `solves == 0` and zero times. Once the dispatch inside `FdmCache` returns
+/// `SolveStats`, `record` each of them into the handle's totals.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LinearSolverTotals {
+    /// Solver kind the run was configured with (and, once the dispatch
+    /// records stats, the kind that actually ran).
+    pub backend: LinearSolverKind,
+    /// Number of `solve` calls recorded.
+    pub solves: u64,
+    /// Sum over solves of the largest per-column iteration count.
+    pub iterations_total: u64,
+    /// Largest per-column iteration count of any single solve.
+    pub iterations_max: u32,
+    /// Sum of `solve_ms`.
+    pub solve_ms_total: f64,
+    /// Sum of `setup_ms`.
+    pub setup_ms_total: f64,
+    /// Every recorded solve converged.
+    pub converged_all: bool,
+}
+
+impl LinearSolverTotals {
+    /// Empty totals for a run on `backend`.
+    pub fn new(backend: LinearSolverKind) -> Self {
+        Self {
+            backend,
+            solves: 0,
+            iterations_total: 0,
+            iterations_max: 0,
+            solve_ms_total: 0.0,
+            setup_ms_total: 0.0,
+            converged_all: true,
+        }
+    }
+
+    /// Fold one solve into the totals.
+    pub fn record(&mut self, stats: &SolveStats) {
+        let iters = stats.max_iterations();
+        self.backend = stats.backend;
+        self.solves += 1;
+        self.iterations_total += u64::from(iters);
+        self.iterations_max = self.iterations_max.max(iters);
+        self.solve_ms_total += stats.solve_ms;
+        self.setup_ms_total += stats.setup_ms;
+        self.converged_all &= stats.converged;
+    }
+}
+
+impl Default for LinearSolverTotals {
+    fn default() -> Self {
+        Self::new(LinearSolverKind::Direct)
+    }
+}
+
 /// Memory held by a solver, split by where it lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MemoryReport {
@@ -579,6 +643,49 @@ mod tests {
         assert!(AdapterPreference::try_from(3).is_err());
         assert_eq!(TolerancePolicy::Fixed(1e-8).mode(), TolerancePolicy::FIXED);
         assert_eq!(TolerancePolicy::default().mode(), TolerancePolicy::ADAPTIVE);
+    }
+
+    #[test]
+    fn totals_accumulate_solve_stats() {
+        let mut totals = LinearSolverTotals::new(LinearSolverKind::IterativeCpu);
+        assert_eq!(
+            totals,
+            LinearSolverTotals {
+                backend: LinearSolverKind::IterativeCpu,
+                solves: 0,
+                iterations_total: 0,
+                iterations_max: 0,
+                solve_ms_total: 0.0,
+                setup_ms_total: 0.0,
+                converged_all: true,
+            }
+        );
+        totals.record(&SolveStats {
+            iterations: [3, 7, 5],
+            relative_residual: [1e-9; 3],
+            converged: true,
+            setup_ms: 1.5,
+            solve_ms: 4.0,
+            backend: LinearSolverKind::IterativeCpu,
+        });
+        totals.record(&SolveStats {
+            iterations: [2, 2, 2],
+            relative_residual: [1e-3; 3],
+            converged: false,
+            setup_ms: 0.5,
+            solve_ms: 1.0,
+            backend: LinearSolverKind::IterativeCpu,
+        });
+        assert_eq!(totals.solves, 2);
+        assert_eq!(totals.iterations_total, 9);
+        assert_eq!(totals.iterations_max, 7);
+        assert_eq!(totals.solve_ms_total, 5.0);
+        assert_eq!(totals.setup_ms_total, 2.0);
+        assert!(!totals.converged_all);
+        assert_eq!(
+            LinearSolverTotals::default().backend,
+            LinearSolverKind::Direct
+        );
     }
 
     #[test]
