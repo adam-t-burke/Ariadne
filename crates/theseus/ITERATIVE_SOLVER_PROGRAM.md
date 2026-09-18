@@ -774,7 +774,7 @@ noting it in the report.
 |---|---|
 | M0 Interfaces | **reached** (`9a5f52d`): WS-I merged; `DirectSolver` bitwise-equal to the cache path, `factor_and_solve` shares its refactor code; full `Box<dyn LinearSystemSolver>` dispatch inside `FdmCache` deferred to WS-D |
 | M1 Phase-0 verdict | WS-A report merged with a go/no-go and parameter recommendation |
-| M2 Infrastructure | WS-B, WS-E, WS-F merged; toggle visible in Grasshopper returning "not yet available" for iterative kinds; sweep tooling produces a `Direct` cost model. *WS-E done* (`6df10ba`): fixtures, JSON harness, `scripts/bench_sweep.py`, `crossover_fit.py`, first `Direct` sweep 10k–1M on the CI VM with fits at RMS < 15% (`benchmarks/reports/`) |
+| M2 Infrastructure | WS-B, WS-E, WS-F merged (*WS-F done*, `cb562e6`: toggle, options and probe through FFI/C#/Grasshopper, iterative kinds return code `-4`); toggle visible in Grasshopper returning "not yet available" for iterative kinds; sweep tooling produces a `Direct` cost model. *WS-E done* (`6df10ba`): fixtures, JSON harness, `scripts/bench_sweep.py`, `crossover_fit.py`, first `Direct` sweep 10k–1M on the CI VM with fits at RMS < 15% (`benchmarks/reports/`) |
 | M3 CPU iterative | WS-C, WS-D merged; `IterativeCpu` passes all contract tests; `bench_scale` numbers at 224–708 recorded |
 | M4 GPU kernels | WS-G merged; kernels validated under software adapters on three OSes and on one real GPU |
 | M5 GPU end to end | WS-H merged; `IterativeGpu` validated on Windows/NVIDIA and Apple silicon; 10M-edge run recorded |
@@ -829,3 +829,15 @@ for a future `Auto` decision.
   crossover is reported alongside for the `Auto` proposal. Not yet built:
   the "every objective type" 1,000-node fixture (moves to WS-K) and
   in-harness full-solve repetitions (the sweep re-runs cells instead).
+* 2026-09-18 — WS-F landed (`cb562e6`): `theseus_set_linear_solver`,
+  `theseus_set_iterative_options` (flat parameters, `-1` = backend-default
+  precision), `theseus_gpu_probe` (JSON, returns bytes required),
+  `theseus_get_linear_solver_stats` (`TheseusLinearSolverStats`, 56 bytes);
+  pre-dispatch guard `ffi::begin_linear_solver_run` returns code `-4` for
+  non-`Direct` kinds until WS-D's `FdmCache` dispatch replaces it;
+  `LinearSolverTotals::record` is called by WS-D from the dispatch site.
+  Decisions: `max_device_bytes: u64` (0 = adapter default) is appended to
+  `theseus_set_iterative_options` before the C# signature freezes (WS-F
+  follow-up); the GPU pre-probe is cached per handle once WS-G lands and
+  re-run only on explicit request (WS-H); preserving wires when the toggle
+  rebuilds optional inputs goes to WS-K.
