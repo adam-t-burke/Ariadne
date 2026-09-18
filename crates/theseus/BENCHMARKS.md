@@ -187,6 +187,75 @@ slower, so the automatic choice stands. Further gains would come from a
 nested-dissection ordering (not exposed by faer 0.17) or a different sparse
 Cholesky implementation, not from anything around the factorization.
 
+## Toward 1M edges
+
+Same fixture at 320, 448 and 708 (204k, 401k and 1,001k edges), single
+thread, after the changes above. Milliseconds per phase of one evaluation:
+
+| grid | edges | free nodes | assemble | numeric factor | solve | geometry | loss + ∇ | adjoint solve | total |
+|-----:|------:|-----------:|---------:|---------------:|------:|---------:|---------:|--------------:|------:|
+| 320 | 204,160 | 102,396 | 1.3 | 87 | 9.0 | 0.8 | 4.3 | 9.3 | 113 |
+| 448 | 400,512 | 200,700 | 3.7 | 200 | 20.7 | 2.0 | 8.3 | 19.4 | 256 |
+| 708 | 1,001,112 | 501,260 | 9.4 | 661 | 85.8 | 5.8 | 24.0 | 87.0 | 877 |
+
+Full solves (10 iterations): 1.95 s / 4.47 s / 14.8 s, i.e. 0.19 / 0.45 /
+1.48 s per iteration at 1.5 evaluations per iteration; setup 0.21 / 0.47 /
+1.51 s; peak RSS 214 / 438 / 1,123 MB. Basin's bookkeeping is ~20 ms per
+iteration at 1M and irrelevant.
+
+Factor properties (faer 0.17, AMD, automatic supernodal selection):
+
+| grid | nnz(A) | true nnz(L) | per column | supernodal nnz(L) | supernodes | symbolic | numeric f64 | numeric f64 Rayon | numeric f32 | solve (3 rhs) |
+|-----:|-------:|------------:|-----------:|------------------:|-----------:|---------:|------------:|------------------:|------------:|--------------:|
+| 224 | 250k | 1.45M | 28.8 | 1.89M | 25k | 12 ms | 34 ms | 41 ms | 29 ms | 4.5 ms |
+| 320 | 511k | 3.36M | 32.9 | 4.35M | 51k | 26 ms | 92 ms | 92 ms | 71 ms | 10.0 ms |
+| 448 | 1.00M | 7.45M | 37.1 | 9.41M | 101k | 55 ms | 186 ms | 195 ms | 140 ms | 21.7 ms |
+| 708 | 2.50M | 21.9M | 43.8 | 27.2M | 253k | 140 ms | 605 ms | 587 ms | 433 ms | 75.9 ms |
+
+Things checked and their outcome:
+
+* **Ordering.** Fill grows like `log n` (29 → 44 nonzeros per column from
+  50k to 500k nodes), so AMD is not the problem. faer 0.17 has no
+  nested-dissection ordering and its symbolic analysis does not accept a
+  user permutation, so the flop count is what it is.
+* **faer's parallel factorization.** `Parallelism::Rayon(0)` is within noise
+  of `None` at 1M (587 vs 605 ms) and slower below that. Supernodes average
+  two columns on these planar graphs, so there is nothing for its dense
+  kernels to parallelise.
+* **Supernode relaxation.** More aggressive amalgamation than faer's
+  (CHOLMOD-default) cutoffs barely changes the supernode count (253k → 250k
+  at 1M) and buys 2–10% on the factorization for 10–28% more fill, which the
+  two solves pay back. Disabling relaxation is 20% slower. Leave the default.
+* **Single precision.** An `f32` factorization is 1.4× faster (compute
+  bound, not bandwidth bound), and would only be usable as a preconditioner
+  followed by `f64` refinement; not worth the machinery on its own.
+* **Frozen-factor PCG at scale.** The factor/solve ratio stays ~8 from 100k
+  to 1M edges, so the break-even analysis from the 224 grid still holds:
+  3–7 preconditioned iterations per solve, two solves per evaluation, no
+  gain unless the preconditioner solve gets cheaper. The one thing that
+  changes at 1M is that the solve is now memory bound (27M values streamed
+  twice in 76 ms ≈ 5.7 GB/s), so storing the frozen factor in `f32` would
+  roughly halve its cost and make the hybrid pay when consecutive force
+  densities differ by a few percent. Estimated, not measured.
+* **Setup.** `FdmCache::new` is 0.52 s at 1M: 0.10 s transposing `Cn`,
+  0.21 s forming the pattern of `CnᵀCn` through sorted triplets, the rest
+  in the `q → nonzero` map and per-node incidence lists. The pattern can be
+  built directly from the edge list in one pass. Symbolic analysis and the
+  first factorization add 0.75 s. Both are paid once per `optimize()` call,
+  which for interactive re-solves on a fixed topology is once per re-solve.
+* **Memory.** 1.1 GB peak at 1M edges: the factor is ~220 MB, the rest is
+  construction transients (triplet buffers, per-edge `Vec`s) and
+  `Vec<Vec<usize>>` incidence lists that could be CSR.
+
+Conclusion: with faer 0.17's sparse Cholesky, 1M edges costs ~0.9 s per
+evaluation and ~1.1 GB, and about 70% of the time is the numeric
+factorization, which nothing around it can reduce. Getting substantially
+below that requires either a different direct solver (nested dissection and
+a parallel supernodal kernel) or a multilevel preconditioner that makes the
+matrix-free path converge in tens rather than a thousand iterations. The
+latter is the only option whose cost per evaluation and memory both scale
+linearly.
+
 # Basin optimizer comparison
 
 This compares the integration for [issue #12](https://github.com/adam-t-burke/Ariadne/issues/12)
