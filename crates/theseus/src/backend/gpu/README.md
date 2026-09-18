@@ -89,6 +89,13 @@ slices. wgpu features enabled: `std`, `parking_lot`, `wgsl`, `vulkan`,
 | `axpy`, `scale` | per scalar | per-column scalars from the uniform `vec4<Real>` |
 | `dot_partial`, `norm_partial` | per node + workgroup reduction | |
 | `coarse_weight_update` | per coarse edge | plus `restrict_sum(cols = 1)` for anchors and `inv_diag`, in `GpuBackend::coarse_weight_update` |
+| `apply_csr` | per row | `y = M x` (`flag = 0`) or `y += M x` (`flag = 1`) over a `LevelMatrix` (CSR, ascending columns), entries in stored order — same order as the CPU `csr_row`; used for the coarse AMG operators and the smoothed `P` / `Pᵀ` (WS-C) |
+| `residual_csr` | per row | `r = b − M x` for a square CSR level |
+
+`chebyshev_step_csr` reuses the `chebyshev_step` entry point with the CSR
+level's inverse diagonal bound at binding 9; that diagonal is computed on
+the host (`1 / diag` in `f64`, rounded to the buffer precision, like
+`CpuCsrData`) at `upload_csr` / `update_csr_values`.
 
 All kernels use a grid-stride loop, so sizes above
 `max_compute_workgroups_per_dimension × WG` (65535 × 128 ≈ 8.4M) still

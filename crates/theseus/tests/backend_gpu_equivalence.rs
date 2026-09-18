@@ -9,6 +9,9 @@
 //! lavapipe (`mesa-vulkan-drivers`).
 #![cfg(feature = "gpu")]
 
+#[path = "support/fixtures/mod.rs"]
+mod fixtures;
+
 use theseus::backend::gpu::{members_csr, AdapterPolicy, GpuBackend, GpuContext};
 use theseus::backend::{probe_gpu, Backend};
 use theseus::graph::{BlockVec, CsrAdjacency, LevelGraph};
@@ -1040,6 +1043,392 @@ fn workgroup_sizes_agree() {
                 bound[k],
                 1e-6,
             );
+        }
+    }
+}
+
+// ── CSR kernels (WS-C) against `CpuBackend` ─────────────────────────────
+
+mod csr {
+    use super::*;
+    use theseus::amg::hierarchy::LevelMatrix;
+    use theseus::backend::cpu::CpuBackend;
+
+    /// Random rectangular CSR with 1–4 entries per row.
+    fn random_rect(rng: &mut Rng, nrows: usize, ncols: usize) -> LevelMatrix {
+        let mut rows: Vec<Vec<(u32, f64)>> = (0..nrows)
+            .map(|_| {
+                (0..1 + rng.below(4))
+                    .map(|_| (rng.below(ncols) as u32, rng.range(-1.0, 1.0)))
+                    .collect()
+            })
+            .collect();
+        LevelMatrix::from_rows(nrows, ncols, &mut rows)
+    }
+
+    /// Random square, diagonally dominant CSR (like a coarse AMG operator).
+    fn random_square(rng: &mut Rng, n: usize) -> LevelMatrix {
+        let mut rows: Vec<Vec<(u32, f64)>> = (0..n)
+            .map(|u| {
+                let mut row: Vec<(u32, f64)> = (0..rng.below(6))
+                    .map(|_| (rng.below(n) as u32, -rng.range(0.1, 1.0)))
+                    .collect();
+                row.retain(|e| e.0 as usize != u);
+                let off: f64 = row.iter().map(|e| e.1.abs()).sum();
+                row.push((u as u32, off + rng.range(0.5, 1.5)));
+                row
+            })
+            .collect();
+        LevelMatrix::from_rows(n, n, &mut rows)
+    }
+
+    /// Round the stored values (and refresh the diagonal) so both backends
+    /// see the same operator.
+    fn rounded(precision: Precision, mut m: LevelMatrix) -> LevelMatrix {
+        for v in &mut m.values {
+            *v = round(precision, *v);
+        }
+        m.refresh_diag();
+        m
+    }
+
+    fn cpu_upload(
+        cpu: &CpuBackend,
+        v: &[f64],
+        precision: Precision,
+    ) -> theseus::backend::cpu::CpuBuf {
+        let mut b = cpu.alloc(v.len(), precision);
+        cpu.upload(v, &mut b);
+        b
+    }
+
+    #[test]
+    fn apply_csr_matches_cpu_backend() {
+        let Some(gpu) = backend() else { return };
+        let cpu = CpuBackend::new();
+        let mut rng = Rng::new(31);
+        for precision in precisions(&gpu) {
+            for &(n, nc) in &[(7usize, 3usize), (500, 170), (4099, 1400)] {
+                let p = rounded(precision, random_rect(&mut rng, n, nc));
+                let pt = p.transpose();
+                let a = rounded(precision, random_square(&mut rng, n));
+                let xc = round_all(precision, &rng.vec(nc * 3, -1.0, 1.0));
+                let x = round_all(precision, &rng.vec(n * 3, -1.0, 1.0));
+                let y0 = round_all(precision, &rng.vec(n * 3, -1.0, 1.0));
+
+                let (gp, gpt, ga) = (
+                    gpu.upload_csr(&p, precision),
+                    gpu.upload_csr(&pt, precision),
+                    gpu.upload_csr(&a, precision),
+                );
+                let (cp, cpt, ca) = (
+                    cpu.upload_csr(&p, precision),
+                    cpu.upload_csr(&pt, precision),
+                    cpu.upload_csr(&a, precision),
+                );
+                assert_eq!(gp.nrows(), n);
+                assert_eq!(gp.ncols(), nc);
+                assert_eq!(gp.nnz(), p.nnz());
+                assert_eq!(gp.precision(), precision);
+
+                let mut gxc = gpu.alloc(nc * 3, precision);
+                gpu.upload(&xc, &mut gxc);
+                let mut gx = gpu.alloc(n * 3, precision);
+                gpu.upload(&x, &mut gx);
+                let cxc = cpu_upload(&cpu, &xc, precision);
+                let cx = cpu_upload(&cpu, &x, precision);
+
+                // Prolongation y = P x_c
+                let mut gy = gpu.alloc(n * 3, precision);
+                gpu.apply_csr(&gp, &gxc, &mut gy);
+                let mut cy = cpu.alloc(n * 3, precision);
+                cpu.apply_csr(&cp, &cxc, &mut cy);
+                let mut got = vec![0.0; n * 3];
+                gpu.download(&gy, &mut got);
+                let want = cy.to_vec_f64();
+                assert_close(
+                    &format!("apply_csr P {precision:?} n={n}"),
+                    &got,
+                    &want,
+                    inf_norm(&want),
+                    tol(precision),
+                );
+
+                // y += P x_c
+                let mut gy = gpu.alloc(n * 3, precision);
+                gpu.upload(&y0, &mut gy);
+                gpu.apply_csr_add(&gp, &gxc, &mut gy);
+                let mut cy = cpu_upload(&cpu, &y0, precision);
+                cpu.apply_csr_add(&cp, &cxc, &mut cy);
+                gpu.download(&gy, &mut got);
+                let want = cy.to_vec_f64();
+                assert_close(
+                    &format!("apply_csr_add P {precision:?} n={n}"),
+                    &got,
+                    &want,
+                    inf_norm(&want),
+                    tol(precision),
+                );
+
+                // Restriction r_c = Pᵀ x
+                let mut grc = gpu.alloc(nc * 3, precision);
+                gpu.apply_csr(&gpt, &gx, &mut grc);
+                let mut crc = cpu.alloc(nc * 3, precision);
+                cpu.apply_csr(&cpt, &cx, &mut crc);
+                let mut got_c = vec![0.0; nc * 3];
+                gpu.download(&grc, &mut got_c);
+                let want = crc.to_vec_f64();
+                assert_close(
+                    &format!("apply_csr Pᵀ {precision:?} n={n}"),
+                    &got_c,
+                    &want,
+                    inf_norm(&want),
+                    tol(precision),
+                );
+
+                // Square operator y = A x
+                let mut gya = gpu.alloc(n * 3, precision);
+                gpu.apply_csr(&ga, &gx, &mut gya);
+                let mut cya = cpu.alloc(n * 3, precision);
+                cpu.apply_csr(&ca, &cx, &mut cya);
+                gpu.download(&gya, &mut got);
+                let want = cya.to_vec_f64();
+                assert_close(
+                    &format!("apply_csr A {precision:?} n={n}"),
+                    &got,
+                    &want,
+                    inf_norm(&want),
+                    tol(precision),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn residual_and_chebyshev_csr_match_cpu_backend() {
+        let Some(gpu) = backend() else { return };
+        let cpu = CpuBackend::new();
+        let mut rng = Rng::new(32);
+        for precision in precisions(&gpu) {
+            for &n in &[11usize, 1234] {
+                let a = rounded(precision, random_square(&mut rng, n));
+                let x = round_all(precision, &rng.vec(n * 3, -1.0, 1.0));
+                let b = round_all(precision, &rng.vec(n * 3, -1.0, 1.0));
+                let d0 = round_all(precision, &rng.vec(n * 3, -1.0, 1.0));
+                let alpha = round(precision, 0.7321);
+                let beta = round(precision, -0.4137);
+
+                let ga = gpu.upload_csr(&a, precision);
+                let ca = cpu.upload_csr(&a, precision);
+                let mut gx = gpu.alloc(n * 3, precision);
+                gpu.upload(&x, &mut gx);
+                let mut gb = gpu.alloc(n * 3, precision);
+                gpu.upload(&b, &mut gb);
+                let mut gr = gpu.alloc(n * 3, precision);
+                gpu.residual_csr(&ga, &gx, &gb, &mut gr);
+                let mut cx = cpu_upload(&cpu, &x, precision);
+                let cb = cpu_upload(&cpu, &b, precision);
+                let mut cr = cpu.alloc(n * 3, precision);
+                cpu.residual_csr(&ca, &cx, &cb, &mut cr);
+                let mut got = vec![0.0; n * 3];
+                gpu.download(&gr, &mut got);
+                let want = cr.to_vec_f64();
+                assert_close(
+                    &format!("residual_csr {precision:?} n={n}"),
+                    &got,
+                    &want,
+                    inf_norm(&want).max(inf_norm(&b)),
+                    tol(precision),
+                );
+
+                // Inverse diagonal as uploaded.
+                let inv: Vec<f64> = a.diag.iter().map(|d| round(precision, 1.0 / d)).collect();
+                let mut got_inv = vec![0.0; n];
+                gpu.download(ga.inv_diag(), &mut got_inv);
+                assert_close(
+                    &format!("csr inv_diag {precision:?} n={n}"),
+                    &got_inv,
+                    &inv,
+                    inf_norm(&inv),
+                    tol(precision),
+                );
+
+                // Two Chebyshev steps against the CPU recurrence.
+                let mut gd = gpu.alloc(n * 3, precision);
+                gpu.upload(&d0, &mut gd);
+                gpu.chebyshev_step_csr(&ga, alpha, beta, &gr, &mut gd, &mut gx);
+                gpu.chebyshev_step_csr(&ga, beta, alpha, &gr, &mut gd, &mut gx);
+                let mut cd = cpu_upload(&cpu, &d0, precision);
+                cpu.chebyshev_step_csr(&ca, alpha, beta, &cr, &mut cd, &mut cx);
+                cpu.chebyshev_step_csr(&ca, beta, alpha, &cr, &mut cd, &mut cx);
+                let scale = inf_norm(&x).max(inf_norm(&d0)).max(inf_norm(&want));
+                gpu.download(&gd, &mut got);
+                assert_close(
+                    &format!("chebyshev_step_csr d {precision:?} n={n}"),
+                    &got,
+                    &cd.to_vec_f64(),
+                    scale,
+                    tol(precision),
+                );
+                gpu.download(&gx, &mut got);
+                assert_close(
+                    &format!("chebyshev_step_csr x {precision:?} n={n}"),
+                    &got,
+                    &cx.to_vec_f64(),
+                    scale,
+                    tol(precision),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn update_csr_values_refreshes_operator() {
+        let Some(gpu) = backend() else { return };
+        let cpu = CpuBackend::new();
+        let mut rng = Rng::new(33);
+        for precision in precisions(&gpu) {
+            let n = 900;
+            let a = rounded(precision, random_square(&mut rng, n));
+            let mut a2 = a.clone();
+            for v in &mut a2.values {
+                *v = round(precision, *v * rng.range(0.5, 1.5));
+            }
+            a2.refresh_diag();
+            let x = round_all(precision, &rng.vec(n * 3, -1.0, 1.0));
+            let b = round_all(precision, &rng.vec(n * 3, -1.0, 1.0));
+
+            let mut ga = gpu.upload_csr(&a, precision);
+            let mut gx = gpu.alloc(n * 3, precision);
+            gpu.upload(&x, &mut gx);
+            let mut gb = gpu.alloc(n * 3, precision);
+            gpu.upload(&b, &mut gb);
+            let mut gr = gpu.alloc(n * 3, precision);
+            // Record a residual with the old values, then update: the pending
+            // dispatch must see the old values, the next one the new ones.
+            gpu.residual_csr(&ga, &gx, &gb, &mut gr);
+            gpu.update_csr_values(&a2, &mut ga);
+            let mut gr2 = gpu.alloc(n * 3, precision);
+            gpu.residual_csr(&ga, &gx, &gb, &mut gr2);
+
+            let ca = cpu.upload_csr(&a, precision);
+            let ca2 = cpu.upload_csr(&a2, precision);
+            let cx = cpu_upload(&cpu, &x, precision);
+            let cb = cpu_upload(&cpu, &b, precision);
+            let mut cr = cpu.alloc(n * 3, precision);
+            cpu.residual_csr(&ca, &cx, &cb, &mut cr);
+            let mut cr2 = cpu.alloc(n * 3, precision);
+            cpu.residual_csr(&ca2, &cx, &cb, &mut cr2);
+
+            let mut got = vec![0.0; n * 3];
+            gpu.download(&gr, &mut got);
+            let want = cr.to_vec_f64();
+            assert_close(
+                &format!("residual before update {precision:?}"),
+                &got,
+                &want,
+                inf_norm(&want),
+                tol(precision),
+            );
+            gpu.download(&gr2, &mut got);
+            let want2 = cr2.to_vec_f64();
+            assert_close(
+                &format!("residual after update {precision:?}"),
+                &got,
+                &want2,
+                inf_norm(&want2),
+                tol(precision),
+            );
+            assert!(inf_norm(&want) > 0.0 && want != want2);
+
+            // Chebyshev with the refreshed inverse diagonal.
+            let mut gd = gpu.alloc(n * 3, precision);
+            gpu.chebyshev_step_csr(&ga, 0.5, 0.0, &gr2, &mut gd, &mut gx);
+            let mut cd = cpu.alloc(n * 3, precision);
+            let mut cx2 = cpu_upload(&cpu, &x, precision);
+            cpu.chebyshev_step_csr(&ca2, 0.5, 0.0, &cr2, &mut cd, &mut cx2);
+            gpu.download(&gx, &mut got);
+            let want = cx2.to_vec_f64();
+            assert_close(
+                &format!("chebyshev after update {precision:?}"),
+                &got,
+                &want,
+                inf_norm(&want),
+                tol(precision),
+            );
+        }
+    }
+
+    /// Whole hierarchy: `AmgSolver<GpuBackend>` (not wired into
+    /// `LinearSolver::new` — WS-H) must reproduce the CPU solver's solution
+    /// on a small grid, in every available precision.
+    #[test]
+    fn amg_solver_on_the_gpu_matches_the_cpu_solver() {
+        use theseus::amg::AmgSolver;
+        use theseus::linear_solver::{
+            IterativeSolverOptions, LinearSolverKind, LinearSystemSolver, SolveRequest,
+            TolerancePolicy,
+        };
+
+        let Some(gpu) = backend() else { return };
+        let problem = fixtures::grid::make_recoverable_grid_problem(12);
+        let topology = &problem.topology;
+        let bounds = &problem.bounds;
+        let q = fixtures::smooth_q_star(topology.num_edges);
+        let nf = topology.free_node_indices.len();
+        let mut rng = Rng::new(34);
+        let rhs = rng.vec(nf * 3, -1.0, 1.0);
+
+        for precision in precisions(&gpu) {
+            let options = IterativeSolverOptions {
+                tolerance: TolerancePolicy::Fixed(1e-10),
+                coarsest_size: 8,
+                precondition_precision: Some(precision),
+                ..IterativeSolverOptions::default()
+            };
+            let mut cpu_solver = AmgSolver::cpu(topology, bounds, &options).unwrap();
+            cpu_solver.update(&q).unwrap();
+            let mut x_cpu = vec![0.0; nf * 3];
+            let req = SolveRequest {
+                rhs: &rhs,
+                x0: None,
+                tolerance: 1e-10,
+                max_iterations: 200,
+                cancel: None,
+            };
+            let stats_cpu = cpu_solver.solve(req, &mut x_cpu).unwrap();
+
+            let gpu_ctx = GpuBackend::from_env().unwrap();
+            let mut gpu_solver = AmgSolver::new(gpu_ctx, topology, bounds, &options).unwrap();
+            assert_eq!(gpu_solver.kind(), LinearSolverKind::IterativeGpu);
+            gpu_solver.update(&q).unwrap();
+            assert_eq!(gpu_solver.level_sizes(), cpu_solver.level_sizes());
+            let mut x_gpu = vec![0.0; nf * 3];
+            let stats_gpu = gpu_solver.solve(req, &mut x_gpu).unwrap();
+            assert!(stats_gpu.converged, "{stats_gpu:?}");
+            assert_eq!(stats_gpu.backend, LinearSolverKind::IterativeGpu);
+            assert_close(
+                &format!("AMG solution gpu vs cpu {precision:?}"),
+                &x_gpu,
+                &x_cpu,
+                inf_norm(&x_cpu),
+                1e-8,
+            );
+            let diff = stats_gpu
+                .iterations
+                .iter()
+                .zip(&stats_cpu.iterations)
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            assert!(
+                diff <= 2,
+                "iterations gpu {:?} vs cpu {:?}",
+                stats_gpu.iterations,
+                stats_cpu.iterations
+            );
+            let mem = gpu_solver.memory_bytes();
+            assert!(mem.device_bytes > 0 && mem.host_bytes > 0);
         }
     }
 }
