@@ -338,35 +338,71 @@ renumbered.
 
 ## 3. Algorithms (normative summary; rationale in `AMG_PLAN.md`)
 
-* **Fine operator**: `(A x)_u = anchor_u x_u + Σ_{e ∋ u} q_e (x_u − x_other)`
-  in gather form over `CsrAdjacency`. Fixed nodes never appear in vectors;
-  edges to them contribute to `anchor` and to the right-hand side.
-* **Aggregation**: pairwise matching on strength `s_uv = w_uv / sqrt((anchor_u
-  + Σ_e w_ue)(anchor_v + Σ_e w_ve))`; greedy in decreasing node degree
-  order with a deterministic tie-break (lowest index); unmatched nodes form
-  singletons or join the strongest neighbour's pair if it has < 3 members;
-  two passes ⇒ aggregates of ≤ 4 (configurable). Stop when `n_{l+1} <
-  coarsest_size` or `n_{l+1} > 0.7 n_l`. Aggregation uses the *initial* `q`
-  and is rebuilt only when topology changes; a re-aggregation on large `q`
-  drift is an optional later refinement (measured in WS7 whether it
-  matters).
-* **Coarse weights**: `w_c(U,V) = Σ q_e` over fine edges between aggregates
-  U≠V; `anchor_U = Σ anchor_u`. Precomputed fine-edge lists per coarse edge
-  make this a gather; done per `update(q)` on every level.
-* **Smoother**: Chebyshev degree `d` (default 2) with Jacobi scaling
-  `D⁻¹`, spectral interval `[λ_max/α, λ_max]` (α = 30 in AGMG-style
-  settings; tuned in WS7). `λ_max` from 10 power iterations at setup;
-  re-estimated when `max_e |Δq_e / q_e| > 0.5` since the last estimate, else
-  scaled by the ratio of max weights (cheap upper bound).
-* **Cycle**: K-cycle — at each coarse level two FCG iterations
-  preconditioned by the next-coarser cycle; V-cycle available for
-  comparison. Coarsest: faer LLT via `Factorization`, refactored on
-  `update(q)`.
-* **Outer**: flexible CG (Notay's FCG(1)) on the block of 3 columns, each
-  column with its own scalars; stop each column at `‖r_k‖ ≤ tol ‖b‖`
-  (with `‖b‖` floored at `1e-300`); a column with `b = 0` returns `x = 0`.
+**Revised after Phase 0 (WS-A, `BENCHMARKS.md` "Phase 0").** Plain
+(unsmoothed) aggregation is a no-go: V-cycle iterations grow 3.5–4× from
+8k to 1M edges on every fixture, and the K-cycle that keeps them flat costs
+8–15 operator applications per iteration (2.7–3.8× slower than the direct
+solve at 1M). Smoothed aggregation with a plain V-cycle inside PCG is the
+algorithm this program builds; the K-cycle and FCG are dropped.
+
+* **Fine operator (level 0)**: `(A x)_u = anchor_u x_u + Σ_{e ∋ u} q_e (x_u −
+  x_other)` in gather form over `CsrAdjacency`, matrix-free. Fixed nodes
+  never appear in vectors; edges to them contribute to `anchor` and to the
+  right-hand side.
+* **Aggregation (tentative prolongator P₀)**: pairwise matching on strength
+  `s_uv = w_uv / sqrt((anchor_u + Σ_e w_ue)(anchor_v + Σ_e w_ve))`; greedy
+  in decreasing node degree order with a deterministic tie-break (lowest
+  index); unmatched nodes form singletons or join the strongest neighbour's
+  pair if it has < 3 members; **three passes** (aggregates of ≤ 8; 4 levels
+  at 500k free nodes). Stop when `n_{l+1} < coarsest_size` or `n_{l+1} > 0.7
+  n_l`. Aggregation uses the `q` current at setup and is rebuilt only when
+  topology changes or on explicit drift re-setup (below).
+* **Smoothed prolongator**: `P = (I − ω D⁻¹ A) P₀` with `ω = 4 / (3 λ_max)`
+  (Jacobi-smoothed aggregation). Coarse operators `A_{l+1} = Pᵀ A_l P` are
+  **general sparse SPD matrices**, not graph Laplacians: levels ≥ 1 are
+  stored as block-of-3-compatible CSR (`LevelMatrix { row_ptr, col_idx,
+  values, diag }`); level 0 stays matrix-free. Coarse-edge/column ordering
+  within a row is ascending column index (the convention WS-G's GPU tests
+  assume).
+* **Update on `q` change** (the cost that decides CPU viability; the
+  prototype's naive update took 320–380 ms at 1M edges): the symbolic
+  pattern of every `P` and `A_l` is frozen at setup; `update(q)` refills
+  level-0 weights/anchors (O(ne), `Level0Map::update_weights`) and reruns
+  only the **numeric** triple products `Pᵀ A_l P` level by level with the
+  frozen pattern (row-parallel sparse accumulation, deterministic order).
+  `P`'s values are also frozen (computed from the setup `q`): the
+  prolongator then no longer tracks `q`, which is admissible because `P`
+  only needs to approximate the near-nullspace (constants), which is
+  `q`-independent. Re-setup (new `P`, new pattern) when `max_e |Δq_e /
+  q_e^{setup}| > 2` or when iterations exceed 2× the setup count twice in a
+  row. Target: `update(q)` ≤ 100 ms single-threaded at 1M edges, ≤ 40 ms on
+  4 threads (WS-C acceptance).
+* **Smoother**: Chebyshev **degree 2** with Jacobi scaling `D⁻¹`, spectral
+  interval `[λ_max/α, λ_max]` with **α = 10** (α = 30 costs +40%
+  iterations; degree 3 with α = 30 loses size-independence on the dome).
+  `λ_max` per level from 10 power iterations at setup; re-estimated when
+  `max_e |Δq_e / q_e| > 0.5` since the last estimate, else scaled by the
+  ratio of max weights (cheap upper bound).
+* **Cycle**: V-cycle (one pre- and one post-smoothing sweep) as a fixed
+  SPD preconditioner. Coarsest level: faer LLT via `Factorization`,
+  refactored on `update(q)`; `coarsest_size` default 2,000, with 5–10k plus
+  sparse Cholesky to be tried against the grid z-column growth (+47%
+  between 64 and 448, flat beyond) in WS-C/WS-J.
+* **Outer**: standard PCG on the block of 3 columns, each column with its
+  own scalars; stop each column at `‖r_k‖ ≤ tol ‖b‖` (with `‖b‖` floored
+  at `1e-300`); a column with `b = 0` returns `x = 0`. The `CycleKind::K`
+  option remains in `IterativeSolverOptions` for experiments but is not the
+  default and may be removed by WS-K.
 * **Warm starts**: forward from the previous `x` of the same cache; adjoint
-  from the previous `λ`. First solve of a session cold.
+  from the previous `λ`. First solve of a session cold. Measured gain
+  1.5–2× on x/y, 1.3–1.4× on the z column that sets the time.
+* **Expected standing versus `Direct` (single thread, 1M edges, from
+  Phase 0)**: SA-PCG solve 1.0–1.55× direct cold, 0.75–1.2× warm, before
+  the update cost. A CPU win therefore depends on (i) the frozen-pattern
+  numeric update above, (ii) 4-thread scaling of the memory-bound kernels
+  (WS-B infrastructure), and (iii) the adjoint reusing the same hierarchy.
+  The GPU backend is where the large factor is expected; the crossover
+  search (§5.3) decides where each pays and the toggle stays explicit.
 * **Tolerance policy**: `Adaptive { floor = 1e-10, ceiling = 1e-6, factor =
   1e-2 }`: `tol_k = clamp(factor · ‖g⁺_k‖ / ‖g⁺_0‖, floor, ceiling)` where
   `g⁺` is the projected gradient (bounded) or gradient (unbounded) from the
@@ -773,7 +809,7 @@ noting it in the report.
 | milestone | done when |
 |---|---|
 | M0 Interfaces | **reached** (`9a5f52d`): WS-I merged; `DirectSolver` bitwise-equal to the cache path, `factor_and_solve` shares its refactor code; full `Box<dyn LinearSystemSolver>` dispatch inside `FdmCache` deferred to WS-D |
-| M1 Phase-0 verdict | WS-A report merged with a go/no-go and parameter recommendation |
+| M1 Phase-0 verdict | **reached** (`e3d0cf6`): plain aggregation no-go; smoothed aggregation + V-cycle PCG adopted (§3); wall-time criterion not met single-threaded (2.5–3.6× direct per evaluation at 1M) — CPU viability hinges on the frozen-pattern update and 4-thread kernels, GPU on WS-H |
 | M2 Infrastructure | **reached** — WS-B, WS-E, WS-F merged (*WS-B done*, `16da146`; *WS-F done*, `cb562e6`: toggle, options and probe through FFI/C#/Grasshopper, iterative kinds return code `-4`); toggle visible in Grasshopper returning "not yet available" for iterative kinds; sweep tooling produces a `Direct` cost model. *WS-E done* (`6df10ba`): fixtures, JSON harness, `scripts/bench_sweep.py`, `crossover_fit.py`, first `Direct` sweep 10k–1M on the CI VM with fits at RMS < 15% (`benchmarks/reports/`) |
 | M3 CPU iterative | WS-C, WS-D merged; `IterativeCpu` passes all contract tests; `bench_scale` numbers at 224–708 recorded |
 | M4 GPU kernels | WS-G merged (`1c51afc`); kernels validated under lavapipe (17/17, f32 + f64); Windows/macOS software-adapter runs pending the CI job, real-GPU validation pending WS-H machines |
@@ -792,7 +828,8 @@ for a future `Auto` decision.
 
 | risk | signal | mitigation / kill criterion |
 |---|---|---|
-| Plain aggregation not grid-independent on real networks | WS-A iteration counts grow > 50% from 64 to 708 on irregular fixture | switch to smoothed aggregation (P = (I − ωD⁻¹A)P₀); coarse operators stop being graph Laplacians, so `hierarchy.rs` gains a general sparse level type; decide before WS-C |
+| ~~Plain aggregation not grid-independent~~ **materialised** (WS-A: 3.5–4× growth) | — | switched to smoothed aggregation (§3); new risk below |
+| SA hierarchy update too slow per `q` change | `update(q)` > 100 ms single-threaded at 1M after WS-C | frozen-pattern numeric triple product; coarse-level updates every k-th evaluation with the fine level exact (preconditioner staleness is harmless for PCG correctness, only iteration counts move); kill criterion: if `IterativeCpu` per-evaluation time on 4 threads exceeds `Direct` at 1M on all fixtures after WS-C+WS-D, the CPU backend is kept for correctness/reference only and the program's performance case rests on `IterativeGpu` |
 | Inexact gradients stall L-BFGS-B line search | evaluations per iteration > 2 with `IterativeCpu` vs `Direct` on the same fixture | tighten `Adaptive.factor`; `Fixed(1e-10)` fallback; report in WS-D |
 | `f32` preconditioner degrades convergence | GPU iterations > 1.5× CPU `f64` iterations | `f64` preconditioner where `SHADER_F64`; mixed-precision smoothing only on fine levels |
 | Adapter limits (`max_storage_buffer_binding_size` < vector size) | probe on Intel iGPU / Metal | split bindings; document maximum size per adapter class |
@@ -871,3 +908,14 @@ for a future `Auto` decision.
   `hierarchy.rs` must emit exactly that; (4) per-dispatch bind-group and
   `write_buffer` costs are removed in WS-H once a K-cycle is measured;
   (5) Windows/macOS adapter limit rows are filled from the CI job output.
+* 2026-09-18 — WS-A landed (`e3d0cf6`, `examples/amg_prototype.rs`, Phase-0
+  section in `BENCHMARKS.md`). Verdict: plain aggregation no-go; smoothed
+  aggregation (`P = (I − ωD⁻¹A)P₀`, 3 passes, Chebyshev 2, α = 10) with a
+  V-cycle inside PCG is size-independent within +30% on irregular/dome
+  and +25% (x/y) / +47% (z) on the grid; K-cycle and FCG dropped. §3
+  rewritten accordingly; `AMG_PLAN.md` budgets ("≈10 operator-equivalents
+  per iteration", "O(nnz) coarse update", "parity single-threaded at 1M")
+  are superseded by the measured numbers. Consequences for WS-C: general
+  sparse `LevelMatrix` for levels ≥ 1, frozen-pattern numeric update as
+  the primary optimisation target; for WS-H: a CSR SpMV kernel replaces
+  `coarse_weight_update` for levels ≥ 1.
