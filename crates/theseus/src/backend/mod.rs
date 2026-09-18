@@ -13,8 +13,12 @@
 //! kernel allocates. Scalars that leave the device (`dot3`, `norm3`) are
 //! returned as `f64` regardless of the buffer precision.
 
+pub mod cpu;
+
 use crate::graph::LevelGraph;
 use crate::linear_solver::Precision;
+
+pub use cpu::CpuBackend;
 
 /// Marker for the compute backend an iterative solver runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
