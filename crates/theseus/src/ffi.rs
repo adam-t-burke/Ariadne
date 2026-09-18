@@ -4402,13 +4402,41 @@ mod linear_solver_ffi_tests {
     }
 
     #[test]
-    fn iterative_kinds_fail_loudly_before_solving_and_direct_still_works() {
+    fn iterative_cpu_solves_through_the_ffi_and_reports_iterations() {
         unsafe {
             let handle = tiny_handle();
-            for kind in [
-                LinearSolverKind::IterativeCpu,
-                LinearSolverKind::IterativeGpu,
-            ] {
+            assert_eq!(
+                theseus_set_linear_solver(handle, LinearSolverKind::IterativeCpu.as_i32()),
+                0
+            );
+            assert_eq!(forward(handle), 0, "{}", last_error());
+            let mut out = TheseusLinearSolverStats::default();
+            assert_eq!(theseus_get_linear_solver_stats(handle, &mut out), 0);
+            assert_eq!(out.backend_kind, LinearSolverKind::IterativeCpu.as_i32());
+            assert!(out.solves >= 1, "solves = {}", out.solves);
+            assert!(
+                out.iterations_total >= 1,
+                "iterative solves report iterations"
+            );
+            assert_eq!(out.converged_all, 1);
+
+            assert_eq!(optimize(handle), 0, "{}", last_error());
+            assert_eq!(theseus_get_linear_solver_stats(handle, &mut out), 0);
+            assert!(
+                out.solves >= 2,
+                "forward + adjoint per evaluation: {}",
+                out.solves
+            );
+            assert_eq!(out.converged_all, 1);
+            theseus_free(handle);
+        }
+    }
+
+    #[test]
+    fn unbuilt_iterative_kinds_fail_loudly_before_solving_and_direct_still_works() {
+        unsafe {
+            let handle = tiny_handle();
+            for kind in [LinearSolverKind::IterativeGpu] {
                 assert_eq!(theseus_set_linear_solver(handle, kind.as_i32()), 0);
 
                 assert_eq!(forward(handle), THESEUS_ERR_ITERATIVE_UNSUPPORTED);

@@ -177,10 +177,16 @@ fn factory_builds_direct_and_refuses_iterative_kinds() {
     .unwrap();
     assert_eq!(solver.kind(), LinearSolverKind::Direct);
 
-    for kind in [
+    let cpu = LinearSolver::new(
         LinearSolverKind::IterativeCpu,
-        LinearSolverKind::IterativeGpu,
-    ] {
+        &problem.topology,
+        &problem.bounds,
+        &options,
+    )
+    .expect("IterativeCpu is built");
+    assert_eq!(cpu.kind(), LinearSolverKind::IterativeCpu);
+
+    for kind in [LinearSolverKind::IterativeGpu] {
         match LinearSolver::new(kind, &problem.topology, &problem.bounds, &options) {
             Err(TheseusError::IterativeSolverUnsupported(msg)) => {
                 assert!(msg.contains("not yet available"), "{msg}");
