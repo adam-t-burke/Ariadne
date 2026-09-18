@@ -5,7 +5,6 @@ use crate::types::{
     TheseusError,
 };
 use ndarray::Array2;
-use rayon::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 fn check_cancelled(cancel: Option<&AtomicBool>) -> Result<(), TheseusError> {
@@ -61,14 +60,15 @@ pub fn update_fixed_positions(
 /// Zero-allocation in-place update of A's values from current q.
 /// A = Cn^T diag(q) Cn  via the precomputed `q_to_nz` mapping.
 pub fn assemble_a(cache: &mut FdmCache) {
-    for v in cache.a_matrix.values.iter_mut() {
-        *v = 0.0;
-    }
-    for (k, entries) in cache.q_to_nz.entries.iter().enumerate() {
-        let qk = cache.q[k];
-        for &(nz_idx, coeff) in entries {
-            cache.a_matrix.values[nz_idx] += qk * coeff;
-        }
+    let map = &cache.q_to_nz;
+    let q = &cache.q;
+    for (nz, value) in cache.a_matrix.values.iter_mut().enumerate() {
+        let range = map.nz_offsets[nz]..map.nz_offsets[nz + 1];
+        *value = map.edge[range.clone()]
+            .iter()
+            .zip(&map.coeff[range])
+            .map(|(&k, &c)| q[k as usize] * c)
+            .sum();
     }
 }
 
@@ -78,36 +78,29 @@ pub fn assemble_a(cache: &mut FdmCache) {
 
 /// Build the right-hand side for A x = b.
 ///
-/// Steps:
-///   1. Copy fixed-node positions into dense buffer `nf_fixed`
-///   2. cf_nf  = Cf * nf_fixed        (ne × 3)
-///   3. q_cf_nf = diag(q) * cf_nf     (ne × 3)
-///   4. rhs    = Pn − Cn^T * q_cf_nf  (nn_free × 3)
+///   b = Pn − Cnᵀ diag(q) Cf Nf_fixed
+///
+/// Only edges with exactly one fixed endpoint have a nonzero entry in
+/// `diag(q) Cf Nf_fixed`, so the product is accumulated directly from the
+/// precomputed `boundary_edges` list: each such edge adds `q_k · x_fixed` to
+/// its free endpoint.
 pub fn assemble_rhs(cache: &mut FdmCache, problem: &Problem) {
-    let fixed = &problem.topology.fixed_node_indices;
-
-    // 1. nf_fixed dense buffer
-    for (i, &node) in fixed.iter().enumerate() {
-        for d in 0..3 {
-            cache.nf_fixed[[i, d]] = cache.nf[[node, d]];
-        }
-    }
-
-    // 2. cf_nf = Cf * nf_fixed   (sparse × dense, column by column)
-    spmm_into(&cache.cf, &cache.nf_fixed, &mut cache.cf_nf);
-
-    // 3. q_cf_nf = diag(q) * cf_nf
-    let ne = cache.q.len();
-    for i in 0..ne {
-        let qi = cache.q[i];
-        for d in 0..3 {
-            cache.q_cf_nf[[i, d]] = qi * cache.cf_nf[[i, d]];
-        }
-    }
-
-    // 4. rhs = Pn − Cn^T * q_cf_nf
+    let _ = problem;
     cache.rhs.assign(&cache.pn);
-    spmm_sub_into(&cache.cn_t, &cache.q_cf_nf, &mut cache.rhs);
+    let nf = cache
+        .nf
+        .as_slice()
+        .expect("node positions must be contiguous row-major");
+    let rhs = cache
+        .rhs
+        .as_slice_mut()
+        .expect("rhs must be contiguous row-major");
+    for &(k, free, fixed_node) in &cache.boundary_edges {
+        let qk = cache.q[k];
+        for d in 0..3 {
+            rhs[free * 3 + d] += qk * nf[fixed_node * 3 + d];
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -269,71 +262,41 @@ fn solve_fdm_cancellable(
 pub fn compute_geometry(cache: &mut FdmCache, problem: &Problem) {
     let ne = problem.topology.num_edges;
 
-    // Per-edge member length and force (embarrassingly parallel — no write conflicts)
-    let nf = &cache.nf;
-    let edge_starts = &cache.edge_starts;
-    let edge_ends = &cache.edge_ends;
-    let q = &cache.q;
+    // One sequential pass over the edges: lengths and forces per edge, and the
+    // nodal reactions scattered to both endpoints. At 100k edges this is well
+    // under a millisecond and deterministic; the previous rayon fold allocated
+    // an nn×3 buffer per work split, which cost more than the arithmetic.
+    let nf = cache
+        .nf
+        .as_slice()
+        .expect("node positions must be contiguous row-major");
+    let reactions = cache
+        .reactions
+        .as_slice_mut()
+        .expect("reactions must be contiguous row-major");
+    reactions.fill(0.0);
 
-    cache
-        .member_lengths
-        .par_iter_mut()
-        .zip(cache.member_forces.par_iter_mut())
-        .enumerate()
-        .for_each(|(i, (len_out, force_out))| {
-            let s = edge_starts[i];
-            let e = edge_ends[i];
+    for i in 0..ne {
+        let s = cache.edge_starts[i];
+        let e = cache.edge_ends[i];
+        let qi = cache.q[i];
 
-            let dx = nf[[e, 0]] - nf[[s, 0]];
-            let dy = nf[[e, 1]] - nf[[s, 1]];
-            let dz = nf[[e, 2]] - nf[[s, 2]];
+        let dx = nf[e * 3] - nf[s * 3];
+        let dy = nf[e * 3 + 1] - nf[s * 3 + 1];
+        let dz = nf[e * 3 + 2] - nf[s * 3 + 2];
 
-            let len_sq = dx * dx + dy * dy + dz * dz;
-            let len = len_sq.max(0.0).sqrt();
-            *len_out = len;
-            *force_out = q[i] * len;
-        });
+        let len_sq = dx * dx + dy * dy + dz * dz;
+        let len = len_sq.max(0.0).sqrt();
+        cache.member_lengths[i] = len;
+        cache.member_forces[i] = qi * len;
 
-    // Reactions: fold/reduce per-thread buffers to avoid write conflicts
-    let nn = cache.reactions.nrows();
-    let reaction_sum = (0..ne)
-        .into_par_iter()
-        .fold(
-            || vec![0.0f64; nn * 3],
-            |mut buf, i| {
-                let s = edge_starts[i];
-                let e = edge_ends[i];
-                let qi = q[i];
-
-                let rx = (nf[[e, 0]] - nf[[s, 0]]) * qi;
-                let ry = (nf[[e, 1]] - nf[[s, 1]]) * qi;
-                let rz = (nf[[e, 2]] - nf[[s, 2]]) * qi;
-
-                buf[s * 3] += rx;
-                buf[s * 3 + 1] += ry;
-                buf[s * 3 + 2] += rz;
-
-                buf[e * 3] -= rx;
-                buf[e * 3 + 1] -= ry;
-                buf[e * 3 + 2] -= rz;
-
-                buf
-            },
-        )
-        .reduce(
-            || vec![0.0f64; nn * 3],
-            |mut a, b| {
-                for (ai, bi) in a.iter_mut().zip(b.iter()) {
-                    *ai += *bi;
-                }
-                a
-            },
-        );
-
-    for node in 0..nn {
-        cache.reactions[[node, 0]] = reaction_sum[node * 3];
-        cache.reactions[[node, 1]] = reaction_sum[node * 3 + 1];
-        cache.reactions[[node, 2]] = reaction_sum[node * 3 + 2];
+        let (rx, ry, rz) = (dx * qi, dy * qi, dz * qi);
+        reactions[s * 3] += rx;
+        reactions[s * 3 + 1] += ry;
+        reactions[s * 3 + 2] += rz;
+        reactions[e * 3] -= rx;
+        reactions[e * 3 + 1] -= ry;
+        reactions[e * 3 + 2] -= rz;
     }
 }
 
@@ -1103,45 +1066,6 @@ pub fn solve_fdm_with_loads_cancellable(
 
     check_cancelled(cancel)?;
     Ok(())
-}
-
-// ─────────────────────────────────────────────────────────────
-//  Sparse × dense helpers
-// ─────────────────────────────────────────────────────────────
-
-use crate::sparse::SparseColMatOwned;
-
-/// out = A * B   where A is CSC (m × k), B is dense (k × 3), out is dense (m × 3).
-fn spmm_into(a: &SparseColMatOwned, b: &Array2<f64>, out: &mut Array2<f64>) {
-    out.fill(0.0);
-    let ncols_a = a.ncols;
-    for col in 0..ncols_a {
-        let start = a.col_ptrs[col] as usize;
-        let end_ = a.col_ptrs[col + 1] as usize;
-        for nz in start..end_ {
-            let row = a.row_indices[nz] as usize;
-            let val = a.values[nz];
-            for d in 0..3 {
-                out[[row, d]] += val * b[[col, d]];
-            }
-        }
-    }
-}
-
-/// out -= A * B   (subtract sparse-dense product from existing out).
-fn spmm_sub_into(a: &SparseColMatOwned, b: &Array2<f64>, out: &mut Array2<f64>) {
-    let ncols_a = a.ncols;
-    for col in 0..ncols_a {
-        let start = a.col_ptrs[col] as usize;
-        let end_ = a.col_ptrs[col + 1] as usize;
-        for nz in start..end_ {
-            let row = a.row_indices[nz] as usize;
-            let val = a.values[nz];
-            for d in 0..3 {
-                out[[row, d]] -= val * b[[col, d]];
-            }
-        }
-    }
 }
 
 #[cfg(test)]

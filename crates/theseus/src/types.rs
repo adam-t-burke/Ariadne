@@ -62,7 +62,15 @@ impl From<faer_sparse::FaerError> for TheseusError {
 }
 
 /// Resize a faer workspace buffer to satisfy the required stack size.
+/// Grow-only scratch buffer for faer. Buffers are over-aligned so a larger
+/// buffer from an earlier request can always be reused for a smaller one.
 fn ensure_pod_stack(stack: &mut dyn_stack::GlobalPodBuffer, req: dyn_stack::StackReq) {
+    const ALIGN: usize = 4096;
+    if stack.len() >= req.size_bytes() {
+        return;
+    }
+    let req =
+        dyn_stack::StackReq::new_aligned::<u8>(req.size_bytes(), req.align_bytes().max(ALIGN));
     *stack = dyn_stack::GlobalPodBuffer::new(req);
 }
 
@@ -699,8 +707,44 @@ pub struct Problem {
 /// Pre-computed contribution of edge `k` to the CSC `nzval` array of A.
 #[derive(Debug, Clone)]
 pub struct QToNz {
-    /// For each edge k: list of (nz_index_in_A_data, coefficient)
-    pub entries: Vec<Vec<(usize, f64)>>,
+    /// CSR-style offsets into `edge`/`coeff`, one range per nonzero of A.
+    pub nz_offsets: Vec<usize>,
+    /// Edge contributing to the nonzero.
+    pub edge: Vec<u32>,
+    /// Coefficient of that edge's force density in the nonzero.
+    pub coeff: Vec<f64>,
+}
+
+impl QToNz {
+    /// Build the gather map from per-edge `(nz_index, coefficient)` lists.
+    pub fn from_edge_entries(entries: &[Vec<(usize, f64)>], nnz: usize) -> Self {
+        let mut counts = vec![0usize; nnz + 1];
+        for list in entries {
+            for &(nz, _) in list {
+                counts[nz + 1] += 1;
+            }
+        }
+        for i in 0..nnz {
+            counts[i + 1] += counts[i];
+        }
+        let total = counts[nnz];
+        let mut fill = counts.clone();
+        let mut edge = vec![0u32; total];
+        let mut coeff = vec![0.0; total];
+        for (k, list) in entries.iter().enumerate() {
+            for &(nz, c) in list {
+                let slot = fill[nz];
+                fill[nz] += 1;
+                edge[slot] = k as u32;
+                coeff[slot] = c;
+            }
+        }
+        Self {
+            nz_offsets: counts,
+            edge,
+            coeff,
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -792,7 +836,7 @@ impl Factorization {
         match strategy {
             FactorizationStrategy::Cholesky => {
                 let req = symbolic
-                    .factorize_numeric_llt_req::<f64>(Parallelism::Rayon(0))
+                    .factorize_numeric_llt_req::<f64>(Parallelism::None)
                     .unwrap();
                 ensure_pod_stack(stack, req);
                 symbolic.factorize_numeric_llt(
@@ -800,14 +844,14 @@ impl Factorization {
                     a_ref,
                     Side::Upper,
                     LltRegularization::default(),
-                    Parallelism::Rayon(0),
+                    Parallelism::None,
                     PodStack::new(stack),
                 )?;
                 Ok(Self::Cholesky { symbolic, l_values })
             }
             FactorizationStrategy::LDL => {
                 let req = symbolic
-                    .factorize_numeric_ldlt_req::<f64>(false, Parallelism::Rayon(0))
+                    .factorize_numeric_ldlt_req::<f64>(false, Parallelism::None)
                     .unwrap();
                 ensure_pod_stack(stack, req);
                 symbolic.factorize_numeric_ldlt(
@@ -815,7 +859,7 @@ impl Factorization {
                     a_ref,
                     Side::Upper,
                     LdltRegularization::default(),
-                    Parallelism::Rayon(0),
+                    Parallelism::None,
                     PodStack::new(stack),
                 );
                 if l_values.iter().any(|v| !v.is_finite()) {
@@ -844,7 +888,7 @@ impl Factorization {
         match self {
             Self::Cholesky { symbolic, l_values } => {
                 let req = symbolic
-                    .factorize_numeric_llt_req::<f64>(Parallelism::Rayon(0))
+                    .factorize_numeric_llt_req::<f64>(Parallelism::None)
                     .unwrap();
                 ensure_pod_stack(stack, req);
                 symbolic.factorize_numeric_llt(
@@ -852,14 +896,14 @@ impl Factorization {
                     a_ref,
                     Side::Upper,
                     LltRegularization::default(),
-                    Parallelism::Rayon(0),
+                    Parallelism::None,
                     PodStack::new(stack),
                 )?;
                 Ok(())
             }
             Self::Ldl { symbolic, l_values } => {
                 let req = symbolic
-                    .factorize_numeric_ldlt_req::<f64>(false, Parallelism::Rayon(0))
+                    .factorize_numeric_ldlt_req::<f64>(false, Parallelism::None)
                     .unwrap();
                 ensure_pod_stack(stack, req);
                 symbolic.factorize_numeric_ldlt(
@@ -867,7 +911,7 @@ impl Factorization {
                     a_ref,
                     Side::Upper,
                     LdltRegularization::default(),
-                    Parallelism::Rayon(0),
+                    Parallelism::None,
                     PodStack::new(stack),
                 );
                 if l_values.iter().any(|v| !v.is_finite()) {
@@ -881,8 +925,56 @@ impl Factorization {
         }
     }
 
-    /// Solve A X = B in place. `rhs` and `x` are (n × ncols) row-major ndarray arrays.
+    /// Solve A X = B. `rhs` and `x` are (n × ncols) row-major ndarray arrays.
+    ///
+    /// One or three right-hand sides take the specialised multi-RHS path in
+    /// [`crate::factor_solve`] when `workspace` holds at least `2 * n * ncols`
+    /// values (as `FdmCache::solve_workspace` does); anything else goes
+    /// through faer's generic solver.
     pub fn solve_into(
+        &self,
+        rhs: &Array2<f64>,
+        x: &mut Array2<f64>,
+        workspace: &mut [f64],
+        stack: &mut dyn_stack::GlobalPodBuffer,
+    ) -> Result<(), TheseusError> {
+        let n = rhs.nrows();
+        let ncols = rhs.ncols();
+        assert_eq!(x.nrows(), n);
+        assert_eq!(x.ncols(), ncols);
+
+        if workspace.len() >= 2 * n * ncols {
+            if let (Some(rhs_slice), Some(x_slice)) = (rhs.as_slice(), x.as_slice_mut()) {
+                match ncols {
+                    3 => {
+                        self.solve_slices::<3>(rhs_slice, x_slice, workspace);
+                        return Ok(());
+                    }
+                    1 => {
+                        self.solve_slices::<1>(rhs_slice, x_slice, workspace);
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self.solve_into_faer(rhs, x, workspace, stack)
+    }
+
+    /// Specialised solve on row-major `n × K` slices; `work` needs `2 * n * K` values.
+    pub fn solve_slices<const K: usize>(&self, rhs: &[f64], x: &mut [f64], work: &mut [f64]) {
+        use crate::factor_solve::{solve, Kind};
+        match self {
+            Self::Cholesky { symbolic, l_values } => {
+                solve::<K>(symbolic, l_values, Kind::Llt, rhs, x, work)
+            }
+            Self::Ldl { symbolic, l_values } => {
+                solve::<K>(symbolic, l_values, Kind::Ldlt, rhs, x, work)
+            }
+        }
+    }
+
+    fn solve_into_faer(
         &self,
         rhs: &Array2<f64>,
         x: &mut Array2<f64>,
@@ -895,8 +987,6 @@ impl Factorization {
 
         let n = rhs.nrows();
         let ncols = rhs.ncols();
-        assert_eq!(x.nrows(), n);
-        assert_eq!(x.ncols(), ncols);
         assert!(workspace.len() >= n * ncols);
 
         // Pack row-major ndarray RHS into column-major faer layout.
@@ -916,7 +1006,7 @@ impl Factorization {
                 llt.solve_in_place_with_conj(
                     Conj::No,
                     mat.as_mut(),
-                    Parallelism::Rayon(0),
+                    Parallelism::None,
                     PodStack::new(stack),
                 );
             }
@@ -925,7 +1015,7 @@ impl Factorization {
                 ldlt.solve_in_place_with_conj(
                     Conj::No,
                     mat.as_mut(),
-                    Parallelism::Rayon(0),
+                    Parallelism::None,
                     PodStack::new(stack),
                 );
             }
@@ -944,14 +1034,14 @@ impl Factorization {
     pub fn solve(
         &self,
         rhs: &[f64],
-        workspace: &mut [f64],
-        stack: &mut dyn_stack::GlobalPodBuffer,
+        _workspace: &mut [f64],
+        _stack: &mut dyn_stack::GlobalPodBuffer,
     ) -> Result<Vec<f64>, TheseusError> {
         let n = rhs.len();
-        let rhs_arr = Array2::from_shape_fn((n, 1), |(i, _)| rhs[i]);
-        let mut x = Array2::zeros((n, 1));
-        self.solve_into(&rhs_arr, &mut x, workspace, stack)?;
-        Ok((0..n).map(|i| x[[i, 0]]).collect())
+        let mut x = vec![0.0; n];
+        let mut work = vec![0.0; 2 * n];
+        self.solve_slices::<1>(rhs, &mut x, &mut work);
+        Ok(x)
     }
 
     /// The strategy this factorization was built with.
@@ -989,11 +1079,9 @@ pub struct FdmCache {
     /// Per-node lists of incident edge indices (for reaction gradients).
     pub node_incident_edges: Vec<Vec<usize>>,
 
-    /// Cn  (ne × nn_free)  and  Cf  (ne × nn_fixed)  stored as CSC
-    pub cn: SparseColMatOwned,
-    /// Precomputed Cn^T  (nn_free × ne) — topology is fixed.
-    pub cn_t: SparseColMatOwned,
-    pub cf: SparseColMatOwned,
+    /// Edges with exactly one fixed endpoint, as `(edge, free row, fixed node)`.
+    /// Only these edges contribute to the right-hand side.
+    pub boundary_edges: Vec<(usize, usize, usize)>,
 
     // ── Primal buffers ─────────────────────────────────────
     /// Free-node positions         (nn_free × 3, column-major)
@@ -1014,12 +1102,9 @@ pub struct FdmCache {
     pub member_forces: Vec<f64>,
     pub reactions: Array2<f64>, // nn × 3
 
-    // ── Intermediate RHS buffers ───────────────────────────
-    pub cf_nf: Array2<f64>,    // ne × 3
-    pub q_cf_nf: Array2<f64>,  // ne × 3
-    pub pn: Array2<f64>,       // nn_free × 3  (copy of free-node loads)
-    pub nf: Array2<f64>,       // nn × 3       (full node positions)
-    pub nf_fixed: Array2<f64>, // nn_fixed × 3
+    // ── RHS buffers ────────────────────────────────────────
+    pub pn: Array2<f64>, // nn_free × 3  (copy of free-node loads)
+    pub nf: Array2<f64>, // nn × 3       (full node positions)
 
     // ── RHS buffer (reusable for linear solve input) ───────
     pub rhs: Array2<f64>, // nn_free × 3
@@ -1058,7 +1143,6 @@ impl FdmCache {
         let ne = topo.num_edges;
         let nn = topo.num_nodes;
         let nn_free = topo.free_node_indices.len();
-        let nn_fixed = topo.fixed_node_indices.len();
 
         // ── 1. Build A's sparsity pattern from Cn^T * Cn ──
         let cn = &topo.free_incidence; // ne × nn_free
@@ -1130,10 +1214,22 @@ impl FdmCache {
         // ── 5. Factorization strategy ─────────────────────
         let strategy = FactorizationStrategy::from_bounds(&problem.bounds);
 
+        // ── 5b. Edges with one free and one fixed endpoint ─
+        // These are the only edges that contribute to the right-hand side
+        // b = Pn − Cnᵀ diag(q) Cf Nf_fixed.
+        let mut boundary_edges = Vec::new();
+        for k in 0..ne {
+            let (s_node, e_node) = (edge_starts[k], edge_ends[k]);
+            match (node_to_free_idx[s_node], node_to_free_idx[e_node]) {
+                (Some(free), None) => boundary_edges.push((k, free, e_node)),
+                (None, Some(free)) => boundary_edges.push((k, free, s_node)),
+                _ => {}
+            }
+        }
+
+        let q_to_nz = QToNz::from_edge_entries(&q_to_nz_entries, a_matrix.values.len());
+
         // ── 6. Pre-allocate all buffers ───────────────────
-        let cf = topo.fixed_incidence.clone();
-        let cn_owned = topo.free_incidence.clone();
-        let cn_t = cn_owned.transpose();
 
         let sw_mu = match &problem.self_weight {
             Some(SelfWeightParams::Prescribed {
@@ -1145,16 +1241,12 @@ impl FdmCache {
         Ok(FdmCache {
             a_matrix,
             factorization: None,
-            q_to_nz: QToNz {
-                entries: q_to_nz_entries,
-            },
+            q_to_nz,
+            boundary_edges,
             edge_starts,
             edge_ends,
             node_to_free_idx,
             node_incident_edges,
-            cn: cn_owned,
-            cn_t,
-            cf,
             x: Array2::zeros((nn_free, 3)),
             lambda: Array2::zeros((nn_free, 3)),
             grad_x: Array2::zeros((nn_free, 3)),
@@ -1164,11 +1256,8 @@ impl FdmCache {
             member_lengths: vec![0.0; ne],
             member_forces: vec![0.0; ne],
             reactions: Array2::zeros((nn, 3)),
-            cf_nf: Array2::zeros((ne, 3)),
-            q_cf_nf: Array2::zeros((ne, 3)),
             pn: problem.free_node_loads.clone(),
             nf: Array2::zeros((nn, 3)),
-            nf_fixed: Array2::zeros((nn_fixed, 3)),
             rhs: Array2::zeros((nn_free, 3)),
             strategy,
             pn_base: problem.free_node_loads.clone(),
@@ -1177,7 +1266,7 @@ impl FdmCache {
             pn_prev: Array2::zeros((nn_free, 3)),
             softmax_scratch: Vec::new(),
             softmax_scratch_b: Vec::new(),
-            solve_workspace: vec![0.0; nn_free * 3],
+            solve_workspace: vec![0.0; nn_free * 6],
             factor_stack: dyn_stack::GlobalPodBuffer::new(dyn_stack::StackReq::empty()),
             solve_stack: dyn_stack::GlobalPodBuffer::new(dyn_stack::StackReq::empty()),
         })
