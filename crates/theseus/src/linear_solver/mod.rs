@@ -22,12 +22,14 @@
 //! `AdapterPreference`) are stable `i32` values and must not be renumbered.
 
 pub mod direct;
+pub mod tolerance;
 
 use crate::types::{Bounds, NetworkTopology, TheseusError};
 use std::fmt;
 use std::sync::atomic::AtomicBool;
 
 pub use direct::DirectSolver;
+pub use tolerance::ToleranceSchedule;
 
 // ─────────────────────────────────────────────────────────────
 //  Solver kind (the toggle)
