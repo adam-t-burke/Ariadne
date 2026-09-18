@@ -109,23 +109,10 @@ fn main() {
             acc[1] += ms(t);
             // factor + solve are fused in factor_and_solve; time the refactor separately.
             let t = Instant::now();
-            {
-                let fac = cache.factorization.as_mut().unwrap();
-                fac.update(&cache.a_matrix, &mut cache.factor_stack)
-                    .unwrap();
-            }
+            cache.direct_solver_mut().unwrap().factor().unwrap();
             acc[2] += ms(t);
             let t = Instant::now();
-            {
-                let fac = cache.factorization.as_ref().unwrap();
-                fac.solve_into(
-                    &cache.rhs,
-                    &mut cache.x,
-                    &mut cache.solve_workspace,
-                    &mut cache.solve_stack,
-                )
-                .unwrap();
-            }
+            theseus::fdm::solve_forward_system(&mut cache, None).unwrap();
             acc[3] += ms(t);
             for (i, &node) in problem.topology.free_node_indices.iter().enumerate() {
                 for d in 0..3 {

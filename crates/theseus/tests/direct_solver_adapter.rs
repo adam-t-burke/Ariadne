@@ -48,7 +48,7 @@ fn assert_adapter_matches_cache(problem: &Problem, qs: &[Vec<f64>], perturbation
         assert_eq!(stats.backend, LinearSolverKind::Direct);
         assert!(stats.converged);
         assert_eq!(stats.iterations, [0; 3]);
-        assert_eq!(solver.strategy(), cache.strategy);
+        assert_eq!(Some(solver.strategy()), cache.strategy());
         assert_eq!(
             x,
             cache.x.as_slice().unwrap(),
@@ -57,21 +57,14 @@ fn assert_adapter_matches_cache(problem: &Problem, qs: &[Vec<f64>], perturbation
 
         // The adjoint system reuses the same factorization with another RHS.
         let rhs2: Vec<f64> = (0..n * 3).map(|i| ((i % 7) as f64) - 3.0).collect();
-        let rhs2_arr = Array2::from_shape_vec((n, 3), rhs2.clone()).unwrap();
-        let mut expected = Array2::zeros((n, 3));
+        let mut expected = vec![0.0; n * 3];
+        let mut work = vec![0.0; n * 6];
         cache
-            .factorization
-            .as_ref()
+            .factorization()
             .unwrap()
-            .solve_into(
-                &rhs2_arr,
-                &mut expected,
-                &mut cache.solve_workspace,
-                &mut cache.solve_stack,
-            )
-            .unwrap();
+            .solve_slices::<3>(&rhs2, &mut expected, &mut work);
         solver.solve(request(&rhs2), &mut x).unwrap();
-        assert_eq!(x, expected.as_slice().unwrap());
+        assert_eq!(x, expected);
     }
 }
 
@@ -124,7 +117,7 @@ fn direct_solver_falls_back_to_ldl_like_the_cache() {
         solver
             .solve(request(cache.rhs.as_slice().unwrap()), &mut x)
             .unwrap();
-        assert_eq!(cache.strategy, FactorizationStrategy::LDL);
+        assert_eq!(cache.strategy(), Some(FactorizationStrategy::LDL));
         assert_eq!(solver.strategy(), FactorizationStrategy::LDL);
         assert_eq!(x, cache.x.as_slice().unwrap());
     }

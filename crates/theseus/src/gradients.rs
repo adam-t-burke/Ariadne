@@ -9,6 +9,7 @@
 //! All gradients derived analytically — no AD framework needed.
 
 use crate::backend::cpu::{for_each_chunk_mut, CHUNK, PAR_MIN_LEN};
+use crate::fdm::{apply_a_xyz, solve_adjoint_system, AdjointRhs};
 use crate::objectives::{bounds_penalty_grad, softplus_grad};
 use crate::types::{
     FdmCache, ForceVarianceNormalizationStrategy, GeometrySnapshot,
@@ -17,26 +18,20 @@ use crate::types::{
 };
 use crate::variable_supports;
 use ndarray::Array2;
+use std::sync::atomic::AtomicBool;
 
 // ─────────────────────────────────────────────────────────────
-//  Adjoint solve  (reuses LDL Factorization from forward solve)
+//  Adjoint solve  (reuses the forward solve's A(q))
 // ─────────────────────────────────────────────────────────────
 
 /// Solve A λ = dJ/dx̂ for each coordinate column.
 ///
-/// Since A is symmetric (A = Aᵀ), we reuse the **same** factorization
-/// (Cholesky or LDL) from the forward solve — no refactoring needed.
+/// Since A is symmetric (A = Aᵀ), the linear solver's state from the forward
+/// solve serves as is — no re-update needed: `Direct` reuses the same
+/// factorization, the iterative kinds the same hierarchy (warm-started from
+/// the previous λ).
 pub fn solve_adjoint(cache: &mut FdmCache) -> Result<(), TheseusError> {
-    let fac = cache
-        .factorization
-        .as_ref()
-        .ok_or(TheseusError::MissingFactorization)?;
-    fac.solve_into(
-        &cache.grad_x,
-        &mut cache.lambda,
-        &mut cache.solve_workspace,
-        &mut cache.solve_stack,
-    )
+    solve_adjoint_system(cache, AdjointRhs::GradX, None).map(|_| ())
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -363,8 +358,9 @@ fn solve_modified_adjoint(
     problem: &Problem,
     max_iters: usize,
     tolerance: f64,
+    cancel: Option<&AtomicBool>,
 ) -> Result<(), TheseusError> {
-    let n = cache.a_matrix.nrows;
+    let n = cache.x.nrows();
     let mut converged = false;
 
     for _iter in 0..max_iters {
@@ -390,17 +386,7 @@ fn solve_modified_adjoint(
         // solution, so using ||correction|| as a stop test rejects valid
         // follower-load adjoints.
         let mut adjoint_residual = Array2::<f64>::zeros((n, 3));
-        for col in 0..cache.a_matrix.ncols {
-            let start = cache.a_matrix.col_ptrs[col] as usize;
-            let end = cache.a_matrix.col_ptrs[col + 1] as usize;
-            for nz in start..end {
-                let row = cache.a_matrix.row_indices[nz] as usize;
-                let value = cache.a_matrix.values[nz];
-                for d in 0..3 {
-                    adjoint_residual[[row, d]] += value * cache.lambda[[col, d]];
-                }
-            }
-        }
+        apply_a_xyz(cache, &cache.lambda, &mut adjoint_residual);
         for i in 0..n {
             for d in 0..3 {
                 adjoint_residual[[i, d]] -= cache.grad_x[[i, d]] + correction[[i, d]];
@@ -424,16 +410,7 @@ fn solve_modified_adjoint(
             }
         }
 
-        let fac = cache
-            .factorization
-            .as_ref()
-            .ok_or(TheseusError::MissingFactorization)?;
-        fac.solve_into(
-            &cache.rhs,
-            &mut cache.lambda,
-            &mut cache.solve_workspace,
-            &mut cache.solve_stack,
-        )?;
+        solve_adjoint_system(cache, AdjointRhs::Rhs, cancel)?;
     }
 
     if !converged {
@@ -447,9 +424,13 @@ fn solve_modified_adjoint(
 
 /// Dispatch to standard or modified adjoint based on whether
 /// geometry-dependent loads are active.
-fn solve_adjoint_with_loads(cache: &mut FdmCache, problem: &Problem) -> Result<(), TheseusError> {
+fn solve_adjoint_with_loads(
+    cache: &mut FdmCache,
+    problem: &Problem,
+    cancel: Option<&AtomicBool>,
+) -> Result<(), TheseusError> {
     // Always start with the standard adjoint
-    solve_adjoint(cache)?;
+    solve_adjoint_system(cache, AdjointRhs::GradX, cancel)?;
 
     // If geometry-dependent loads are active, refine via Neumann iteration
     if problem.self_weight.is_some() || problem.pressure.is_some() {
@@ -465,7 +446,7 @@ fn solve_adjoint_with_loads(cache: &mut FdmCache, problem: &Problem) -> Result<(
             (None, Some(pr)) => pr.tolerance(),
             (None, None) => unreachable!(),
         };
-        solve_modified_adjoint(cache, problem, max_iters, tolerance)?;
+        solve_modified_adjoint(cache, problem, max_iters, tolerance, cancel)?;
     }
 
     Ok(())
@@ -1519,6 +1500,14 @@ fn add_node_position_grad(cache: &mut FdmCache, node: usize, dim: usize, value: 
 ///   6. Implicit dJ/dq  += −Δλ · ΔN
 ///   7. Barrier gradient on θ
 ///   8. Pack grad_q + chain-rule-projected latent gradients → grad vector
+///
+/// Linear-solver failures are hard errors: an iterative solve that does not
+/// reach its tolerance surfaces as
+/// [`TheseusError::IterativeSolverDidNotConverge`] and is never silently
+/// continued from. The iterative tolerance is `cache.solve_tolerance`, set
+/// by the optimizer from its [`TolerancePolicy`] schedule before each call.
+///
+/// [`TolerancePolicy`]: crate::linear_solver::TolerancePolicy
 pub fn value_and_gradient(
     cache: &mut FdmCache,
     problem: &Problem,
@@ -1528,6 +1517,25 @@ pub fn value_and_gradient(
     ub: &[f64],
     lb_idx: &[usize],
     ub_idx: &[usize],
+) -> Result<f64, TheseusError> {
+    value_and_gradient_cancellable(cache, problem, theta, grad, lb, ub, lb_idx, ub_idx, None)
+}
+
+/// [`value_and_gradient`] with cooperative cancellation: checked between
+/// nonlinear load iterations and inside the iterative linear solves (a
+/// sparse factorization or triangular solve is not interruptible). A set
+/// flag yields [`TheseusError::Cancelled`].
+#[allow(clippy::too_many_arguments)]
+pub fn value_and_gradient_cancellable(
+    cache: &mut FdmCache,
+    problem: &Problem,
+    theta: &[f64],
+    grad: &mut [f64],
+    lb: &[f64],
+    ub: &[f64],
+    lb_idx: &[usize],
+    ub_idx: &[usize],
+    cancel: Option<&AtomicBool>,
 ) -> Result<f64, TheseusError> {
     let ne = problem.topology.num_edges;
     let nvar = problem.anchors.variable_indices.len();
@@ -1547,7 +1555,14 @@ pub fn value_and_gradient(
     crate::objectives::validate_objectives(&problem.objectives)?;
 
     // 2. Forward solve (with self-weight/pressure iteration if active)
-    crate::fdm::solve_fdm_with_loads(cache, q, problem, &anchor_positions, 1e-12)?;
+    crate::fdm::solve_fdm_with_loads_cancellable(
+        cache,
+        q,
+        problem,
+        &anchor_positions,
+        1e-12,
+        cancel,
+    )?;
 
     // 3. Build snapshot and evaluate loss
     let snap = GeometrySnapshot {
@@ -1573,7 +1588,7 @@ pub fn value_and_gradient(
     accumulate_explicit_gradients(cache, problem);
 
     // 5. Adjoint solve (standard or modified Neumann iteration)
-    solve_adjoint_with_loads(cache, problem)?;
+    solve_adjoint_with_loads(cache, problem, cancel)?;
 
     // 6. Implicit gradients (standard A(q) coupling)
     accumulate_implicit_gradients(cache, problem);

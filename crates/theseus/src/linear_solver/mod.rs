@@ -510,11 +510,37 @@ pub trait LinearSystemSolver: Send {
     /// Solve `A x = req.rhs` for the three columns, writing `x` (`n * 3`).
     fn solve(&mut self, req: SolveRequest<'_>, x: &mut [f64]) -> Result<SolveStats, TheseusError>;
 
+    /// Apply the solver as a *fixed* preconditioner: `x ≈ A⁻¹ req.rhs`, used
+    /// by the load Newton iteration's GMRES (`fdm.rs`), which assumes a
+    /// linear operator. Direct: the exact solve. Iterative solvers should
+    /// override this with one multigrid cycle (linear and SPD); the default
+    /// runs a full `solve`, which is admissible but varies with `req.rhs`.
+    fn precondition(
+        &mut self,
+        req: SolveRequest<'_>,
+        x: &mut [f64],
+    ) -> Result<SolveStats, TheseusError> {
+        self.solve(req, x)
+    }
+
     /// The kind this solver implements.
     fn kind(&self) -> LinearSolverKind;
 
     /// Host and device memory currently held.
     fn memory_bytes(&self) -> MemoryReport;
+
+    /// The concrete [`DirectSolver`] behind this object, if that is what it
+    /// is. `FdmCache` borrows the assembled `A(q)` through it for the
+    /// operator applications of the direct path; iterative kinds return
+    /// `None` and the cache applies the matrix-free graph operator instead.
+    fn as_direct(&self) -> Option<&DirectSolver> {
+        None
+    }
+
+    /// Mutable form of [`Self::as_direct`].
+    fn as_direct_mut(&mut self) -> Option<&mut DirectSolver> {
+        None
+    }
 }
 
 // ─────────────────────────────────────────────────────────────

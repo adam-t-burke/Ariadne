@@ -1,7 +1,16 @@
-//! Forward FDM solver: assemble A(q), build RHS, factorise, triangular solve.
+//! Forward FDM solver: build the right-hand side, update the linear solver
+//! with `q` (assembly + factorization for `Direct`, hierarchy update for the
+//! iterative kinds) and solve `A(q) x = b` through
+//! [`LinearSystemSolver`](crate::linear_solver::LinearSystemSolver).
+//!
+//! Every linear solve of the crate goes through [`solve_forward_system`],
+//! [`solve_adjoint_system`] or the load-Newton preconditioner in this module,
+//! which record their [`SolveStats`] into `FdmCache::linear_solver_totals`.
 
 use crate::backend::cpu::{for_each_chunk_mut, for_each_chunk_mut2, run_sequential, CHUNK};
-use crate::linear_solver::direct;
+use crate::linear_solver::{
+    direct, LinearSolverTotals, LinearSystemSolver, SolveRequest, SolveStats,
+};
 use crate::types::{FdmCache, PressureParams, Problem, SelfWeightParams, TheseusError};
 use ndarray::Array2;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +21,144 @@ fn check_cancelled(cancel: Option<&AtomicBool>) -> Result<(), TheseusError> {
     } else {
         Ok(())
     }
+}
+
+/// Errors that a nonlinear load iteration must propagate immediately instead
+/// of treating them as a failed Newton stage (which it would retry with a
+/// smaller step or fold into a `Solver` message): cancellation and the typed
+/// linear-solver failures of the iterative backends.
+pub(crate) fn must_propagate(error: &TheseusError) -> bool {
+    matches!(
+        error,
+        TheseusError::Cancelled
+            | TheseusError::IterativeSolverDidNotConverge { .. }
+            | TheseusError::IterativeSolverUnsupported(_)
+            | TheseusError::GpuUnavailable(_)
+            | TheseusError::GpuOutOfMemory { .. }
+    )
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Linear solve dispatch
+// ─────────────────────────────────────────────────────────────
+
+/// Run one solve through `solver`, fold its statistics into `totals`, and
+/// turn a solve that did not reach its tolerance into
+/// [`TheseusError::IterativeSolverDidNotConverge`] (the direct solver always
+/// reports `converged`). For the iterative kinds `x` is also checked to be
+/// finite; the direct solver checks its own output.
+fn run_recorded_solve(
+    solver: &mut dyn LinearSystemSolver,
+    totals: &mut LinearSolverTotals,
+    req: SolveRequest<'_>,
+    x: &mut [f64],
+) -> Result<SolveStats, TheseusError> {
+    let stats = solver.solve(req, x)?;
+    totals.record(&stats);
+    if !stats.converged {
+        return Err(TheseusError::IterativeSolverDidNotConverge {
+            iterations: stats.max_iterations(),
+            relative_residual: stats.relative_residual.iter().copied().fold(0.0, f64::max),
+            kind: stats.backend,
+        });
+    }
+    if stats.backend.is_iterative() {
+        direct::check_finite(x)?;
+    }
+    Ok(stats)
+}
+
+/// Solve `A x = rhs` into `cache.x`, warm-started from the previous forward
+/// solution when the kind is iterative (`Direct` ignores warm starts).
+///
+/// Requires the solver to be up to date with `cache.q` (see
+/// [`factor_and_solve`]).
+pub fn solve_forward_system(
+    cache: &mut FdmCache,
+    cancel: Option<&AtomicBool>,
+) -> Result<SolveStats, TheseusError> {
+    let FdmCache {
+        linear_solver,
+        linear_solver_kind,
+        linear_solver_totals,
+        solve_tolerance,
+        solve_max_iterations,
+        warm_x,
+        has_warm_x,
+        x,
+        rhs,
+        ..
+    } = cache;
+    let iterative = linear_solver_kind.is_iterative();
+    let x = x.as_slice_mut().expect("x must be contiguous row-major");
+    let req = SolveRequest {
+        rhs: rhs.as_slice().expect("rhs must be contiguous row-major"),
+        x0: (iterative && *has_warm_x).then_some(warm_x.as_slice()),
+        tolerance: *solve_tolerance,
+        max_iterations: *solve_max_iterations,
+        cancel,
+    };
+    let stats = run_recorded_solve(linear_solver.as_mut(), linear_solver_totals, req, x)?;
+    if iterative {
+        warm_x.copy_from_slice(x);
+        *has_warm_x = true;
+    }
+    Ok(stats)
+}
+
+/// Right-hand side of an adjoint solve ([`solve_adjoint_system`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdjointRhs {
+    /// `cache.grad_x` (the standard adjoint `A λ = ∂J/∂x`).
+    GradX,
+    /// `cache.rhs` (the refined right-hand side of the Neumann iteration for
+    /// geometry-dependent loads).
+    Rhs,
+}
+
+/// Solve `A λ = rhs` into `cache.lambda` with the solver's current `A(q)`
+/// (symmetric, so the forward system's update serves the adjoint),
+/// warm-started from the previous `λ` when the kind is iterative.
+pub fn solve_adjoint_system(
+    cache: &mut FdmCache,
+    rhs: AdjointRhs,
+    cancel: Option<&AtomicBool>,
+) -> Result<SolveStats, TheseusError> {
+    let FdmCache {
+        linear_solver,
+        linear_solver_kind,
+        linear_solver_totals,
+        solve_tolerance,
+        solve_max_iterations,
+        warm_lambda,
+        has_warm_lambda,
+        lambda,
+        grad_x,
+        rhs: rhs_buffer,
+        ..
+    } = cache;
+    let iterative = linear_solver_kind.is_iterative();
+    let rhs = match rhs {
+        AdjointRhs::GradX => grad_x.as_slice(),
+        AdjointRhs::Rhs => rhs_buffer.as_slice(),
+    }
+    .expect("adjoint right-hand side must be contiguous row-major");
+    let lambda = lambda
+        .as_slice_mut()
+        .expect("lambda must be contiguous row-major");
+    let req = SolveRequest {
+        rhs,
+        x0: (iterative && *has_warm_lambda).then_some(warm_lambda.as_slice()),
+        tolerance: *solve_tolerance,
+        max_iterations: *solve_max_iterations,
+        cancel,
+    };
+    let stats = run_recorded_solve(linear_solver.as_mut(), linear_solver_totals, req, lambda)?;
+    if iterative {
+        warm_lambda.copy_from_slice(lambda);
+        *has_warm_lambda = true;
+    }
+    Ok(stats)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -56,30 +203,24 @@ pub fn update_fixed_positions(
 //  System matrix assembly  A(q)
 // ─────────────────────────────────────────────────────────────
 
-/// Zero-allocation in-place update of A's values from current q.
-/// A = Cn^T diag(q) Cn  via the precomputed `q_to_nz` mapping.
+/// Zero-allocation in-place update of `A`'s values from the current `cache.q`
+/// on the direct path: `A = Cnᵀ diag(q) Cn` via the solver's precomputed
+/// `q → nzval` gather map ([`direct::assemble_values`]), *without* the
+/// diagonal perturbation and without factoring.
 ///
-/// Each nonzero is an independent gather over its contributing edges, summed
-/// in map order exactly as before; the nonzeros are processed in fixed
-/// [`CHUNK`]-sized chunks (parallel above [`PAR_MIN_LEN`]), so the values
-/// are bitwise identical for any thread count.
-///
-/// [`CHUNK`]: crate::backend::cpu::CHUNK
-/// [`PAR_MIN_LEN`]: crate::backend::cpu::PAR_MIN_LEN
+/// [`LinearSystemSolver::update`] (called by [`factor_and_solve`]) performs
+/// this assembly itself, so the production path never calls this; it exists
+/// for tests and profiling that inspect `A(q)` (`FdmCache::a_matrix`).
+/// No-op for the iterative kinds, which never materialise `A`.
 pub fn assemble_a(cache: &mut FdmCache) {
-    let map = &cache.q_to_nz;
-    let q = &cache.q;
-    for_each_chunk_mut(&mut cache.a_matrix.values, CHUNK, |start, chunk| {
-        for (j, value) in chunk.iter_mut().enumerate() {
-            let nz = start + j;
-            let range = map.nz_offsets[nz]..map.nz_offsets[nz + 1];
-            *value = map.edge[range.clone()]
-                .iter()
-                .zip(&map.coeff[range])
-                .map(|(&k, &c)| q[k as usize] * c)
-                .sum();
-        }
-    });
+    let FdmCache {
+        linear_solver, q, ..
+    } = cache;
+    if let Some(direct) = linear_solver.as_direct_mut() {
+        direct
+            .assemble(q)
+            .expect("cache.q has one entry per edge of the solver's topology");
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -137,54 +278,39 @@ pub fn assemble_rhs(cache: &mut FdmCache, problem: &Problem) {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  Linear solve  (dense fallback — will be replaced with LDL)
+//  Linear solve  A(q) x = rhs
 // ─────────────────────────────────────────────────────────────
 
-/// Factor A via sparse Cholesky or LDL^T and solve A x = rhs for all 3 columns.
+/// Update the linear solver with the current `cache.q` and solve
+/// `A(q) x = cache.rhs` into `cache.x` for all three columns.
 ///
-/// On first call, performs a fresh factorization (symbolic + numeric).
-/// On subsequent calls, reuses the symbolic structure via `Factorization::update()`
-/// — only numeric values change.
+/// `Direct`: [`DirectSolver::set_perturbation`] (the diagonal shift added to
+/// `A` before factoring) + [`LinearSystemSolver::update`] (assembly, then
+/// Cholesky → LDLᵀ fallback refactoring reusing the symbolic analysis) +
+/// the specialised three-column triangular solve — the same operations, in
+/// the same order, as the pre-dispatch cache path, so the result is bitwise
+/// identical. Iterative kinds: hierarchy update + a warm-started solve at
+/// `cache.solve_tolerance`; the perturbation is ignored (their systems are
+/// SPD by construction, `q > 0`).
 ///
-/// If the preferred strategy (Cholesky) fails because the matrix is no longer
-/// SPD (e.g. q values drifted negative during optimisation), we automatically
-/// fall back to LDL and rebuild the factorization from scratch. The factor
-/// step is the direct path shared with
-/// [`crate::linear_solver::DirectSolver`] (`linear_solver::direct::refactor`).
+/// [`DirectSolver::set_perturbation`]: crate::linear_solver::DirectSolver::set_perturbation
 pub fn factor_and_solve(cache: &mut FdmCache, perturbation: f64) -> Result<(), TheseusError> {
-    // Add diagonal perturbation if requested
-    if perturbation > 0.0 {
-        cache.a_matrix.add_diagonal(perturbation);
+    factor_and_solve_cancellable(cache, perturbation, None).map(|_| ())
+}
+
+fn factor_and_solve_cancellable(
+    cache: &mut FdmCache,
+    perturbation: f64,
+    cancel: Option<&AtomicBool>,
+) -> Result<SolveStats, TheseusError> {
+    let FdmCache {
+        linear_solver, q, ..
+    } = cache;
+    if let Some(direct) = linear_solver.as_direct_mut() {
+        direct.set_perturbation(perturbation);
     }
-
-    // Try the current factorization, falling back to LDL on Cholesky failure.
-    direct::refactor(
-        &mut cache.factorization,
-        &mut cache.strategy,
-        &cache.a_matrix,
-        &mut cache.factor_stack,
-    )?;
-
-    let fac = cache
-        .factorization
-        .as_ref()
-        .ok_or(TheseusError::MissingFactorization)?;
-    fac.solve_into(
-        &cache.rhs,
-        &mut cache.x,
-        &mut cache.solve_workspace,
-        &mut cache.solve_stack,
-    )?;
-    let n = cache.a_matrix.nrows;
-    for d in 0..3 {
-        for i in 0..n {
-            if !cache.x[[i, d]].is_finite() {
-                return Err(TheseusError::Solver(direct::NON_FINITE_SOLUTION_MSG.into()));
-            }
-        }
-    }
-
-    Ok(())
+    linear_solver.update(q)?;
+    solve_forward_system(cache, cancel)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -216,17 +342,15 @@ fn solve_fdm_cancellable(
     // 0. Sync q
     cache.q.copy_from_slice(q);
 
-    // 1. Assemble A
-    assemble_a(cache);
-
-    // 2. Update fixed positions in Nf
+    // 1. Update fixed positions in Nf
     update_fixed_positions(cache, problem, anchor_positions);
 
-    // 3. Assemble RHS
+    // 2. Assemble RHS
     assemble_rhs(cache, problem);
 
-    // 4. Factor A and solve A x = rhs
-    factor_and_solve(cache, perturbation)?;
+    // 3. Update the solver with q (assembly + factorization on the direct
+    //    path) and solve A x = rhs
+    factor_and_solve_cancellable(cache, perturbation, cancel)?;
     // Sparse factorization/triangular solve is one non-interruptible boundary.
     check_cancelled(cancel)?;
 
@@ -680,36 +804,118 @@ fn sync_free_positions(cache: &mut FdmCache, problem: &Problem) {
     }
 }
 
-fn apply_a_xyz(cache: &FdmCache, input: &Array2<f64>, out: &mut Array2<f64>) {
-    out.fill(0.0);
-    for col in 0..cache.a_matrix.ncols {
-        let start = cache.a_matrix.col_ptrs[col] as usize;
-        let end = cache.a_matrix.col_ptrs[col + 1] as usize;
-        for nz in start..end {
-            let row = cache.a_matrix.row_indices[nz] as usize;
-            let value = cache.a_matrix.values[nz];
-            for d in 0..3 {
-                out[[row, d]] += value * input[[col, d]];
+/// `out = A(q) · input` for the three coordinate columns (`nn_free × 3`),
+/// with the solver's current `q` (the last [`factor_and_solve`]).
+///
+/// `Direct`: a column sweep over the assembled CSC `A(q)` borrowed from the
+/// [`DirectSolver`] (including its diagonal perturbation), accumulating in
+/// nonzero order exactly as before. Iterative kinds never materialise `A`,
+/// so the operator is applied matrix-free from the graph:
+/// `(A x)_u = Σ_{e ∋ u} q_e (x_u − x_other)` over the free node's incident
+/// edges (`cache.adjacency`, ascending edge order), where a fixed `other`
+/// contributes only the `q_e x_u` term (its column belongs to `Cf`, not
+/// `Cn`). Rows are independent and processed in fixed [`CHUNK`]-row chunks,
+/// so the result is bitwise identical for any thread count.
+///
+/// [`DirectSolver`]: crate::linear_solver::DirectSolver
+/// [`CHUNK`]: crate::backend::cpu::CHUNK
+pub(crate) fn apply_a_xyz(cache: &FdmCache, input: &Array2<f64>, out: &mut Array2<f64>) {
+    if let Some(a) = cache.a_matrix() {
+        out.fill(0.0);
+        for col in 0..a.ncols {
+            let start = a.col_ptrs[col] as usize;
+            let end = a.col_ptrs[col + 1] as usize;
+            for nz in start..end {
+                let row = a.row_indices[nz] as usize;
+                let value = a.values[nz];
+                for d in 0..3 {
+                    out[[row, d]] += value * input[[col, d]];
+                }
             }
         }
+        return;
     }
+
+    let x = input
+        .as_slice()
+        .expect("operator input must be contiguous row-major");
+    let out = out
+        .as_slice_mut()
+        .expect("operator output must be contiguous row-major");
+    let q = &cache.q;
+    let adjacency = &cache.adjacency;
+    let free_nodes = &cache.free_node_indices;
+    let node_to_free = &cache.node_to_free_idx;
+    for_each_chunk_mut(out, CHUNK * 3, |start, chunk| {
+        for (j, row) in chunk.chunks_exact_mut(3).enumerate() {
+            let i = start / 3 + j;
+            let u = free_nodes[i];
+            let xu: &[f64; 3] = x[i * 3..i * 3 + 3].try_into().expect("3 coordinates");
+            let range = adjacency.range(u);
+            let mut acc = [0.0f64; 3];
+            for (&k, &other) in adjacency.edges[range.clone()]
+                .iter()
+                .zip(&adjacency.other[range])
+            {
+                let qk = q[k as usize];
+                match node_to_free[other as usize] {
+                    Some(o) => {
+                        let xo: &[f64; 3] = x[o * 3..o * 3 + 3].try_into().expect("3 coordinates");
+                        acc[0] += qk * (xu[0] - xo[0]);
+                        acc[1] += qk * (xu[1] - xo[1]);
+                        acc[2] += qk * (xu[2] - xo[2]);
+                    }
+                    None => {
+                        acc[0] += qk * xu[0];
+                        acc[1] += qk * xu[1];
+                        acc[2] += qk * xu[2];
+                    }
+                }
+            }
+            row.copy_from_slice(&acc);
+        }
+    });
 }
 
-fn apply_a_preconditioner(cache: &mut FdmCache, input: &[f64]) -> Result<Vec<f64>, TheseusError> {
-    let n = cache.x.nrows();
-    let rhs = Array2::from_shape_fn((n, 3), |(i, d)| input[i * 3 + d]);
-    let mut solution = Array2::zeros((n, 3));
-    let factorization = cache
-        .factorization
-        .as_ref()
-        .ok_or(TheseusError::MissingFactorization)?;
-    factorization.solve_into(
-        &rhs,
-        &mut solution,
-        &mut cache.solve_workspace,
-        &mut cache.solve_stack,
-    )?;
-    Ok(flatten_xyz(&solution))
+/// Relative tolerance of the load-Newton preconditioner application for
+/// the iterative kinds that fall back to the default
+/// [`LinearSystemSolver::precondition`] (a full `solve`): GMRES only needs
+/// an approximate `A⁻¹`, and the Newton loop verifies the true equilibrium
+/// residual itself. `Direct` ignores it (exact solve).
+const NEWTON_PRECONDITIONER_TOLERANCE: f64 = 1e-4;
+
+/// `A⁻¹ input` (approximately, for the iterative kinds) — the fixed
+/// preconditioner of the hydrostatic Newton GMRES. Goes through
+/// [`LinearSystemSolver::precondition`] and is recorded in the cache's
+/// totals like every other solve; a preconditioner application that stops
+/// short of its tolerance is not an error (GMRES tolerates an inexact
+/// `A⁻¹`; the Newton iteration checks the true residual).
+fn apply_a_preconditioner(
+    cache: &mut FdmCache,
+    input: &[f64],
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<f64>, TheseusError> {
+    let mut solution = vec![0.0; input.len()];
+    let FdmCache {
+        linear_solver,
+        linear_solver_totals,
+        solve_tolerance,
+        solve_max_iterations,
+        ..
+    } = cache;
+    let req = SolveRequest {
+        rhs: input,
+        x0: None,
+        tolerance: solve_tolerance.max(NEWTON_PRECONDITIONER_TOLERANCE),
+        max_iterations: *solve_max_iterations,
+        cancel,
+    };
+    let stats = linear_solver.precondition(req, &mut solution)?;
+    linear_solver_totals.record(&stats);
+    if stats.backend.is_iterative() {
+        direct::check_finite(&solution)?;
+    }
+    Ok(solution)
 }
 
 fn evaluate_hydrostatic_residual(
@@ -748,6 +954,7 @@ fn apply_hydrostatic_newton_operator(
     pressure: &PressureParams,
     load_scale: f64,
     input: &[f64],
+    cancel: Option<&AtomicBool>,
 ) -> Result<Vec<f64>, TheseusError> {
     let n = cache.x.nrows();
     let direction = Array2::from_shape_fn((n, 3), |(i, d)| input[i * 3 + d]);
@@ -760,7 +967,7 @@ fn apply_hydrostatic_newton_operator(
             a_direction[[i, d]] -= load_direction[[i, d]];
         }
     }
-    apply_a_preconditioner(cache, &flatten_xyz(&a_direction))
+    apply_a_preconditioner(cache, &flatten_xyz(&a_direction), cancel)
 }
 
 /// Restarted left-preconditioned GMRES. The supplied operator is already
@@ -913,7 +1120,7 @@ fn solve_hydrostatic_newton(
                 break;
             }
 
-            let preconditioned_rhs = apply_a_preconditioner(cache, &residual)?;
+            let preconditioned_rhs = apply_a_preconditioner(cache, &residual, cancel)?;
             let dimension = residual.len();
             let gmres_result = gmres(
                 dimension,
@@ -921,10 +1128,11 @@ fn solve_hydrostatic_newton(
                 dimension.clamp(1, 60),
                 (tolerance.sqrt()).clamp(1e-8, 1e-3),
                 cancel,
-                |v| apply_hydrostatic_newton_operator(cache, pressure, target_scale, v),
+                |v| apply_hydrostatic_newton_operator(cache, pressure, target_scale, v, cancel),
             );
             let delta = match gmres_result {
                 Ok(delta) => delta,
+                Err(error) if must_propagate(&error) => return Err(error),
                 Err(error) => {
                     stage_error = Some(error);
                     break;

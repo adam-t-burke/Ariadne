@@ -218,7 +218,7 @@ fn bench_forward_solve_scaling() {
 
         let start = Instant::now();
         for _ in 0..iters {
-            cache.factorization = None; // force re-factor
+            cache.direct_solver_mut().unwrap().reset_factorization(); // force re-factor
             theseus::fdm::solve_fdm(&mut cache, &q, &problem, &anchors, 1e-12).unwrap();
         }
         let elapsed = start.elapsed();
@@ -278,7 +278,7 @@ fn bench_value_and_gradient_scaling() {
 
         let start = Instant::now();
         for _ in 0..iters {
-            cache.factorization = None;
+            cache.direct_solver_mut().unwrap().reset_factorization();
             grad.fill(0.0);
             theseus::gradients::value_and_gradient(
                 &mut cache, &problem, &theta, &mut grad, &lb, &ub, &lb_idx, &ub_idx,

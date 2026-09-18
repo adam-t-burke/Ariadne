@@ -95,7 +95,7 @@ fn evaluate(problem: &Problem, q: &[f64]) -> (FdmCache, Outputs) {
     let out = Outputs {
         loss,
         grad,
-        a_values: cache.a_matrix.values.clone(),
+        a_values: cache.a_matrix().unwrap().values.clone(),
         rhs: cache.rhs.as_slice().unwrap().to_vec(),
         lengths: cache.member_lengths.clone(),
         forces: cache.member_forces.clone(),
@@ -213,8 +213,9 @@ fn loops_match_sequential_scatter_references_bitwise() {
         assert_bitwise(&out.rhs, &rhs, "rhs");
 
         // A values: sequential gather through the same map.
-        let map = &cache.q_to_nz;
-        let a_values: Vec<f64> = (0..cache.a_matrix.values.len())
+        let direct = cache.direct_solver().unwrap();
+        let map = direct.q_to_nz();
+        let a_values: Vec<f64> = (0..direct.a_matrix().values.len())
             .map(|nz| {
                 let range = map.nz_offsets[nz]..map.nz_offsets[nz + 1];
                 map.edge[range.clone()]

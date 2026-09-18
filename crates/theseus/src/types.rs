@@ -1,5 +1,8 @@
 use crate::graph::CsrAdjacency;
-use crate::linear_solver::{IterativeSolverOptions, LinearSolverKind};
+use crate::linear_solver::{
+    DirectSolver, IterativeSolverOptions, LinearSolver, LinearSolverKind, LinearSolverTotals,
+    LinearSystemSolver,
+};
 use crate::sparse::SparseColMatOwned;
 use ndarray::Array2;
 use std::fmt;
@@ -1130,22 +1133,43 @@ impl Factorization {
 /// All mutable workspace for the forward solve, adjoint, and gradient
 /// accumulation.  Built once from a [`Problem`], reused across iterations.
 pub struct FdmCache {
-    // ── Sparse system ──────────────────────────────────────
-    /// System matrix A = Cn^T diag(q) Cn  (CSC, nn_free × nn_free).
-    /// Sparsity pattern is fixed; values are updated in-place each iteration.
-    pub a_matrix: SparseColMatOwned,
-
-    /// Numeric factorization — Cholesky (SPD) or LDL (indefinite).
-    /// Created on first factor, reused via `.update()` thereafter.
-    pub factorization: Option<Factorization>,
-
-    pub q_to_nz: QToNz,
+    // ── Linear solver ──────────────────────────────────────
+    /// The solver for `A(q) x = b`, built by [`LinearSolver::new`] from
+    /// `SolverOptions::linear_solver`. It is the single owner of the system:
+    /// for [`LinearSolverKind::Direct`] the [`DirectSolver`] holds `A(q)`,
+    /// its `q → nzval` map and the factorization (borrowed by the cache
+    /// through [`FdmCache::direct_solver`] for the operator applications);
+    /// iterative kinds hold the level-0 graph and the multigrid hierarchy,
+    /// and the cache applies `A` matrix-free over `adjacency`.
+    pub linear_solver: Box<dyn LinearSystemSolver>,
+    /// Kind of `linear_solver` (`linear_solver.kind()`, cached).
+    pub linear_solver_kind: LinearSolverKind,
+    /// Running totals of every solve dispatched through this cache.
+    pub linear_solver_totals: LinearSolverTotals,
+    /// Relative-residual tolerance for the next iterative solves; set by the
+    /// optimizer before each evaluation from the [`TolerancePolicy`]
+    /// schedule. Ignored by `Direct`.
+    ///
+    /// [`TolerancePolicy`]: crate::linear_solver::TolerancePolicy
+    pub solve_tolerance: f64,
+    /// Iteration budget per iterative solve. Ignored by `Direct`.
+    pub solve_max_iterations: u32,
+    /// Warm start of the forward solve (previous `x`, row-major `n * 3`);
+    /// empty for `Direct`, which ignores warm starts.
+    pub warm_x: Vec<f64>,
+    /// Warm start of the adjoint solve (previous `λ`); empty for `Direct`.
+    pub warm_lambda: Vec<f64>,
+    /// `warm_x` / `warm_lambda` hold a previous solution.
+    pub has_warm_x: bool,
+    pub has_warm_lambda: bool,
 
     /// Start / end node of each edge (global node indices, 0-based)
     pub edge_starts: Vec<usize>,
     pub edge_ends: Vec<usize>,
     /// Global-node → free-index mapping  (`None` if fixed)
     pub node_to_free_idx: Vec<Option<usize>>,
+    /// Free row → global node (`topology.free_node_indices`).
+    pub free_node_indices: Vec<usize>,
     /// Per-node lists of incident edge indices (for reaction gradients).
     pub node_incident_edges: Vec<Vec<usize>>,
     /// Node-centred CSR adjacency over all nodes (incident edges ascending);
@@ -1183,9 +1207,6 @@ pub struct FdmCache {
     // ── RHS buffer (reusable for linear solve input) ───────
     pub rhs: Array2<f64>, // nn_free × 3
 
-    // ── Factorization ──────────────────────────────────────
-    pub strategy: FactorizationStrategy,
-
     // ── Self-weight / pressure iteration buffers ──────────
     /// Copy of the original (user-specified) free-node loads, used as the
     /// base when self-weight or pressure loads are added iteratively.
@@ -1200,26 +1221,32 @@ pub struct FdmCache {
     /// Scratch for softmax weight computation in variation objectives.
     pub softmax_scratch: Vec<f64>,
     pub softmax_scratch_b: Vec<f64>,
-    /// Column-major buffer for faer triangular solves (nn_free × 3).
-    pub solve_workspace: Vec<f64>,
-    /// Reused faer stack for factorization numeric updates.
-    pub factor_stack: dyn_stack::GlobalPodBuffer,
-    /// Reused faer stack for triangular solves.
-    pub solve_stack: dyn_stack::GlobalPodBuffer,
 }
 
 impl FdmCache {
-    /// Build a fully pre-allocated cache from a [`Problem`].
+    /// Build a fully pre-allocated cache from a [`Problem`], with the linear
+    /// solver selected by `problem.solver.linear_solver`.
     ///
-    /// Returns `Err` if the incidence sparsity pattern is inconsistent.
+    /// Returns `Err` if the incidence sparsity pattern is inconsistent, if an
+    /// iterative kind is requested for bounds that permit `q ≤ 0`
+    /// ([`TheseusError::IterativeSolverUnsupported`]: the systems may be
+    /// indefinite), or if the requested kind is not available in this build.
     pub fn new(problem: &Problem) -> Result<Self, TheseusError> {
         let topo = &problem.topology;
         let ne = topo.num_edges;
         let nn = topo.num_nodes;
         let nn_free = topo.free_node_indices.len();
 
-        // ── 1–2. A's sparsity pattern (Cnᵀ Cn) and the q → nzval gather map ──
-        let (a_matrix, q_to_nz) = crate::linear_solver::direct::build_system_pattern(topo)?;
+        // ── 1–2. The linear solver (owner of A's pattern, values and factors) ──
+        let kind = problem.solver.linear_solver;
+        let iterative = &problem.solver.iterative;
+        let linear_solver = LinearSolver::new(kind, topo, &problem.bounds, iterative)?;
+        let linear_solver_kind = linear_solver.kind();
+        let warm_len = if linear_solver_kind.is_iterative() {
+            nn_free * 3
+        } else {
+            0
+        };
 
         // ── 3. Edge start / end from incidence ────────────
         let mut edge_starts = vec![0usize; ne];
@@ -1253,10 +1280,7 @@ impl FdmCache {
         }
         let adjacency = CsrAdjacency::from_endpoints(nn, &edge_starts, &edge_ends);
 
-        // ── 5. Factorization strategy ─────────────────────
-        let strategy = FactorizationStrategy::from_bounds(&problem.bounds);
-
-        // ── 5b. Edges with one free and one fixed endpoint ─
+        // ── 5. Edges with one free and one fixed endpoint ─
         // These are the only edges that contribute to the right-hand side
         // b = Pn − Cnᵀ diag(q) Cf Nf_fixed.
         // Sorted by free row so `assemble_rhs` can gather each free node's
@@ -1282,13 +1306,20 @@ impl FdmCache {
         };
 
         Ok(FdmCache {
-            a_matrix,
-            factorization: None,
-            q_to_nz,
+            linear_solver,
+            linear_solver_kind,
+            linear_solver_totals: LinearSolverTotals::new(linear_solver_kind),
+            solve_tolerance: iterative.tolerance.initial(),
+            solve_max_iterations: iterative.max_iterations,
+            warm_x: vec![0.0; warm_len],
+            warm_lambda: vec![0.0; warm_len],
+            has_warm_x: false,
+            has_warm_lambda: false,
             boundary_edges,
             edge_starts,
             edge_ends,
             node_to_free_idx,
+            free_node_indices: topo.free_node_indices.clone(),
             node_incident_edges,
             adjacency,
             x: Array2::zeros((nn_free, 3)),
@@ -1303,17 +1334,42 @@ impl FdmCache {
             pn: problem.free_node_loads.clone(),
             nf: Array2::zeros((nn, 3)),
             rhs: Array2::zeros((nn_free, 3)),
-            strategy,
             pn_base: problem.free_node_loads.clone(),
             sw_mu,
             cross_section_areas: vec![0.0; ne],
             pn_prev: Array2::zeros((nn_free, 3)),
             softmax_scratch: Vec::new(),
             softmax_scratch_b: Vec::new(),
-            solve_workspace: vec![0.0; nn_free * 6],
-            factor_stack: dyn_stack::GlobalPodBuffer::new(dyn_stack::StackReq::empty()),
-            solve_stack: dyn_stack::GlobalPodBuffer::new(dyn_stack::StackReq::empty()),
         })
+    }
+
+    /// The direct solver behind `linear_solver`, when the kind is `Direct`.
+    pub fn direct_solver(&self) -> Option<&DirectSolver> {
+        self.linear_solver.as_direct()
+    }
+
+    /// Mutable form of [`Self::direct_solver`].
+    pub fn direct_solver_mut(&mut self) -> Option<&mut DirectSolver> {
+        self.linear_solver.as_direct_mut()
+    }
+
+    /// The assembled `A(q)` of the direct path (with the diagonal
+    /// perturbation of the last solve); `None` for the iterative kinds,
+    /// which never assemble it.
+    pub fn a_matrix(&self) -> Option<&SparseColMatOwned> {
+        self.direct_solver().map(DirectSolver::a_matrix)
+    }
+
+    /// The factorization of the direct path, if computed; `None` for the
+    /// iterative kinds.
+    pub fn factorization(&self) -> Option<&Factorization> {
+        self.direct_solver().and_then(DirectSolver::factorization)
+    }
+
+    /// Current factorization strategy of the direct path (`None` for the
+    /// iterative kinds).
+    pub fn strategy(&self) -> Option<FactorizationStrategy> {
+        self.direct_solver().map(DirectSolver::strategy)
     }
 }
 

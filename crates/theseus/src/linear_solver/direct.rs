@@ -15,6 +15,7 @@
 //! three-column triangular solve are the same code the cache has always run.
 
 use super::{LinearSolverKind, LinearSystemSolver, MemoryReport, SolveRequest, SolveStats};
+use crate::backend::cpu::{for_each_chunk_mut, CHUNK};
 use crate::sparse::SparseColMatOwned;
 use crate::types::{
     find_nz_index, Bounds, Factorization, FactorizationStrategy, NetworkTopology, QToNz,
@@ -81,16 +82,26 @@ pub fn build_system_pattern(
 }
 
 /// Fill `values` (the `nzval` array of `A`) from `q` through the gather map:
-/// `A = Cnᵀ diag(q) Cn`. Same summation order as `fdm::assemble_a`.
+/// `A = Cnᵀ diag(q) Cn`.
+///
+/// Each nonzero is an independent gather over its contributing edges, summed
+/// in map order; the nonzeros are processed in fixed [`CHUNK`]-sized chunks
+/// (parallel above [`PAR_MIN_LEN`]), so the values are bitwise identical for
+/// any thread count and to the sequential loop.
+///
+/// [`PAR_MIN_LEN`]: crate::backend::cpu::PAR_MIN_LEN
 pub fn assemble_values(map: &QToNz, q: &[f64], values: &mut [f64]) {
-    for (nz, value) in values.iter_mut().enumerate() {
-        let range = map.nz_offsets[nz]..map.nz_offsets[nz + 1];
-        *value = map.edge[range.clone()]
-            .iter()
-            .zip(&map.coeff[range])
-            .map(|(&k, &c)| q[k as usize] * c)
-            .sum();
-    }
+    for_each_chunk_mut(values, CHUNK, |start, chunk| {
+        for (j, value) in chunk.iter_mut().enumerate() {
+            let nz = start + j;
+            let range = map.nz_offsets[nz]..map.nz_offsets[nz + 1];
+            *value = map.edge[range.clone()]
+                .iter()
+                .zip(&map.coeff[range])
+                .map(|(&k, &c)| q[k as usize] * c)
+                .sum();
+        }
+    });
 }
 
 /// Factor `a` into `factorization`, reusing the symbolic analysis when one
@@ -236,18 +247,31 @@ impl DirectSolver {
     }
 
     /// The assembled `A(q)` from the last `update` (zero before the first).
+    /// Includes the diagonal perturbation, if one is set.
     pub fn a_matrix(&self) -> &SparseColMatOwned {
         &self.a_matrix
+    }
+
+    /// The `q → nzval` gather map of [`Self::a_matrix`].
+    pub fn q_to_nz(&self) -> &QToNz {
+        &self.q_to_nz
     }
 
     /// The factorization from the last `update`, if any.
     pub fn factorization(&self) -> Option<&Factorization> {
         self.factorization.as_ref()
     }
-}
 
-impl LinearSystemSolver for DirectSolver {
-    fn update(&mut self, q: &[f64]) -> Result<(), TheseusError> {
+    /// Drop the factorization so the next `update` runs a fresh symbolic
+    /// analysis (benchmarks use this to time a cold factorization).
+    pub fn reset_factorization(&mut self) {
+        self.factorization = None;
+    }
+
+    /// Assemble `A = Cnᵀ diag(q) Cn` into [`Self::a_matrix`] *without* the
+    /// diagonal perturbation and without factoring (the first half of
+    /// [`LinearSystemSolver::update`]).
+    pub fn assemble(&mut self, q: &[f64]) -> Result<(), TheseusError> {
         if q.len() != self.num_edges {
             return Err(TheseusError::Shape(format!(
                 "DirectSolver::update: q has {} entries, topology has {} edges",
@@ -255,8 +279,13 @@ impl LinearSystemSolver for DirectSolver {
                 self.num_edges
             )));
         }
-        let start = Instant::now();
         assemble_values(&self.q_to_nz, q, &mut self.a_matrix.values);
+        Ok(())
+    }
+
+    /// Add the diagonal perturbation to the assembled matrix and (re)factor
+    /// it (the second half of [`LinearSystemSolver::update`]).
+    pub fn factor(&mut self) -> Result<(), TheseusError> {
         if self.perturbation > 0.0 {
             self.a_matrix.add_diagonal(self.perturbation);
         }
@@ -265,7 +294,15 @@ impl LinearSystemSolver for DirectSolver {
             &mut self.strategy,
             &self.a_matrix,
             &mut self.factor_stack,
-        )?;
+        )
+    }
+}
+
+impl LinearSystemSolver for DirectSolver {
+    fn update(&mut self, q: &[f64]) -> Result<(), TheseusError> {
+        let start = Instant::now();
+        self.assemble(q)?;
+        self.factor()?;
         self.last_update_ms = start.elapsed().as_secs_f64() * 1e3;
         Ok(())
     }
@@ -305,6 +342,14 @@ impl LinearSystemSolver for DirectSolver {
 
     fn kind(&self) -> LinearSolverKind {
         LinearSolverKind::Direct
+    }
+
+    fn as_direct(&self) -> Option<&DirectSolver> {
+        Some(self)
+    }
+
+    fn as_direct_mut(&mut self) -> Option<&mut DirectSolver> {
+        Some(self)
     }
 
     fn memory_bytes(&self) -> MemoryReport {

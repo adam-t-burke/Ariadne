@@ -187,7 +187,7 @@ fn main() {
                 }
             }
         };
-        let factor = prev.factorization.as_ref().unwrap();
+        let factor = prev.factorization().unwrap();
         let mut work = vec![0.0; nfree * 6];
         let mut frozen = |r: &[f64], z: &mut [f64]| factor.solve_slices::<3>(r, z, &mut work);
 

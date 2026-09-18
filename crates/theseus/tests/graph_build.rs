@@ -153,7 +153,7 @@ fn level0_operator_matches_assembled_matrix() {
         let mut cache = FdmCache::new(&problem).unwrap();
         cache.q.copy_from_slice(&q);
         theseus::fdm::assemble_a(&mut cache);
-        let a = &cache.a_matrix;
+        let a = cache.a_matrix().unwrap();
         assert_eq!(a.nrows, nn_free);
 
         let level = LevelGraph::level0(&problem.topology, &free_node_map(&problem.topology), &q);
