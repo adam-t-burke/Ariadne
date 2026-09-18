@@ -52,6 +52,7 @@ from bench_common import (  # noqa: E402
     fmt_ms,
     group_by,
     load_runs,
+    select_runs,
 )
 
 DIRECT_BACKENDS = {"direct", "0"}
@@ -417,7 +418,9 @@ def main() -> int:
     parser.add_argument("--machine-id", default=None, help="override the id recorded in the runs")
     args = parser.parse_args()
 
-    runs = load_runs(args.runs)
+    runs, superseded = select_runs(load_runs(args.runs))
+    if superseded:
+        print(f"{superseded} superseded record(s) (re-run cells); using the least-disturbed run per cell")
     if not runs:
         print(f"no successful bench_scale records in {args.runs}", file=sys.stderr)
         return 1

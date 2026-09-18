@@ -32,6 +32,7 @@ Outputs:
     benchmarks/results/<machine-id>/<YYYYMMDD>-<sha7>/machine.json OS, CPU, cores, RAM, GPUs, Rust
     benchmarks/results/<machine-id>/<YYYYMMDD>-<sha7>/config.json  the sweep configuration
     benchmarks/results/<machine-id>/<YYYYMMDD>-<sha7>/harness-output.txt  harness tables
+    (an optional hand-written notes.md in the results directory is included in the report)
     benchmarks/reports/<machine-id>-<YYYYMMDD>.md                  tables (median ± IQR) and fit
     benchmarks/reports/<machine-id>-<YYYYMMDD>-{eval,total}.svg    log-log time vs edges
 """
@@ -61,6 +62,7 @@ from bench_common import (  # noqa: E402
     load_failures,
     load_runs,
     machine_info,
+    select_runs,
 )
 
 DEFAULTS = {
@@ -99,19 +101,22 @@ def build_harness(root: Path, env: dict) -> Path:
     raise SystemExit("bench_scale executable not found in cargo output")
 
 
-def run_cell(binary: Path, root: Path, base_env: dict, cell: dict, runs_path: Path, log, wall_cap: float,
+def run_cell(binary: Path, root: Path, base_env: dict, cell: dict, runs_path: Path | None, log, wall_cap: float,
              machine_id: str) -> str:
+    """Runs one cell; `runs_path=None` is a warm-up whose measurements are discarded."""
     env = dict(base_env)
+    env.pop("THESEUS_BENCH_JSON", None)
     env.update({
         "THESEUS_FIXTURE": cell["fixture"],
         "THESEUS_SCALE_GRIDS": str(cell["size"]),
         "THESEUS_SCALE_ITERS": str(cell["iters"]),
         "THESEUS_BENCH_REPS": str(cell["reps"]),
         "THESEUS_LINEAR_SOLVER": cell["solver"],
-        "THESEUS_BENCH_JSON": str(runs_path),
         "THESEUS_MACHINE_ID": machine_id,
         "RAYON_NUM_THREADS": str(cell["threads"]),
     })
+    if runs_path is not None:
+        env["THESEUS_BENCH_JSON"] = str(runs_path)
     cmd = [str(binary), "--ignored", "--nocapture", "--test-threads=1", "bench_scale_grid_solves"]
     t0 = time.time()
     status = "ok"
@@ -127,10 +132,11 @@ def run_cell(binary: Path, root: Path, base_env: dict, cell: dict, runs_path: Pa
         text = "".join(parts)
         status = "timeout"
     elapsed = time.time() - t0
-    log.write(f"### {cell['solver']} {cell['fixture']} threads={cell['threads']} size={cell['size']} "
+    kind = "warm-up" if runs_path is None else "measured"
+    log.write(f"### {kind} {cell['solver']} {cell['fixture']} threads={cell['threads']} size={cell['size']} "
               f"status={status} wall={elapsed:.1f}s\n{text}\n")
     log.flush()
-    if status != "ok":
+    if status != "ok" and runs_path is not None:
         record = {
             "schema": 1, "harness": "bench_scale", "status": status,
             "timestamp_utc": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -152,8 +158,8 @@ def render_tables(runs: list[dict], failures: list[dict]) -> list[str]:
     for (backend, threads), group in sorted(group_by(runs, "backend", "threads").items(),
                                             key=lambda kv: (kv[0][0], kv[0][1] or 0)):
         lines += [f"### `{backend}`, {threads} thread(s)", "",
-                  "| fixture | grid | edges | free nodes | setup ms | eval ms (median ± IQR) | evals | iters | total ms | ms/iter | peak RSS MB | final loss |",
-                  "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+                  "| fixture | grid | edges | free nodes | setup ms | eval ms (median ± IQR) | evals | iters | total ms | ms/iter | peak RSS MB | final loss | runs |",
+                  "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
         for r in sorted(group, key=lambda r: (fixture_sort_key(r["fixture"]), r["edges"])):
             rss = r.get("peak_rss_bytes")
             rss_mb = f"{rss / 2**20:.0f}" if rss is not None else "n/a"
@@ -161,7 +167,8 @@ def render_tables(runs: list[dict], failures: list[dict]) -> list[str]:
             lines.append(
                 f"| {r['fixture']} | {r.get('grid_side', '')} | {fmt_int(r['edges'])} | {fmt_int(r['free_nodes'])} | "
                 f"{fmt_ms(r['setup_ms'])} | {fmt_pm(eval_median(r), eval_iqr(r))} | {r['evaluations']} | "
-                f"{r['iterations']} | {fmt_ms(r['total_ms'])} | {fmt_ms(ms_per_iter)} | {rss_mb} | {r['final_loss']:.4e} |")
+                f"{r['iterations']} | {fmt_ms(r['total_ms'])} | {fmt_ms(ms_per_iter)} | {rss_mb} | {r['final_loss']:.4e} | "
+                f"{r.get('runs_in_cell', 1)} |")
         lines.append("")
     if failures:
         lines += ["### Cells that did not complete", "", "| backend | fixture | grid | threads | status | wall s |",
@@ -209,10 +216,11 @@ def plot_metric(runs: list[dict], path: Path, metric: str, title: str) -> None:
 
 def render_report(results_dir: Path, reports_dir: Path, root: Path, fit: bool = True) -> Path:
     runs_path = results_dir / "runs.jsonl"
-    runs = load_runs(runs_path)
+    all_runs = load_runs(runs_path)
+    runs, superseded = select_runs(all_runs)
     failures = load_failures(runs_path)
     machine = json.loads((results_dir / "machine.json").read_text(encoding="utf-8"))
-    config = json.loads((results_dir / "config.json").read_text(encoding="utf-8")) if (results_dir / "config.json").exists() else {}
+    passes = _load_passes(results_dir / "config.json")
     machine_id = machine["machine_id"]
     date = results_dir.name.split("-")[0]
     stem = f"{machine_id}-{date}"
@@ -223,16 +231,28 @@ def render_report(results_dir: Path, reports_dir: Path, root: Path, fit: bool = 
         rel_results = results_dir
 
     lines = [f"# Benchmark sweep — `{machine_id}` — {date}", "",
-             f"Raw data: `{rel_results}/runs.jsonl` ({len(runs)} completed cells, {len(failures)} not completed). "
-             f"Git: `{machine.get('git_sha', 'unknown')}`.", "",
+             f"Raw data: `{rel_results}/runs.jsonl` ({len(runs)} cells, {len(all_runs)} completed records, "
+             f"{len(failures)} not completed). Git: `{machine.get('git_sha', 'unknown')}`.", ""]
+    if superseded:
+        lines += [f"{superseded} record(s) are re-runs of cells that had been disturbed by other load on the "
+                  "machine; for each such cell the tables and fits use the run that is not flagged (IQR ≤ 10% of "
+                  "the median) with the smallest evaluation median (`runs` column). All records remain in "
+                  "`runs.jsonl`.", ""]
+    lines += [
              "## Machine", "",
              f"* OS: {machine.get('os_release')}",
              f"* CPU: {machine.get('cpu_model')} — {machine.get('logical_cores')} logical / {machine.get('physical_cores')} physical cores",
              f"* RAM: {machine.get('ram_gib')} GiB",
              f"* GPU adapters: {', '.join(machine.get('gpu_adapters') or []) or 'none discovered'}",
              f"* Rust: {machine.get('rust_version')}", ""]
-    if config:
-        lines += ["## Configuration", "", "```json", json.dumps(config, indent=1), "```", ""]
+    if passes:
+        lines += ["## Configuration", ""]
+        if len(passes) > 1:
+            lines += [f"{len(passes)} passes were run into this results directory (later passes re-measure "
+                      "cells disturbed by other load; see the selection rule above).", ""]
+        for i, cfg in enumerate(passes, 1):
+            compact = {k: v for k, v in cfg.items()}
+            lines += [f"Pass {i}: `{json.dumps(compact, separators=(', ', ': '))}`", ""]
     lines += ["## Protocol", "",
               "Release build (`--locked`). One process per cell. The harness performs the cache setup and first "
               "factorisation (`setup ms`), discards one fused evaluation, times `reps` evaluations "
@@ -241,6 +261,9 @@ def render_report(results_dir: Path, reports_dir: Path, root: Path, fit: bool = 
               "(`total ms`, box bounds `[0.1, 10]`, start `q = 1`). Non-grid fixtures are generated at the "
               "edge count of the grid of the same `grid` column. `threads` is `RAYON_NUM_THREADS`. "
               "Peak RSS is `VmHWM` of the cell's process.", ""]
+    notes = results_dir / "notes.md"
+    if notes.exists():
+        lines += ["## Notes", "", notes.read_text(encoding="utf-8").strip(), ""]
     if runs:
         lines += ["## Results", ""] + render_tables(runs, failures)
         eval_svg = f"{stem}-eval.svg"
@@ -347,7 +370,11 @@ def main() -> int:
     info["cpu_governor"] = _cpu_governor()
     info["swept_at_utc"] = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     (results_dir / "machine.json").write_text(json.dumps(info, indent=1) + "\n", encoding="utf-8")
-    (results_dir / "config.json").write_text(json.dumps(cfg, indent=1) + "\n", encoding="utf-8")
+    # A results directory can accumulate several passes (re-runs of disturbed
+    # cells); config.json keeps every pass in order.
+    passes = _load_passes(results_dir / "config.json")
+    passes.append(dict(cfg, started_utc=info["swept_at_utc"]))
+    (results_dir / "config.json").write_text(json.dumps(passes, indent=1) + "\n", encoding="utf-8")
     print(f"machine id {machine_id}; results in {results_dir}")
 
     binary = build_harness(root, env)
@@ -361,7 +388,7 @@ def main() -> int:
                 print(f"{desc}: skipped (backend not yet available)", flush=True)
                 continue
             if cfg["warmup"]:
-                run_cell(binary, root, env, cell, results_dir / "warmup.jsonl", log, cfg["wall_cap_s"], machine_id)
+                run_cell(binary, root, env, cell, None, log, cfg["wall_cap_s"], machine_id)
             t0 = time.time()
             status = run_cell(binary, root, env, cell, runs_path, log, cfg["wall_cap_s"], machine_id)
             print(f"{desc}: {status} in {time.time() - t0:.1f}s (elapsed {time.time() - t_start:.0f}s)", flush=True)
@@ -370,6 +397,13 @@ def main() -> int:
     report = render_report(results_dir, reports_dir, root, fit=not args.no_fit)
     print(f"wrote {report}")
     return 0
+
+
+def _load_passes(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return data if isinstance(data, list) else [data]
 
 
 def _cpu_governor() -> str | None:

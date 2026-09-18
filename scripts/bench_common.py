@@ -73,6 +73,33 @@ def eval_samples(rec: dict) -> list[float]:
     return [float(v) for v in s] if s else [eval_median(rec)]
 
 
+CELL_KEYS = ("backend", "fixture", "grid_side", "threads")
+
+
+def is_flagged(rec: dict, ratio: float = 0.10) -> bool:
+    """IQR above 10% of the median (§5.2 flag)."""
+    m = eval_median(rec)
+    return m > 0 and eval_iqr(rec) > ratio * m
+
+
+def select_runs(runs: list[dict]) -> tuple[list[dict], int]:
+    """One record per cell. When a cell was measured more than once (a re-run
+    after external load disturbed it), keep the run that is not flagged and
+    has the smallest evaluation median — under contention the minimum is the
+    least-disturbed estimate — and fall back to the least-flagged run.
+    Returns the selection and the number of superseded records."""
+    cells: dict[tuple, list[dict]] = {}
+    for r in runs:
+        cells.setdefault(tuple(r.get(k) for k in CELL_KEYS), []).append(r)
+    selected = []
+    for rs in cells.values():
+        rs.sort(key=lambda r: (is_flagged(r), eval_median(r)))
+        chosen = dict(rs[0])
+        chosen["runs_in_cell"] = len(rs)
+        selected.append(chosen)
+    return selected, len(runs) - len(selected)
+
+
 def fixture_sort_key(name: str) -> tuple[int, str]:
     return (FIXTURE_ORDER.index(name) if name in FIXTURE_ORDER else len(FIXTURE_ORDER), name)
 

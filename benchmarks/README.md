@@ -9,8 +9,9 @@ benchmarks/
   results/<machine-id>/<YYYYMMDD>-<sha7>/
     runs.jsonl            one JSON object per benchmark cell (schema below)
     machine.json          OS, CPU model, cores, RAM, GPU adapters, Rust version, git sha
-    config.json           sweep configuration (sizes, fixtures, threads, reps, iterations, solvers)
-    harness-output.txt    the harness tables, per cell
+    config.json           list of sweep passes (sizes, fixtures, threads, reps, iterations, solvers, start time)
+    harness-output.txt    the harness tables, per cell (warm-ups included, marked)
+    notes.md              optional hand-written conditions; included in the report
   reports/
     <machine-id>-<YYYYMMDD>.md          tables (median ± IQR), plots, direct cost-model fit
     <machine-id>-<YYYYMMDD>-eval.svg    evaluation time vs edges, log-log
@@ -33,12 +34,16 @@ uv run --project scripts scripts/crossover_fit.py \
 runs one process per cell with `THESEUS_FIXTURE`, `THESEUS_SCALE_GRIDS`,
 `THESEUS_SCALE_ITERS`, `THESEUS_BENCH_REPS`, `THESEUS_LINEAR_SOLVER`,
 `THESEUS_BENCH_JSON`, `THESEUS_MACHINE_ID` and `RAYON_NUM_THREADS` set. A JSON
-config file (`--config`) or CLI flags select the grid; `--report-only <dir>`
-re-renders a report from existing results. `crossover_fit.py` fits the §5.3
-cost models (direct: `a·n^1.5 + b·n·log n + c`; iterative:
-`(d + e·iters)·n + f`) on log-scaled data, reports relative residuals and,
-when both backends are present, the crossover edge count with a bootstrap
-90% interval.
+config file (`--config`) or CLI flags select the grid; `--warmup` discards one
+full run per cell first (§5.2); `--report-only <dir>` re-renders a report
+from existing results. Re-running a subset of cells into the same directory
+(`--label <existing>`) appends records; the report and the fits then use, per
+cell, the run that is not flagged (IQR ≤ 10% of the median) with the
+smallest evaluation median, and show the number of runs in a `runs` column.
+`crossover_fit.py` fits the §5.3 cost models (direct: `a·n^1.5 + b·n·log n +
+c`; iterative: `(d + e·iters)·n + f`) on log-scaled data, reports relative
+residuals and, when both backends are present, the crossover edge count with
+a bootstrap 90% interval (resampling the recorded evaluation samples).
 
 The same environment switches work on the harness directly:
 
