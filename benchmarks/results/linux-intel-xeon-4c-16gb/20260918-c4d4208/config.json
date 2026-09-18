@@ -1,0 +1,99 @@
+[
+ {
+  "sizes": [
+   72,
+   160,
+   224,
+   320,
+   448,
+   708
+  ],
+  "fixtures": [
+   "grid",
+   "irregular",
+   "dome"
+  ],
+  "threads": [
+   1,
+   4
+  ],
+  "reps": 5,
+  "iters": 10,
+  "solvers": [
+   "direct"
+  ],
+  "wall_cap_s": 600,
+  "warmup": true,
+  "started_utc": "2026-09-18T14:49:33Z"
+ },
+ {
+  "sizes": [
+   72,
+   160,
+   224,
+   320,
+   448,
+   708
+  ],
+  "fixtures": [
+   "grid",
+   "irregular",
+   "dome"
+  ],
+  "threads": [
+   1,
+   4
+  ],
+  "reps": 5,
+  "iters": 10,
+  "solvers": [
+   "direct"
+  ],
+  "wall_cap_s": 600,
+  "warmup": true,
+  "started_utc": "2026-09-18T14:59:49Z"
+ },
+ {
+  "sizes": [
+   72,
+   160,
+   224,
+   320,
+   448,
+   708
+  ],
+  "fixtures": [
+   "dome"
+  ],
+  "threads": [
+   1
+  ],
+  "reps": 5,
+  "iters": 10,
+  "solvers": [
+   "direct"
+  ],
+  "wall_cap_s": 600,
+  "warmup": true,
+  "started_utc": "2026-09-18T15:09:07Z"
+ },
+ {
+  "sizes": [
+   708
+  ],
+  "fixtures": [
+   "grid"
+  ],
+  "threads": [
+   1
+  ],
+  "reps": 5,
+  "iters": 10,
+  "solvers": [
+   "direct"
+  ],
+  "wall_cap_s": 600,
+  "warmup": true,
+  "started_utc": "2026-09-18T15:10:46Z"
+ }
+]

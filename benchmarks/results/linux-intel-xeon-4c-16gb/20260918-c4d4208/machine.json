@@ -1,0 +1,18 @@
+{
+ "os": "linux",
+ "os_release": "Linux-6.12.94+-x86_64-with-glibc2.39",
+ "cpu_model": "Intel(R) Xeon(R) Processor",
+ "logical_cores": 4,
+ "physical_cores": 4,
+ "ram_bytes": 16791945216,
+ "ram_gib": 16,
+ "gpu_adapters": [],
+ "rust_version": "rustc 1.89.0 (29483883e 2025-08-04)",
+ "python_version": "3.12.3",
+ "hostname": "cursor",
+ "git_sha": "c4d42089ca5020c8a4aace94601d08c8489d5823",
+ "machine_id": "linux-intel-xeon-4c-16gb",
+ "cpu_governor": null,
+ "swept_at_utc": "2026-09-18T15:09:56Z",
+ "git_note": "harness and fixtures at c4d4208; the -dirty suffix in later per-record shas comes from uncommitted edits to scripts/ (report rendering) made while the passes ran"
+}
