@@ -221,6 +221,23 @@ fn check_bounds(bounds: &Bounds, kind: LinearSolverKind) -> Result<(), TheseusEr
     Ok(())
 }
 
+/// Run `f` on a rayon worker thread when the current pool has more than one
+/// thread and the caller is not already inside it; otherwise run it inline.
+///
+/// A parallel kernel launched from outside the pool is handed over through
+/// rayon's global injector, whose block list allocates 1.5 KB every 31
+/// injected jobs; kernels launched from a worker use that worker's own deque,
+/// which allocates nothing in steady state. Entering the pool once per solve
+/// keeps `solve` allocation-free and saves a latch round trip per kernel.
+/// Results do not depend on which thread runs the kernels.
+fn on_worker<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    if rayon::current_num_threads() == 1 || rayon::current_thread_index().is_some() {
+        f()
+    } else {
+        rayon::join(f, || ()).0
+    }
+}
+
 impl AmgSolver<CpuBackend> {
     /// CPU solver (`LinearSolverKind::IterativeCpu`).
     pub fn cpu(
@@ -784,13 +801,16 @@ where
             return Err(TheseusError::MissingFactorization);
         }
         let start = Instant::now();
-        self.backend.upload(req.rhs, &mut self.b_dev);
-        match req.x0 {
-            Some(x0) => self.backend.upload(x0, &mut self.x_dev),
-            None => self.backend.zero(&mut self.x_dev),
-        }
-        let outcome = self.run_pcg(&req)?;
-        self.backend.download(&self.x_dev, x);
+        let outcome = on_worker(|| {
+            self.backend.upload(req.rhs, &mut self.b_dev);
+            match req.x0 {
+                Some(x0) => self.backend.upload(x0, &mut self.x_dev),
+                None => self.backend.zero(&mut self.x_dev),
+            }
+            let outcome = self.run_pcg(&req)?;
+            self.backend.download(&self.x_dev, x);
+            Ok::<_, TheseusError>(outcome)
+        })?;
         self.counters.solves += 1;
         let solve_ms = start.elapsed().as_secs_f64() * 1e3;
 

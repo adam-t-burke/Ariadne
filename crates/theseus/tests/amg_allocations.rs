@@ -96,22 +96,42 @@ fn warm_solver_allocates_nothing_during_solve() {
         let warm = solver.solve(request(), &mut x).unwrap();
         assert!(warm.converged);
 
-        // Same system again: identical work, no allocation.
+        // Same system again: identical work, no allocation. Measured from a
+        // worker thread so that only the solver is under the counter: a
+        // parallel region entered from *outside* the pool goes through
+        // rayon's global injector, whose block list allocates 1.5 KB per 31
+        // injected jobs — a rayon-core property, bounded separately below.
+        let allocations = rayon::scope(|_| {
+            count_allocations(|| {
+                let stats = solver.solve(request(), &mut x).unwrap();
+                assert!(stats.converged);
+                assert_eq!(stats.iterations, warm.iterations);
+            })
+        });
+        assert_eq!(allocations, 0, "warm solve allocated ({precision:?})");
+
+        // From outside the pool `solve` enters it exactly once, so rayon can
+        // allocate at most one injector block per solve.
         let allocations = count_allocations(|| {
             let stats = solver.solve(request(), &mut x).unwrap();
             assert!(stats.converged);
             assert_eq!(stats.iterations, warm.iterations);
         });
-        assert_eq!(allocations, 0, "warm solve allocated ({precision:?})");
+        assert!(
+            allocations <= 1,
+            "solve from outside the pool allocated {allocations} times ({precision:?})"
+        );
 
         // After a numeric update the buffers are still the same size: the
         // solve must stay allocation-free too.
         let q2: Vec<f64> = q.iter().map(|v| v * 1.02).collect();
         solver.update(&q2).unwrap();
         assert_eq!(solver.counters().setups, 1);
-        let allocations = count_allocations(|| {
-            let stats = solver.solve(request(), &mut x).unwrap();
-            assert!(stats.converged);
+        let allocations = rayon::scope(|_| {
+            count_allocations(|| {
+                let stats = solver.solve(request(), &mut x).unwrap();
+                assert!(stats.converged);
+            })
         });
         assert_eq!(
             allocations, 0,
