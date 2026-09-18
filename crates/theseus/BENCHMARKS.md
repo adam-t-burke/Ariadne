@@ -835,12 +835,15 @@ is 0.48–0.64 s at 1M and is paid once per topology.
 Workstream WS-C of `ITERATIVE_SOLVER_PROGRAM.md`: the production
 `AmgSolver<CpuBackend>` in `src/amg/` behind `LinearSolverKind::IterativeCpu`,
 measured against `DirectSolver` on the same systems and against the WS-A
-prototype numbers above. The configuration is the Phase-0 recommendation and
-the crate defaults: smoothed aggregation, 3 matching passes per level,
-`P = (I − ω D⁻¹A) P₀` with `ω = 4/(3 λ_max)`, Chebyshev degree 2 on
-`[λ_max/10, λ_max]`, V-cycle (1 pre, 1 post), coarsest level ≤ 2,000 nodes
-solved by faer's LLᵀ, PCG on the three columns to a fixed `1e-8` relative
-residual.
+prototype numbers above. The configuration is the Phase-0 recommendation,
+`theseus::amg::recommended_options()`: smoothed aggregation, 3 matching
+passes per level, `P = (I − ω D⁻¹A) P₀` with `ω = 4/(3 λ_max)`, Chebyshev
+degree 2 on `[λ_max/10, λ_max]`, V-cycle (1 pre, 1 post), coarsest level
+≤ 2,000 nodes solved by faer's LLᵀ, PCG on the three columns to a fixed
+`1e-8` relative residual. (`IterativeSolverOptions::default()` still
+carries the §2.3 interface values — K-cycle, two passes — that the FFI and
+C# layers mirror; moving all layers to this configuration is an integrator
+item.)
 
 ```sh
 # Ignored benchmark test; one markdown row per fixture.

@@ -77,15 +77,15 @@ fn request(rhs: &[f64], tolerance: f64) -> SolveRequest<'_> {
     }
 }
 
-/// Default options with a small coarsest level so that the test-sized
+/// The §3 configuration with a small coarsest level so that the test-sized
 /// problems (a few hundred to a few thousand nodes) build real multilevel
-/// hierarchies; the production default of 2000 would solve most of them
-/// directly on level 0.
+/// hierarchies; the recommended 2000 would solve most of them directly on
+/// level 0.
 fn options() -> IterativeSolverOptions {
     IterativeSolverOptions {
         tolerance: TolerancePolicy::Fixed(1e-10),
         coarsest_size: 24,
-        ..IterativeSolverOptions::default()
+        ..theseus::amg::recommended_options()
     }
 }
 
@@ -134,11 +134,11 @@ fn dense_mul(a: &[Vec<f64>], b: &[Vec<f64>]) -> Vec<Vec<f64>> {
     let (n, k, m) = (a.len(), b.len(), b[0].len());
     let mut c = vec![vec![0.0; m]; n];
     for i in 0..n {
-        for l in 0..k {
+        for (l, b_row) in b.iter().enumerate().take(k) {
             let ail = a[i][l];
             if ail != 0.0 {
-                for j in 0..m {
-                    c[i][j] += ail * b[l][j];
+                for (c_ij, b_lj) in c[i].iter_mut().zip(b_row) {
+                    *c_ij += ail * b_lj;
                 }
             }
         }
@@ -301,10 +301,10 @@ fn coarse_operators_equal_ptap_through_the_solver() {
         let agg = solver.aggregate_of(l);
         assert_eq!(p.n, agg.len());
         assert_eq!(p.ncols, solver.level_sizes()[l + 1]);
-        for u in 0..p.n {
+        for (u, &agg_u) in agg.iter().enumerate() {
             let (cols, vals) = p.row(u);
             assert!(
-                cols.contains(&agg[u]),
+                cols.contains(&agg_u),
                 "row {u} of P_{l} misses its aggregate"
             );
             // Rows of (I − ω D⁻¹ A) P₀ sum to 1 − ω (D⁻¹ A 1)_u; with zero

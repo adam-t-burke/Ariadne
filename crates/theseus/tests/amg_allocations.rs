@@ -73,7 +73,7 @@ fn warm_solver_allocates_nothing_during_solve() {
             tolerance: TolerancePolicy::Fixed(1e-10),
             coarsest_size: 200,
             precondition_precision: Some(precision),
-            ..IterativeSolverOptions::default()
+            ..theseus::amg::recommended_options()
         };
         let mut solver: AmgSolver<CpuBackend> =
             AmgSolver::cpu(&problem.topology, &problem.bounds, &options).unwrap();

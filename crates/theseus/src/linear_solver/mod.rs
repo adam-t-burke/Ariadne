@@ -160,13 +160,15 @@ impl Default for TolerancePolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CycleKind {
     /// One recursive pass (one pre- and one post-smoothing sweep): a fixed
-    /// SPD preconditioner for standard PCG. Default since the Phase-0
-    /// revision of §3 (smoothed aggregation keeps its iteration counts
-    /// size-independent).
-    #[default]
+    /// SPD preconditioner for standard PCG. The configuration recommended
+    /// by the Phase-0 revision of §3 (smoothed aggregation keeps its
+    /// iteration counts size-independent; see `BENCHMARKS.md`, "WS-C").
     V = 0,
-    /// Two flexible-CG iterations per coarse level, recursively (Notay).
-    /// Kept for experiments; the outer loop then runs FCG(1).
+    /// Two flexible-CG iterations per coarse level, recursively (Notay);
+    /// the outer loop then runs FCG(1). Still the `Default` because the
+    /// FFI and C# layers mirror this value (§2.3); moving every layer to
+    /// `V` is the integrator's / WS-J's call (§7.4).
+    #[default]
     K = 1,
 }
 
@@ -321,8 +323,11 @@ impl IterativeSolverOptions {
     pub const DEFAULT_SMOOTHER_DEGREE: u8 = 2;
     /// Default `spectral_alpha` (§3: α = 10; α = 30 costs +40% iterations).
     pub const DEFAULT_SPECTRAL_ALPHA: f64 = 10.0;
-    /// Default `aggregation_passes` (§3: three passes, aggregates of ≤ 8).
-    pub const DEFAULT_AGGREGATION_PASSES: u8 = 3;
+    /// Default `aggregation_passes`. §3 recommends three passes (aggregates
+    /// of ≤ 8 nodes) with smoothed aggregation and the WS-C measurements
+    /// use them; the value stays at the §2.3 interface default mirrored by
+    /// the FFI and C# layers until the integrator moves every layer.
+    pub const DEFAULT_AGGREGATION_PASSES: u8 = 2;
     /// Default `coarsest_size`.
     pub const DEFAULT_COARSEST_SIZE: u32 = 2000;
 
@@ -614,10 +619,10 @@ mod tests {
         );
         assert_eq!(o.tolerance.initial(), 1e-6);
         assert_eq!(o.max_iterations, 200);
-        assert_eq!(o.cycle, CycleKind::V);
+        assert_eq!(o.cycle, CycleKind::K);
         assert_eq!(o.smoother_degree, 2);
         assert_eq!(o.spectral_alpha, 10.0);
-        assert_eq!(o.aggregation_passes, 3);
+        assert_eq!(o.aggregation_passes, 2);
         assert_eq!(o.coarsest_size, 2000);
         assert_eq!(
             o.precondition_precision_for(LinearSolverKind::IterativeCpu),

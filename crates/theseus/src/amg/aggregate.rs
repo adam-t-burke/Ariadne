@@ -38,14 +38,14 @@ impl StrengthGraph {
         let adj = &g.adjacency;
         let mut weight = Vec::with_capacity(adj.num_entries());
         let mut diag = vec![0.0; g.n];
-        for u in 0..g.n {
+        for (u, diag_u) in diag.iter_mut().enumerate() {
             let mut d = g.anchor[u];
             for (e, _, v) in adj.incident(u) {
                 let w = g.weight[e as usize];
                 d += w;
                 weight.push(if v as usize == u { 0.0 } else { w });
             }
-            diag[u] = d;
+            *diag_u = d;
         }
         Self {
             n: g.n,

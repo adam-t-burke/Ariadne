@@ -41,7 +41,7 @@ fn run(problem: &Problem, q: &[f64], rhs: &[f64]) -> Run {
     let options = IterativeSolverOptions {
         tolerance: TolerancePolicy::Fixed(1e-10),
         coarsest_size: 200,
-        ..IterativeSolverOptions::default()
+        ..theseus::amg::recommended_options()
     };
     let mut solver: AmgSolver<CpuBackend> =
         AmgSolver::cpu(&problem.topology, &problem.bounds, &options).unwrap();

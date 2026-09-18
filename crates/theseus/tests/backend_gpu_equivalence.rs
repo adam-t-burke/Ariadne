@@ -1384,7 +1384,7 @@ mod csr {
                 tolerance: TolerancePolicy::Fixed(1e-10),
                 coarsest_size: 8,
                 precondition_precision: Some(precision),
-                ..IterativeSolverOptions::default()
+                ..theseus::amg::recommended_options()
             };
             let mut cpu_solver = AmgSolver::cpu(topology, bounds, &options).unwrap();
             cpu_solver.update(&q).unwrap();

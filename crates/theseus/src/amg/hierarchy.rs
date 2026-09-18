@@ -284,10 +284,10 @@ impl LevelMatrix {
     /// Dense copy (tests only).
     pub fn to_dense(&self) -> Vec<Vec<f64>> {
         let mut a = vec![vec![0.0; self.ncols]; self.n];
-        for u in 0..self.n {
+        for (u, row) in a.iter_mut().enumerate() {
             let (cols, vals) = self.row(u);
             for (&c, &v) in cols.iter().zip(vals) {
-                a[u][c as usize] += v;
+                row[c as usize] += v;
             }
         }
         a
@@ -690,11 +690,11 @@ mod tests {
         let (n, k, m) = (a.len(), b.len(), b[0].len());
         let mut c = vec![vec![0.0; m]; n];
         for i in 0..n {
-            for l in 0..k {
+            for (l, b_row) in b.iter().enumerate().take(k) {
                 let ail = a[i][l];
                 if ail != 0.0 {
-                    for j in 0..m {
-                        c[i][j] += ail * b[l][j];
+                    for (c_ij, b_lj) in c[i].iter_mut().zip(b_row) {
+                        *c_ij += ail * b_lj;
                     }
                 }
             }

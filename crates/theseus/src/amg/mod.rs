@@ -10,9 +10,15 @@
 //! * [`smoother`] — Chebyshev with Jacobi scaling over a
 //!   [`DeviceLevel`](smoother::DeviceLevel) (graph or CSR), `λ_max` power
 //!   iteration;
-//! * [`cycle`] — V-cycle (default) and K-cycle over the device hierarchy;
+//! * [`cycle`] — V-cycle and K-cycle over the device hierarchy;
 //! * [`coarsest`] — faer LLᵀ of the coarsest level;
 //! * [`pcg`] — block-of-3 PCG with per-column stopping.
+//!
+//! The configuration §3 recommends (V-cycle, three matching passes,
+//! Chebyshev degree 2, `α = 10`, coarsest ≤ 2000) is
+//! [`recommended_options`]; [`IterativeSolverOptions::default`] still
+//! carries the §2.3 interface defaults (K-cycle, two passes) that the FFI
+//! and C# layers mirror.
 //!
 //! # Life cycle
 //!
@@ -69,6 +75,21 @@ pub const MIN_COARSENING: f64 = 0.7;
 pub const MAX_LEVELS: usize = 60;
 /// K-cycle inner tolerance (prototype default).
 pub const KCYCLE_TOL: f64 = 0.25;
+
+/// The §3 configuration: V-cycle PCG on a three-pass smoothed-aggregation
+/// hierarchy, Chebyshev degree 2 on `[λ_max/10, λ_max]`, coarsest level
+/// ≤ 2000 nodes. Everything else (tolerance policy, iteration budget,
+/// precision, GPU options) is taken from [`IterativeSolverOptions::default`].
+pub fn recommended_options() -> IterativeSolverOptions {
+    IterativeSolverOptions {
+        cycle: CycleKind::V,
+        smoother_degree: 2,
+        spectral_alpha: 10.0,
+        aggregation_passes: 3,
+        coarsest_size: 2000,
+        ..IterativeSolverOptions::default()
+    }
+}
 
 /// Counters for tests and benchmarks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

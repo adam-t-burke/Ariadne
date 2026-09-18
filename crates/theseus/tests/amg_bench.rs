@@ -7,9 +7,11 @@
 //!   cargo test -p theseus --release --test amg_bench -- --ignored --nocapture
 //! ```
 //!
-//! Knobs: `THESEUS_AMG_SIZES` (grid sides; other fixtures are matched by edge
-//! count), `THESEUS_AMG_FIXTURES`, `THESEUS_AMG_COARSEST` (coarsest-level
-//! size, default 2000), `THESEUS_AMG_REPS` (median of this many, default 3),
+//! The configuration is [`theseus::amg::recommended_options`] (§3: V-cycle,
+//! three passes, degree 2, α 10, coarsest 2000). Knobs: `THESEUS_AMG_SIZES`
+//! (grid sides; other fixtures are matched by edge count),
+//! `THESEUS_AMG_FIXTURES`, `THESEUS_AMG_COARSEST` (coarsest-level size,
+//! default 2000), `THESEUS_AMG_REPS` (median of this many, default 3),
 //! `THESEUS_AMG_TOL` (solve tolerance, default 1e-8 as in the Phase-0
 //! tables), `THESEUS_AMG_DEGREE`, `THESEUS_AMG_PASSES`, `THESEUS_AMG_ALPHA`.
 //! Prints one markdown row per fixture and the load average.
@@ -139,7 +141,7 @@ fn amg_vs_direct() {
                 smoother_degree: degree,
                 aggregation_passes: passes,
                 spectral_alpha: alpha,
-                ..IterativeSolverOptions::default()
+                ..theseus::amg::recommended_options()
             };
             let mut amg: AmgSolver<CpuBackend> =
                 AmgSolver::cpu(&problem.topology, &problem.bounds, &options).unwrap();
@@ -251,7 +253,7 @@ fn update_breakdown() {
             let mut amg: AmgSolver<CpuBackend> = AmgSolver::cpu(
                 &problem.topology,
                 &problem.bounds,
-                &IterativeSolverOptions::default(),
+                &theseus::amg::recommended_options(),
             )
             .unwrap();
             amg.update(&q).unwrap();
