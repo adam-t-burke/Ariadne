@@ -184,6 +184,12 @@ pub trait LinearSystemSolver: Send {
     fn solve(&mut self, req: SolveRequest<'_>, x: &mut [f64]) -> Result<SolveStats, TheseusError>;
     fn kind(&self) -> LinearSolverKind;
     fn memory_bytes(&self) -> MemoryReport;   // host, device
+    // Defaulted (WS-D): preconditioner application for the load Newton GMRES
+    // (AMG overrides with one V-cycle), and downcasts used by FdmCache to
+    // borrow the assembled matrix on the Direct path.
+    fn precondition(&mut self, req: SolveRequest<'_>, x: &mut [f64]) -> Result<SolveStats, TheseusError> { self.solve(req, x) }
+    fn as_direct(&self) -> Option<&DirectSolver> { None }
+    fn as_direct_mut(&mut self) -> Option<&mut DirectSolver> { None }
 }
 
 /// Factory (unit struct, not an enum): `LinearSolver::new(kind, &NetworkTopology, &Bounds,
@@ -811,7 +817,7 @@ noting it in the report.
 | M0 Interfaces | **reached** (`9a5f52d`): WS-I merged; `DirectSolver` bitwise-equal to the cache path, `factor_and_solve` shares its refactor code; full `Box<dyn LinearSystemSolver>` dispatch inside `FdmCache` deferred to WS-D |
 | M1 Phase-0 verdict | **reached** (`e3d0cf6`): plain aggregation no-go; smoothed aggregation + V-cycle PCG adopted (§3); wall-time criterion not met single-threaded (2.5–3.6× direct per evaluation at 1M) — CPU viability hinges on the frozen-pattern update and 4-thread kernels, GPU on WS-H |
 | M2 Infrastructure | **reached** — WS-B, WS-E, WS-F merged (*WS-B done*, `16da146`; *WS-F done*, `cb562e6`: toggle, options and probe through FFI/C#/Grasshopper, iterative kinds return code `-4`); toggle visible in Grasshopper returning "not yet available" for iterative kinds; sweep tooling produces a `Direct` cost model. *WS-E done* (`6df10ba`): fixtures, JSON harness, `scripts/bench_sweep.py`, `crossover_fit.py`, first `Direct` sweep 10k–1M on the CI VM with fits at RMS < 15% (`benchmarks/reports/`) |
-| M3 CPU iterative | WS-C, WS-D merged; `IterativeCpu` passes all contract tests; `bench_scale` numbers at 224–708 recorded |
+| M3 CPU iterative | WS-C, WS-D merged; `IterativeCpu` passes all contract tests; `bench_scale` numbers at 224–708 recorded. *WS-D done* (`d52b2b1`): every FDM solve dispatches through `Box<dyn LinearSystemSolver>`, `Direct` byte-identical (golden dump at 1 and 4 threads), tolerance schedule, totals, typed-error propagation; `IterativeCpu` legs of the contract tests skip until WS-C lands |
 | M4 GPU kernels | WS-G merged (`1c51afc`); kernels validated under lavapipe (17/17, f32 + f64); Windows/macOS software-adapter runs pending the CI job, real-GPU validation pending WS-H machines |
 | M5 GPU end to end | WS-H merged; `IterativeGpu` validated on Windows/NVIDIA and Apple silicon; 10M-edge run recorded |
 | M6 Crossover | WS-J reports for ≥ 3 machines; defaults committed |
@@ -919,3 +925,23 @@ for a future `Auto` decision.
   sparse `LevelMatrix` for levels ≥ 1, frozen-pattern numeric update as
   the primary optimisation target; for WS-H: a CSR SpMV kernel replaces
   `coarse_weight_update` for levels ≥ 1.
+* 2026-09-18 — WS-D landed (`d52b2b1`). `FdmCache` owns only
+  `linear_solver: Box<dyn LinearSystemSolver>` (+ kind, totals, per-solve
+  tolerance, warm-start vectors); `a_matrix`/`factorization`/`q_to_nz`
+  moved into `DirectSolver` and are borrowed via `as_direct()`. Iterative
+  kinds use a matrix-free `apply_a_xyz` over `FdmCache.adjacency` without
+  the direct path's 1e-12 diagonal shift (the AMG operator must match).
+  `ToleranceSchedule` lives in `optimizer.rs::run_solver` (observe after
+  init and after every accepted step) and is written to
+  `cache.solve_tolerance` before each evaluation. `run_recorded_solve`
+  records totals, checks finiteness (iterative only) and turns
+  `!converged` into `IterativeSolverDidNotConverge`; preconditioner
+  applications are recorded but never fail. The `q ≤ 0` bounds check in
+  `FdmCache::new` is authoritative; WS-C's is a backstop. `SolverResult`
+  gains `linear_solver_iterations` (per evaluation) and
+  `linear_solver_totals`; the termination suffix `linear solver: <kind>,
+  N solves, M iterations` appears only for non-`Direct` kinds. Handed to
+  WS-C at merge: override `precondition` with one V-cycle; `x0` is copied
+  into the solution before iterating (not used in place); skip the
+  dispatch-side finiteness pass if the solver guarantees finite output.
+  Handed to WS-H/WS-K: C# consumes per-evaluation iteration counts as-is.
