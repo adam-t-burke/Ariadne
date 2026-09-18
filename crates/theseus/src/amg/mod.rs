@@ -99,6 +99,8 @@ pub struct AmgSolver<B: Backend> {
     matrices: Vec<LevelMatrix>,
     p: Vec<LevelMatrix>,
     pt: Vec<LevelMatrix>,
+    /// `A_l P_l` on its frozen pattern (first stage of the Galerkin refill).
+    ap: Vec<LevelMatrix>,
     aggregate_of: Vec<Vec<u32>>,
     lambda_max: Vec<f64>,
     /// Explicit level-0 matrix when the hierarchy has a single level.
@@ -265,6 +267,7 @@ impl<B: Backend> AmgSolver<B> {
             matrices: Vec::new(),
             p: Vec::new(),
             pt: Vec::new(),
+            ap: Vec::new(),
             aggregate_of: Vec::new(),
             lambda_max: Vec::new(),
             level0_matrix: None,
@@ -421,6 +424,7 @@ impl<B: Backend> AmgSolver<B> {
         self.matrices.clear();
         self.p.clear();
         self.pt.clear();
+        self.ap.clear();
         self.aggregate_of.clear();
         self.lambda_max.clear();
         self.levels.clear();
@@ -457,8 +461,8 @@ impl<B: Backend> AmgSolver<B> {
             let a = self.level_ref(l);
             let p = smoothed_prolongator(a, &agg, nc, omega);
             let pt = p.transpose();
-            let mut coarse = galerkin_pattern(&pt, a, &p);
-            galerkin_numeric(&pt, a, &p, &mut coarse, &self.scratch);
+            let (mut ap, mut coarse) = galerkin_pattern(&pt, a, &p);
+            galerkin_numeric(&pt, a, &p, &mut ap, &mut coarse, &self.scratch);
             let dev_p = self.backend.upload_csr(&p, self.precision);
             let dev_pt = self.backend.upload_csr(&pt, self.precision);
             let dev_coarse = self.backend.upload_csr(&coarse, self.precision);
@@ -468,6 +472,7 @@ impl<B: Backend> AmgSolver<B> {
             });
             self.p.push(p);
             self.pt.push(pt);
+            self.ap.push(ap);
             self.aggregate_of.push(agg);
             self.matrices.push(coarse);
             self.push_device_level(DeviceLevel::Csr(dev_coarse), nc);
@@ -518,7 +523,14 @@ impl<B: Backend> AmgSolver<B> {
             } else {
                 LevelRef::Csr(&done[l - 1])
             };
-            galerkin_numeric(&self.pt[l], a, &self.p[l], &mut rest[0], &self.scratch);
+            galerkin_numeric(
+                &self.pt[l],
+                a,
+                &self.p[l],
+                &mut self.ap[l],
+                &mut rest[0],
+                &self.scratch,
+            );
             if let DeviceLevel::Csr(dev) = &mut self.levels[l + 1] {
                 self.backend.update_csr_values(&rest[0], dev);
             }
@@ -651,6 +663,7 @@ impl<B: Backend> AmgSolver<B> {
         total += self.matrices.iter().map(LevelMatrix::bytes).sum::<usize>();
         total += self.p.iter().map(LevelMatrix::bytes).sum::<usize>();
         total += self.pt.iter().map(LevelMatrix::bytes).sum::<usize>();
+        total += self.ap.iter().map(LevelMatrix::bytes).sum::<usize>();
         total += self.aggregate_of.iter().map(|a| a.len() * 4).sum::<usize>();
         total += self.level0_matrix.as_ref().map_or(0, LevelMatrix::bytes);
         total += self.coarsest.as_ref().map_or(0, CoarsestSolver::bytes);

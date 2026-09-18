@@ -228,10 +228,32 @@ pub fn pairwise_match(g: &StrengthGraph) -> (Vec<u32>, usize) {
     (agg, members.len())
 }
 
-/// `passes` matching passes composed into one fine → coarse map.
+/// Renumber aggregates in order of their lowest fine member, so the coarse
+/// numbering inherits the fine one's locality. `pairwise_match` numbers
+/// aggregates in visiting (degree-sorted) order, which on meshes with mixed
+/// degrees scatters neighbouring aggregates over the whole index range and
+/// makes every coarse-level gather a cache miss (the irregular mesh's
+/// Galerkin refill ran 2× slower than the grid's for less work).
+pub fn relabel_by_first_member(aggregate_of: &mut [u32], n_coarse: usize) {
+    let mut new_id = vec![NONE; n_coarse];
+    let mut next = 0u32;
+    for a in aggregate_of.iter_mut() {
+        let slot = &mut new_id[*a as usize];
+        if *slot == NONE {
+            *slot = next;
+            next += 1;
+        }
+        *a = *slot;
+    }
+    debug_assert_eq!(next as usize, n_coarse, "every aggregate has a member");
+}
+
+/// `passes` matching passes composed into one fine → coarse map, numbered
+/// by lowest fine member ([`relabel_by_first_member`]).
 pub fn aggregate(g: &StrengthGraph, passes: usize) -> (Vec<u32>, usize) {
     let (mut agg, mut nc) = pairwise_match(g);
     for _ in 1..passes.max(1) {
+        relabel_by_first_member(&mut agg, nc);
         let coarse = g.quotient(&agg, nc);
         let (agg2, nc2) = pairwise_match(&coarse);
         for a in agg.iter_mut() {
@@ -239,6 +261,7 @@ pub fn aggregate(g: &StrengthGraph, passes: usize) -> (Vec<u32>, usize) {
         }
         nc = nc2;
     }
+    relabel_by_first_member(&mut agg, nc);
     (agg, nc)
 }
 

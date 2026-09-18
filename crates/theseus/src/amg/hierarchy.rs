@@ -333,16 +333,20 @@ impl LevelRef<'_> {
     }
 
     /// Call `f(v, a_uv)` for every stored entry of row `u`. For the graph the
-    /// diagonal comes first, then the incident edges in adjacency order (a
-    /// column may repeat); for CSR the entries come in ascending column order.
+    /// incident edges come first in adjacency order (a column may repeat),
+    /// then the diagonal `anchor_u + Σ w` accumulated in that same pass; for
+    /// CSR the entries come in ascending column order.
     #[inline]
     pub fn for_row(&self, u: usize, mut f: impl FnMut(usize, f64)) {
         match self {
             Self::Graph(g) => {
-                f(u, g.diagonal(u));
+                let mut d = g.anchor[u];
                 for (e, _, v) in g.adjacency.incident(u) {
-                    f(v as usize, -g.weight[e as usize]);
+                    let w = g.weight[e as usize];
+                    d += w;
+                    f(v as usize, -w);
                 }
+                f(u, d);
             }
             Self::Csr(m) => {
                 let (cols, vals) = m.row(u);
@@ -387,45 +391,105 @@ pub fn smoothed_prolongator(
     LevelMatrix::from_rows(n, n_coarse, &mut rows)
 }
 
-/// Symbolic pattern of `Pᵀ A P` (values and diagonal zero): row `I` holds
-/// every `J` reachable as `Pᵀ[I, u] · A[u, v] · P[v, J]`, ascending.
-pub fn galerkin_pattern(pt: &LevelMatrix, a: LevelRef<'_>, p: &LevelMatrix) -> LevelMatrix {
-    let nc = pt.n;
-    assert_eq!(pt.ncols, a.n(), "galerkin_pattern: Pᵀ columns ≠ A rows");
-    assert_eq!(p.n, a.n(), "galerkin_pattern: P rows ≠ A columns");
-    assert_eq!(p.ncols, nc, "galerkin_pattern: P columns ≠ Pᵀ rows");
-    let mut mark = vec![u32::MAX; nc];
-    let mut row_ptr = vec![0u32; nc + 1];
-    let mut col_idx: Vec<u32> = Vec::with_capacity(a.nnz());
-    for i in 0..nc {
-        let start = col_idx.len();
-        let (us, _) = pt.row(i);
-        for &u in us {
-            a.for_row(u as usize, |v, _| {
-                let (js, _) = p.row(v);
-                for &j in js {
-                    if mark[j as usize] != i as u32 {
-                        mark[j as usize] = i as u32;
-                        col_idx.push(j);
-                    }
-                }
-            });
+/// Rows of a sparse operator as `(column, value)` pairs in a fixed order:
+/// the left factor of the sparse products below. Static dispatch keeps the
+/// per-entry closure inlined (a `dyn FnMut` here cost 1.7× on the refill).
+pub trait SparseRows: Sync {
+    /// Rows.
+    fn nrows(&self) -> usize;
+    /// Call `f(column, value)` for every entry of row `i`.
+    fn visit_row(&self, i: usize, f: impl FnMut(usize, f64));
+}
+
+impl SparseRows for LevelRef<'_> {
+    fn nrows(&self) -> usize {
+        self.n()
+    }
+
+    #[inline]
+    fn visit_row(&self, i: usize, f: impl FnMut(usize, f64)) {
+        self.for_row(i, f)
+    }
+}
+
+impl SparseRows for LevelMatrix {
+    fn nrows(&self) -> usize {
+        self.n
+    }
+
+    #[inline]
+    fn visit_row(&self, i: usize, mut f: impl FnMut(usize, f64)) {
+        let (cols, vals) = self.row(i);
+        for (&c, &v) in cols.iter().zip(vals) {
+            f(c as usize, v);
         }
+    }
+}
+
+/// Symbolic pattern of a sparse product `L R` (`L`: `n × k`, `R`: `k × m`):
+/// row `i` holds every `j` with `L[i, u] R[u, j]` structurally non-zero,
+/// ascending. Values are zero (and `diag` when square).
+fn product_pattern(left: &impl SparseRows, right: &LevelMatrix) -> LevelMatrix {
+    let nrows = left.nrows();
+    let ncols = right.ncols;
+    let mut mark = vec![u32::MAX; ncols];
+    let mut row_ptr = vec![0u32; nrows + 1];
+    let mut col_idx: Vec<u32> = Vec::new();
+    for i in 0..nrows {
+        let start = col_idx.len();
+        left.visit_row(i, |u, _| {
+            let (js, _) = right.row(u);
+            for &j in js {
+                if mark[j as usize] != i as u32 {
+                    mark[j as usize] = i as u32;
+                    col_idx.push(j);
+                }
+            }
+        });
         col_idx[start..].sort_unstable();
         row_ptr[i + 1] = col_idx.len() as u32;
     }
     let nnz = col_idx.len();
     LevelMatrix {
-        n: nc,
-        ncols: nc,
+        n: nrows,
+        ncols,
         row_ptr,
         col_idx,
         values: vec![0.0; nnz],
-        diag: vec![0.0; nc],
+        diag: if nrows == ncols {
+            vec![0.0; nrows]
+        } else {
+            Vec::new()
+        },
     }
 }
 
-/// Pool of dense accumulators for the row-parallel triple product: one per
+/// Frozen patterns of the two-stage Galerkin product: `.0` is `A P`
+/// (`n_l × n_{l+1}`), `.1` is `Pᵀ (A P)` (`n_{l+1} × n_{l+1}`). Values are
+/// zero; [`galerkin_numeric`] fills them.
+///
+/// Two stages instead of one row-wise triple loop: the work is
+/// `Σ_u Σ_{v ∈ A_u} |P_v| + Σ_I Σ_{u ∈ Pᵀ_I} |(AP)_u|` rather than
+/// `Σ_I Σ_{u ∈ Pᵀ_I} Σ_{v ∈ A_u} |P_v|`, which is 1.5–2× less on regular
+/// meshes and orders of magnitude less around dense neighbourhoods (a hub
+/// of degree 450 on the cable dome turned the one-stage product at level 1
+/// into 0.5 s).
+pub fn galerkin_pattern(
+    pt: &LevelMatrix,
+    a: LevelRef<'_>,
+    p: &LevelMatrix,
+) -> (LevelMatrix, LevelMatrix) {
+    let n = a.n();
+    let nc = pt.n;
+    assert_eq!(pt.ncols, n, "galerkin_pattern: Pᵀ columns ≠ A rows");
+    assert_eq!(p.n, n, "galerkin_pattern: P rows ≠ A columns");
+    assert_eq!(p.ncols, nc, "galerkin_pattern: P columns ≠ Pᵀ rows");
+    let ap = product_pattern(&a, p);
+    let out = product_pattern(pt, &ap);
+    (ap, out)
+}
+
+/// Pool of dense accumulators for the row-parallel products: one per
 /// concurrently running chunk, allocated on first use and reused after.
 #[derive(Debug, Default)]
 pub struct ScratchPool {
@@ -463,60 +527,55 @@ impl ScratchPool {
     }
 }
 
-/// Numeric `out = Pᵀ A P` on the frozen pattern of `out` (from
-/// [`galerkin_pattern`]). Rows of `out` are processed in chunks of
-/// [`CHUNK`] rows in parallel; within a row every contribution is summed in
-/// the fixed order `u ∈ row(Pᵀ, I)`, `v ∈ row(A, u)`, `J ∈ row(P, v)`, so
-/// the result is bitwise identical on every thread count. `out.diag` is
-/// refreshed.
-pub fn galerkin_numeric(
-    pt: &LevelMatrix,
-    a: LevelRef<'_>,
-    p: &LevelMatrix,
+/// Numeric sparse product `out = L R` on the frozen pattern of `out`. Rows
+/// of `out` are processed in chunks of [`CHUNK`] rows in parallel, and
+/// within a row every contribution is summed in the order `u ∈ L_i`,
+/// `j ∈ R_u`, so the result is bitwise identical on every thread count.
+/// `out.diag` is refreshed when `out` is square.
+fn product_numeric(
+    left: &impl SparseRows,
+    right: &LevelMatrix,
     out: &mut LevelMatrix,
     scratch: &ScratchPool,
 ) {
-    let nc = out.n;
-    debug_assert_eq!(pt.n, nc);
-    debug_assert_eq!(p.ncols, nc);
-    debug_assert_eq!(out.diag.len(), nc);
+    let nrows = out.n;
+    let ncols = out.ncols;
+    let square = out.is_square();
+    debug_assert_eq!(right.ncols, ncols);
     let row_ptr = &out.row_ptr;
     let col_idx = &out.col_idx;
 
-    // Split `values` and `diag` into per-chunk slices aligned on row
-    // boundaries (rows are contiguous in `values`).
-    let n_chunks = nc.div_ceil(CHUNK);
-    let mut pieces: Vec<(usize, &mut [f64], &mut [f64])> = Vec::with_capacity(n_chunks);
+    // Per-chunk slices of `values` (and `diag`) aligned on row boundaries.
+    let n_chunks = nrows.div_ceil(CHUNK);
+    let mut pieces: Vec<(std::ops::Range<usize>, &mut [f64], &mut [f64])> =
+        Vec::with_capacity(n_chunks);
     {
         let mut values = out.values.as_mut_slice();
         let mut diag = out.diag.as_mut_slice();
         for c in 0..n_chunks {
             let r0 = c * CHUNK;
-            let r1 = ((c + 1) * CHUNK).min(nc);
+            let r1 = ((c + 1) * CHUNK).min(nrows);
             let len = (row_ptr[r1] - row_ptr[r0]) as usize;
             let (vals, rest) = values.split_at_mut(len);
             values = rest;
-            let (d, rest) = diag.split_at_mut(r1 - r0);
+            let d_len = if square { r1 - r0 } else { 0 };
+            let (d, rest) = diag.split_at_mut(d_len);
             diag = rest;
-            pieces.push((r0, vals, d));
+            pieces.push((r0..r1, vals, d));
         }
     }
 
-    let run_chunk = |r0: usize, vals: &mut [f64], diag: &mut [f64]| {
-        let mut acc = scratch.take(nc);
-        let base = row_ptr[r0] as usize;
-        for (k, d) in diag.iter_mut().enumerate() {
-            let i = r0 + k;
-            let (us, pts) = pt.row(i);
-            for (&u, &pt_iu) in us.iter().zip(pts) {
-                a.for_row(u as usize, |v, a_uv| {
-                    let c = pt_iu * a_uv;
-                    let (js, ps) = p.row(v);
-                    for (&j, &p_vj) in js.iter().zip(ps) {
-                        acc[j as usize] += c * p_vj;
-                    }
-                });
-            }
+    let run_chunk = |rows: std::ops::Range<usize>, vals: &mut [f64], diag: &mut [f64]| {
+        let mut acc = scratch.take(ncols);
+        let base = row_ptr[rows.start] as usize;
+        for i in rows.clone() {
+            let k = i - rows.start;
+            left.visit_row(i, |u, l_iu| {
+                let (js, rs) = right.row(u);
+                for (&j, &r_uj) in js.iter().zip(rs) {
+                    acc[j as usize] += l_iu * r_uj;
+                }
+            });
             let r = row_ptr[i] as usize - base..row_ptr[i + 1] as usize - base;
             let cols = &col_idx[row_ptr[i] as usize..row_ptr[i + 1] as usize];
             let mut di = 0.0;
@@ -528,20 +587,45 @@ pub fn galerkin_numeric(
                 }
                 acc[j] = 0.0;
             }
-            *d = di;
+            if square {
+                diag[k] = di;
+            }
         }
         scratch.give(acc);
     };
 
-    if run_sequential(nc) {
-        for (r0, vals, diag) in pieces {
-            run_chunk(r0, vals, diag);
+    if run_sequential(nrows) {
+        for (rows, vals, diag) in pieces {
+            run_chunk(rows, vals, diag);
         }
     } else {
         pieces
             .into_par_iter()
-            .for_each(|(r0, vals, diag)| run_chunk(r0, vals, diag));
+            .for_each(|(rows, vals, diag)| run_chunk(rows, vals, diag));
     }
+}
+
+/// Numeric `out = Pᵀ A P` on the frozen patterns from [`galerkin_pattern`]:
+/// first `ap = A P` (row-parallel over fine rows), then `out = Pᵀ ap`
+/// (row-parallel over coarse rows), each with a fixed accumulation order,
+/// so the result is bitwise identical on every thread count. `out.diag` is
+/// refreshed.
+pub fn galerkin_numeric(
+    pt: &LevelMatrix,
+    a: LevelRef<'_>,
+    p: &LevelMatrix,
+    ap: &mut LevelMatrix,
+    out: &mut LevelMatrix,
+    scratch: &ScratchPool,
+) {
+    let nc = out.n;
+    debug_assert_eq!(pt.n, nc);
+    debug_assert_eq!(p.ncols, nc);
+    debug_assert_eq!(ap.n, a.n());
+    debug_assert_eq!(ap.ncols, nc);
+    debug_assert_eq!(out.diag.len(), nc);
+    product_numeric(&a, p, ap, scratch);
+    product_numeric(pt, ap, out, scratch);
 }
 
 #[cfg(test)]
@@ -725,10 +809,12 @@ mod tests {
             assert!(pdiff < 1e-13, "P mismatch {pdiff}");
 
             let pt = p.transpose();
-            let mut a1 = galerkin_pattern(&pt, a0, &p);
+            let (mut ap, mut a1) = galerkin_pattern(&pt, a0, &p);
             let scratch = ScratchPool::new();
-            galerkin_numeric(&pt, a0, &p, &mut a1, &scratch);
+            galerkin_numeric(&pt, a0, &p, &mut ap, &mut a1, &scratch);
+            ap.check();
             a1.check();
+            assert!(max_rel_diff(&dense_mul(&a_dense, &p_dense), &ap.to_dense()) < 1e-12);
             let expected = dense_mul(&dense_transpose(&p_dense), &dense_mul(&a_dense, &p_dense));
             assert!(
                 max_rel_diff(&expected, &a1.to_dense()) < 1e-12,
@@ -746,8 +832,8 @@ mod tests {
             let (agg1, nc1) = aggregate(&sg1, 2);
             let p1 = smoothed_prolongator(LevelRef::Csr(&a1), &agg1, nc1, omega);
             let pt1 = p1.transpose();
-            let mut a2 = galerkin_pattern(&pt1, LevelRef::Csr(&a1), &p1);
-            galerkin_numeric(&pt1, LevelRef::Csr(&a1), &p1, &mut a2, &scratch);
+            let (mut ap1, mut a2) = galerkin_pattern(&pt1, LevelRef::Csr(&a1), &p1);
+            galerkin_numeric(&pt1, LevelRef::Csr(&a1), &p1, &mut ap1, &mut a2, &scratch);
             let p1d = p1.to_dense();
             let expected2 = dense_mul(&dense_transpose(&p1d), &dense_mul(&a1.to_dense(), &p1d));
             assert!(max_rel_diff(&expected2, &a2.to_dense()) < 1e-12);
@@ -757,7 +843,7 @@ mod tests {
             for (k, w) in g2.weight.iter_mut().enumerate() {
                 *w *= 1.0 + 0.02 * ((k % 5) as f64 - 2.0);
             }
-            galerkin_numeric(&pt, LevelRef::Graph(&g2), &p, &mut a1, &scratch);
+            galerkin_numeric(&pt, LevelRef::Graph(&g2), &p, &mut ap, &mut a1, &scratch);
             let expected = dense_mul(
                 &dense_transpose(&p_dense),
                 &dense_mul(&LevelRef::Graph(&g2).to_dense(), &p_dense),
@@ -765,7 +851,7 @@ mod tests {
             assert!(max_rel_diff(&expected, &a1.to_dense()) < 1e-12);
             // Refill is idempotent (scratch returned zeroed).
             let before = a1.clone();
-            galerkin_numeric(&pt, LevelRef::Graph(&g2), &p, &mut a1, &scratch);
+            galerkin_numeric(&pt, LevelRef::Graph(&g2), &p, &mut ap, &mut a1, &scratch);
             assert_eq!(before, a1);
         }
     }
@@ -781,21 +867,19 @@ mod tests {
         let (agg, nc) = aggregate(&StrengthGraph::from_level_graph(&g), 1);
         let p = smoothed_prolongator(a0, &agg, nc, 0.7);
         let pt = p.transpose();
-        let mut a1 = galerkin_pattern(&pt, a0, &p);
+        let (mut ap, mut a1) = galerkin_pattern(&pt, a0, &p);
         let scratch = ScratchPool::new();
-        galerkin_numeric(&pt, a0, &p, &mut a1, &scratch);
-        // Reference: one row at a time with a fresh accumulator.
+        galerkin_numeric(&pt, a0, &p, &mut ap, &mut a1, &scratch);
+        // Reference: one row at a time with a fresh accumulator, in the
+        // documented order (`u ∈ Pᵀ_i`, `j ∈ (AP)_u`), from the same `ap`.
         let mut acc = vec![0.0; nc];
         for i in 0..nc {
             let (us, pts) = pt.row(i);
             for (&u, &pt_iu) in us.iter().zip(pts) {
-                a0.for_row(u as usize, |v, a_uv| {
-                    let c = pt_iu * a_uv;
-                    let (js, ps) = p.row(v);
-                    for (&j, &p_vj) in js.iter().zip(ps) {
-                        acc[j as usize] += c * p_vj;
-                    }
-                });
+                let (js, aps) = ap.row(u as usize);
+                for (&j, &ap_uj) in js.iter().zip(aps) {
+                    acc[j as usize] += pt_iu * ap_uj;
+                }
             }
             let (cols, vals) = a1.row(i);
             for (&j, &v) in cols.iter().zip(vals) {
