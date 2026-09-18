@@ -16,6 +16,88 @@
 use crate::graph::LevelGraph;
 use crate::linear_solver::Precision;
 
+#[cfg(feature = "gpu")]
+pub mod gpu;
+
+/// One adapter seen by [`probe_gpu`], with the limits the solver cares about.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GpuAdapterReport {
+    /// Adapter (device) name as reported by the driver.
+    pub name: String,
+    /// wgpu backend: `vulkan`, `dx12`, `metal`, `gl`, ….
+    pub backend: String,
+    /// `discrete`, `integrated`, `virtual`, `cpu` or `other`.
+    pub device_type: String,
+    /// Driver name and version string.
+    pub driver: String,
+    /// Largest single storage-buffer binding, in bytes.
+    pub max_storage_buffer_binding_size: u64,
+    /// Largest buffer allocation, in bytes.
+    pub max_buffer_size: u64,
+    /// Whether `wgpu::Features::SHADER_F64` is available.
+    pub shader_f64: bool,
+    /// `true` for software rasterisers (`DeviceType::Cpu`: lavapipe,
+    /// SwiftShader, WARP).
+    pub software: bool,
+    /// `true` when the selection policy accepts this adapter.
+    pub selectable: bool,
+}
+
+/// Result of enumerating GPU adapters (§2.5 of the program plan): every
+/// adapter seen, the one the policy would pick, and a human-readable message
+/// suitable for `GpuUnavailable` errors and the FFI probe.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GpuProbe {
+    /// `false` when the crate was compiled without the `gpu` feature.
+    pub built_with_gpu_feature: bool,
+    /// Adapters in the order the selection policy ranks them.
+    pub adapters: Vec<GpuAdapterReport>,
+    /// Index into `adapters` of the selected adapter, if any is usable.
+    pub chosen: Option<usize>,
+    /// Summary of the outcome (chosen adapter, or why none was usable).
+    pub message: String,
+}
+
+impl GpuProbe {
+    /// `true` when a usable adapter was found.
+    pub fn is_available(&self) -> bool {
+        self.chosen.is_some()
+    }
+
+    /// The selected adapter's report.
+    pub fn chosen_adapter(&self) -> Option<&GpuAdapterReport> {
+        self.chosen.and_then(|i| self.adapters.get(i))
+    }
+}
+
+impl std::fmt::Display for GpuProbe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// Enumerate GPU adapters and report which one the solver would use.
+///
+/// Honours `THESEUS_GPU_ALLOW_SOFTWARE=1` (accept `DeviceType::Cpu`
+/// adapters), `WGPU_BACKEND` and `WGPU_ADAPTER_NAME`. Never fails: without
+/// the `gpu` feature, or when no adapter is usable, the report says so in
+/// `message` and `chosen` is `None`.
+pub fn probe_gpu() -> GpuProbe {
+    #[cfg(feature = "gpu")]
+    {
+        gpu::probe(&gpu::AdapterPolicy::from_env())
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        GpuProbe {
+            built_with_gpu_feature: false,
+            adapters: Vec::new(),
+            chosen: None,
+            message: "theseus was not built with the `gpu` feature".to_string(),
+        }
+    }
+}
+
 /// Marker for the compute backend an iterative solver runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BackendHandle {
