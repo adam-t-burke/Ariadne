@@ -24,7 +24,11 @@
 //! ```
 
 mod adapter;
+mod backend;
 mod buffers;
+mod pipelines;
 
 pub use adapter::{enumerate, instance, probe, AdapterPolicy, GpuContext, ALLOW_SOFTWARE_ENV};
+pub use backend::{members_csr, GpuAggregates, GpuBackend, GpuCoarseEdgeMap, GpuLevel, GpuStats};
 pub use buffers::{BufferPool, GpuBuf, IndexBuf};
+pub use pipelines::{shader_source, KernelSet, KERNELS_WGSL, WORKGROUP_SIZES};
