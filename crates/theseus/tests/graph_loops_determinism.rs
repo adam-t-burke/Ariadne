@@ -386,3 +386,50 @@ fn loss_reductions_match_sequential_sums() {
         .fold(0.0, |a, l| a + l);
     assert_eq!(total.to_bits(), seq.to_bits(), "total_loss order");
 }
+
+/// End to end: a full L-BFGS-B solve on the 160 × 160 grid (fixture with
+/// every rewritten loop above the parallel threshold) produces bitwise the
+/// same force densities, geometry and loss trace on pools of 1 and 4
+/// threads.
+#[test]
+fn full_optimization_is_bitwise_identical_across_thread_counts() {
+    use std::sync::atomic::AtomicBool;
+
+    let (problem, _) = fixture(160);
+    let mut problem = problem;
+    problem.solver.q_parameterization_mode = QParameterizationMode::DirectBoxBounds;
+    problem.solver.absolute_tolerance = 0.0;
+    problem.solver.relative_tolerance = 0.0;
+    problem.solver.max_iterations = 8;
+    let ne = problem.topology.num_edges;
+
+    let run = |threads: usize| -> SolverResult {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                let cancel = AtomicBool::new(false);
+                let mut state = OptimizationState::new(vec![1.0; ne], Array2::zeros((0, 3)));
+                theseus::optimizer::optimize(&problem, &mut state, None, 1, &cancel).unwrap()
+            })
+    };
+    let base = run(1);
+    let other = run(4);
+    assert!(base.loss_trace.len() > 1, "optimizer should take steps");
+    assert_eq!(base.iterations, other.iterations, "iteration count");
+    assert_bitwise(&other.loss_trace, &base.loss_trace, "loss trace");
+    assert_bitwise(&other.q, &base.q, "final q");
+    assert_bitwise(&other.member_lengths, &base.member_lengths, "final lengths");
+    assert_bitwise(&other.member_forces, &base.member_forces, "final forces");
+    assert_bitwise(
+        other.xyz.as_slice().unwrap(),
+        base.xyz.as_slice().unwrap(),
+        "final xyz",
+    );
+    assert_bitwise(
+        other.reactions.as_slice().unwrap(),
+        base.reactions.as_slice().unwrap(),
+        "final reactions",
+    );
+}
