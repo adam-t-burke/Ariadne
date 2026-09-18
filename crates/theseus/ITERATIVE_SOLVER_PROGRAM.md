@@ -774,7 +774,7 @@ noting it in the report.
 |---|---|
 | M0 Interfaces | **reached** (`9a5f52d`): WS-I merged; `DirectSolver` bitwise-equal to the cache path, `factor_and_solve` shares its refactor code; full `Box<dyn LinearSystemSolver>` dispatch inside `FdmCache` deferred to WS-D |
 | M1 Phase-0 verdict | WS-A report merged with a go/no-go and parameter recommendation |
-| M2 Infrastructure | WS-B, WS-E, WS-F merged; toggle visible in Grasshopper returning "not yet available" for iterative kinds; sweep tooling produces a `Direct` cost model |
+| M2 Infrastructure | WS-B, WS-E, WS-F merged; toggle visible in Grasshopper returning "not yet available" for iterative kinds; sweep tooling produces a `Direct` cost model. *WS-E done* (`6df10ba`): fixtures, JSON harness, `scripts/bench_sweep.py`, `crossover_fit.py`, first `Direct` sweep 10k–1M on the CI VM with fits at RMS < 15% (`benchmarks/reports/`) |
 | M3 CPU iterative | WS-C, WS-D merged; `IterativeCpu` passes all contract tests; `bench_scale` numbers at 224–708 recorded |
 | M4 GPU kernels | WS-G merged; kernels validated under software adapters on three OSes and on one real GPU |
 | M5 GPU end to end | WS-H merged; `IterativeGpu` validated on Windows/NVIDIA and Apple silicon; 10M-edge run recorded |
@@ -820,3 +820,12 @@ for a future `Auto` decision.
   Send`, `precondition_precision: Option<Precision>`, `Backend` associated
   buffer types and fused `residual` kernel, unit-struct `LinearSolver`
   factory, perturbation as solver state, FFI codes `-3..-6`.
+* 2026-09-18 — WS-E landed. Harness backend strings are fixed as
+  `direct`, `iterative-cpu`, `iterative-gpu` (`THESEUS_LINEAR_SOLVER`; WS-D
+  implements the parser). Under external load the sweep report keeps the
+  fastest unflagged re-run per cell and records every pass in
+  `config.json`; clean-machine sweeps (WS-J) use plain medians. Crossover
+  JSON is keyed by the machine's max-thread setting; the single-thread
+  crossover is reported alongside for the `Auto` proposal. Not yet built:
+  the "every objective type" 1,000-node fixture (moves to WS-K) and
+  in-harness full-solve repetitions (the sweep re-runs cells instead).
