@@ -375,3 +375,85 @@ fn bench_direct_box_bounds_48() {
         start.elapsed().as_secs_f64() * 1.0e3,
     );
 }
+
+#[test]
+#[ignore = "manual optimizer comparison; run in release mode with RAYON_NUM_THREADS=1"]
+fn bench_optimizer_comparison() {
+    for (grid, mode) in [
+        (10, QParameterizationMode::DirectSoftBounds),
+        (32, QParameterizationMode::DirectSoftBounds),
+        (48, QParameterizationMode::DirectBoxBounds),
+    ] {
+        let mut problem = make_grid_problem(grid);
+        problem.solver.q_parameterization_mode = mode;
+        if mode == QParameterizationMode::DirectBoxBounds {
+            problem.bounds.upper.fill(10.0);
+        }
+        let ne = problem.topology.num_edges;
+        let run = || {
+            let mut state = OptimizationState::new(vec![1.0; ne], Array2::zeros((0, 3)));
+            let result = theseus::optimizer::optimize(
+                &problem,
+                &mut state,
+                None,
+                1,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            (state, result)
+        };
+        std::hint::black_box(run());
+        let mut times = Vec::new();
+        for _ in 0..10 {
+            let start = Instant::now();
+            std::hint::black_box(run());
+            times.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(f64::total_cmp);
+        let (state, result) = run();
+        let theta = theseus::optimizer::pack_parameters(&problem, &state);
+        let mut cache = FdmCache::new(&problem).unwrap();
+        let mut gradient = vec![0.0; ne];
+        let evaluation_lower = if mode == QParameterizationMode::DirectBoxBounds {
+            vec![f64::NEG_INFINITY; ne]
+        } else {
+            problem.bounds.lower.clone()
+        };
+        let evaluation_upper = if mode == QParameterizationMode::DirectBoxBounds {
+            vec![f64::INFINITY; ne]
+        } else {
+            problem.bounds.upper.clone()
+        };
+        let lower_indices: Vec<_> = (0..ne)
+            .filter(|&i| evaluation_lower[i].is_finite())
+            .collect();
+        let upper_indices: Vec<_> = (0..ne)
+            .filter(|&i| evaluation_upper[i].is_finite())
+            .collect();
+        let loss = theseus::gradients::value_and_gradient(
+            &mut cache,
+            &problem,
+            &theta,
+            &mut gradient,
+            &evaluation_lower,
+            &evaluation_upper,
+            &lower_indices,
+            &upper_indices,
+        )
+        .unwrap();
+        let gradient_norm = if mode == QParameterizationMode::DirectBoxBounds {
+            theta
+                .iter()
+                .zip(&gradient)
+                .enumerate()
+                .map(|(i, (&x, &g))| {
+                    (x - (x - g).clamp(problem.bounds.lower[i], problem.bounds.upper[i])).abs()
+                })
+                .fold(0.0_f64, f64::max)
+        } else {
+            gradient.iter().map(|g| g * g).sum::<f64>().sqrt()
+        };
+        eprintln!("{mode:?},{grid},median_ms={:.6},loss={loss:.12e},gradient={gradient_norm:.6e},iterations={},evaluations={},converged={},reason={}",
+            (times[4] + times[5]) / 2.0, result.iterations, result.loss_trace.len(), result.converged, result.termination_reason);
+    }
+}
