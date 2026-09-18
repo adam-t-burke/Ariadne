@@ -1,3 +1,4 @@
+use crate::graph::CsrAdjacency;
 use crate::linear_solver::{IterativeSolverOptions, LinearSolverKind};
 use crate::sparse::SparseColMatOwned;
 use ndarray::Array2;
@@ -1147,9 +1148,13 @@ pub struct FdmCache {
     pub node_to_free_idx: Vec<Option<usize>>,
     /// Per-node lists of incident edge indices (for reaction gradients).
     pub node_incident_edges: Vec<Vec<usize>>,
+    /// Node-centred CSR adjacency over all nodes (incident edges ascending);
+    /// shared by the parallel node-gather loops and the iterative solvers.
+    pub adjacency: CsrAdjacency,
 
-    /// Edges with exactly one fixed endpoint, as `(edge, free row, fixed node)`.
-    /// Only these edges contribute to the right-hand side.
+    /// Edges with exactly one fixed endpoint, as `(edge, free row, fixed node)`,
+    /// sorted by free row then edge. Only these edges contribute to the
+    /// right-hand side.
     pub boundary_edges: Vec<(usize, usize, usize)>,
 
     // ── Primal buffers ─────────────────────────────────────
@@ -1246,6 +1251,7 @@ impl FdmCache {
             node_incident_edges[edge_starts[k]].push(k);
             node_incident_edges[edge_ends[k]].push(k);
         }
+        let adjacency = CsrAdjacency::from_endpoints(nn, &edge_starts, &edge_ends);
 
         // ── 5. Factorization strategy ─────────────────────
         let strategy = FactorizationStrategy::from_bounds(&problem.bounds);
@@ -1253,6 +1259,8 @@ impl FdmCache {
         // ── 5b. Edges with one free and one fixed endpoint ─
         // These are the only edges that contribute to the right-hand side
         // b = Pn − Cnᵀ diag(q) Cf Nf_fixed.
+        // Sorted by free row so `assemble_rhs` can gather each free node's
+        // boundary edges as one contiguous, ascending-edge run.
         let mut boundary_edges = Vec::new();
         for k in 0..ne {
             let (s_node, e_node) = (edge_starts[k], edge_ends[k]);
@@ -1262,6 +1270,7 @@ impl FdmCache {
                 _ => {}
             }
         }
+        boundary_edges.sort_unstable_by_key(|&(k, free, _)| (free, k));
 
         // ── 6. Pre-allocate all buffers ───────────────────
 
@@ -1281,6 +1290,7 @@ impl FdmCache {
             edge_ends,
             node_to_free_idx,
             node_incident_edges,
+            adjacency,
             x: Array2::zeros((nn_free, 3)),
             lambda: Array2::zeros((nn_free, 3)),
             grad_x: Array2::zeros((nn_free, 3)),

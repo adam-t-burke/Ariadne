@@ -8,6 +8,7 @@
 //!
 //! All gradients derived analytically — no AD framework needed.
 
+use crate::backend::cpu::{for_each_chunk_mut, CHUNK, PAR_MIN_LEN};
 use crate::objectives::{bounds_penalty_grad, softplus_grad};
 use crate::types::{
     FdmCache, ForceVarianceNormalizationStrategy, GeometrySnapshot,
@@ -517,42 +518,71 @@ fn accumulate_self_weight_dq(cache: &mut FdmCache, problem: &Problem) {
 
 /// Accumulate implicit gradient dJ/dq_k = −Δλ_k · ΔN_k
 /// and dJ/dNf contributions for variable anchors.
+///
+/// The per-edge term is a chunked parallel pass over `grad_q` (each edge
+/// subtracts its three coordinate products in `d` order, as before). The
+/// fixed-node term `∂J/∂Nf` is gathered per fixed node over its incident
+/// edges in ascending edge order — the order in which the sequential edge
+/// loop scattered into that node — so both are bitwise identical to the
+/// sequential code for any thread count.
 pub fn accumulate_implicit_gradients(cache: &mut FdmCache, problem: &Problem) {
-    let ne = problem.topology.num_edges;
+    let nf = cache
+        .nf
+        .as_slice()
+        .expect("node positions must be contiguous row-major");
+    let lambda = cache
+        .lambda
+        .as_slice()
+        .expect("adjoint must be contiguous row-major");
+    let node_to_free = &cache.node_to_free_idx;
+    let starts = &cache.edge_starts;
+    let ends = &cache.edge_ends;
 
-    for k in 0..ne {
-        let u = cache.edge_starts[k];
-        let v = cache.edge_ends[k];
-
-        let u_free = cache.node_to_free_idx[u];
-        let v_free = cache.node_to_free_idx[v];
-
-        for d in 0..3 {
-            let lam_u = if let Some(uf) = u_free {
-                cache.lambda[[uf, d]]
-            } else {
-                0.0
-            };
-            let lam_v = if let Some(vf) = v_free {
-                cache.lambda[[vf, d]]
-            } else {
-                0.0
-            };
-            let d_lam = lam_v - lam_u;
-
-            let d_n = cache.nf[[v, d]] - cache.nf[[u, d]];
-
-            // Implicit ∂J/∂q_k
-            cache.grad_q[k] -= d_lam * d_n;
-
-            // ∂J/∂Nf  (fixed-node contributions)
-            let term = -cache.q[k] * d_lam;
-            if v_free.is_none() {
-                cache.grad_nf[[v, d]] += term;
+    for_each_chunk_mut(&mut cache.grad_q, CHUNK, |start, chunk| {
+        for (j, g) in chunk.iter_mut().enumerate() {
+            let k = start + j;
+            let (u, v) = (starts[k], ends[k]);
+            let u_free = node_to_free[u];
+            let v_free = node_to_free[v];
+            for d in 0..3 {
+                let lam_u = u_free.map_or(0.0, |uf| lambda[uf * 3 + d]);
+                let lam_v = v_free.map_or(0.0, |vf| lambda[vf * 3 + d]);
+                let d_lam = lam_v - lam_u;
+                let d_n = nf[v * 3 + d] - nf[u * 3 + d];
+                *g -= d_lam * d_n;
             }
-            if u_free.is_none() {
-                cache.grad_nf[[u, d]] -= term;
+        }
+    });
+
+    // ∂J/∂Nf at fixed nodes: for edge k = (u, v), `term = −q_k Δλ` is added
+    // at a fixed end node v and subtracted at a fixed start node u.
+    let q = &cache.q;
+    let adjacency = &cache.adjacency;
+    for &w in &problem.topology.fixed_node_indices {
+        let mut acc = [
+            cache.grad_nf[[w, 0]],
+            cache.grad_nf[[w, 1]],
+            cache.grad_nf[[w, 2]],
+        ];
+        for (k, sign, other) in adjacency.incident(w) {
+            let k = k as usize;
+            let other = other as usize;
+            // λ at w is zero (fixed); the free end contributes its λ.
+            let lam_other = node_to_free[other];
+            for d in 0..3 {
+                let lam_o = lam_other.map_or(0.0, |of| lambda[of * 3 + d]);
+                // d_lam = λ_v − λ_u with λ_w = 0.
+                let d_lam = if sign > 0 { 0.0 - lam_o } else { lam_o - 0.0 };
+                let term = -q[k] * d_lam;
+                if sign > 0 {
+                    acc[d] += term;
+                } else {
+                    acc[d] -= term;
+                }
             }
+        }
+        for (d, &value) in acc.iter().enumerate() {
+            cache.grad_nf[[w, d]] = value;
         }
     }
 }
@@ -565,7 +595,11 @@ pub fn accumulate_implicit_gradients(cache: &mut FdmCache, problem: &Problem) {
 ///
 /// After this, `cache.grad_x` is ready for the adjoint solve.
 pub fn accumulate_explicit_gradients(cache: &mut FdmCache, problem: &Problem) {
-    cache.grad_x.fill(0.0);
+    let grad_x = cache
+        .grad_x
+        .as_slice_mut()
+        .expect("grad_x must be contiguous row-major");
+    for_each_chunk_mut(grad_x, CHUNK * 3, |_, chunk| chunk.fill(0.0));
 
     // We also need to zero grad_q here because the adjoint adds to it later.
     // Explicit dJ/dq terms are accumulated inline.
@@ -580,6 +614,119 @@ pub fn accumulate_explicit_gradients(cache: &mut FdmCache, problem: &Problem) {
 //  Per-objective gradient implementations
 // ─────────────────────────────────────────────────────────────
 
+/// Chunked gather over the rows of `grad_x` (free nodes): `entry_of_row(row)`
+/// is the list entry of that row's node, if listed, and `grad(i, position)`
+/// its contribution; components `d < dims` are added. Parallel above
+/// `PAR_MIN_LEN` elements on pools with more than one thread.
+fn gather_node_position_grads(
+    grad_x: &mut [f64],
+    nf: &[f64],
+    free_node_indices: &[usize],
+    dims: usize,
+    grad: &(impl Fn(usize, &[f64; 3]) -> [f64; 3] + Sync),
+    entry_of_row: impl Fn(usize) -> Option<usize> + Sync,
+) {
+    for_each_chunk_mut(grad_x, CHUNK * 3, |start, chunk| {
+        for (j, row) in chunk.chunks_exact_mut(3).enumerate() {
+            let free_row = start / 3 + j;
+            if let Some(i) = entry_of_row(free_row) {
+                let node = free_node_indices[free_row];
+                let pos: &[f64; 3] = nf[node * 3..node * 3 + 3]
+                    .try_into()
+                    .expect("3 coordinates");
+                let g = grad(i, pos);
+                for (out, &value) in row.iter_mut().zip(&g).take(dims) {
+                    *out += value;
+                }
+            }
+        }
+    });
+}
+
+/// Add per-node position gradients for a list of target nodes.
+///
+/// `grad(i, position)` returns the contribution of list entry `i` (node
+/// `node_indices[i]` at `position`); components `d < dims` are added to
+/// `grad_x` (free node) or `grad_nf` (fixed node).
+///
+/// When the list is long (`3 · len ≥ PAR_MIN_LEN`) and its nodes are
+/// distinct, the free-node part runs as a chunked gather (parallel when the
+/// pool has more than one thread; the gather is also the cheaper form on
+/// one thread, as it skips the per-node free-index lookups) over the
+/// rows of `grad_x` through an inverse node → entry map, and the fixed-node
+/// part sequentially. Every `(node, d)` receives exactly one addition in
+/// either form, so the result is bitwise identical to the sequential loop,
+/// which remains the fallback for short lists and lists with repeated
+/// nodes.
+fn accumulate_node_position_grads(
+    cache: &mut FdmCache,
+    node_indices: &[usize],
+    free_node_indices: &[usize],
+    dims: usize,
+    grad: impl Fn(usize, &[f64; 3]) -> [f64; 3] + Sync,
+) {
+    let n = node_indices.len();
+    let nn = cache.nf.nrows();
+    if n * 3 >= PAR_MIN_LEN && free_node_indices.len() == cache.grad_x.nrows() {
+        let nf = cache
+            .nf
+            .as_slice()
+            .expect("node positions must be contiguous row-major");
+        let grad_x = cache
+            .grad_x
+            .as_slice_mut()
+            .expect("grad_x must be contiguous row-major");
+        if node_indices == free_node_indices {
+            // The common "every free node" list: entry i is free row i.
+            gather_node_position_grads(grad_x, nf, free_node_indices, dims, &grad, Some);
+            return;
+        }
+        let mut entry_of_node = vec![u32::MAX; nn];
+        let mut fixed_entries = Vec::new();
+        let mut distinct = true;
+        for (i, &node) in node_indices.iter().enumerate() {
+            if entry_of_node[node] != u32::MAX {
+                distinct = false;
+                break;
+            }
+            entry_of_node[node] = i as u32;
+            if cache.node_to_free_idx[node].is_none() {
+                fixed_entries.push(i);
+            }
+        }
+        if distinct {
+            gather_node_position_grads(grad_x, nf, free_node_indices, dims, &grad, |free_row| {
+                let i = entry_of_node[free_node_indices[free_row]];
+                (i != u32::MAX).then_some(i as usize)
+            });
+            for i in fixed_entries {
+                let node = node_indices[i];
+                let pos = [
+                    cache.nf[[node, 0]],
+                    cache.nf[[node, 1]],
+                    cache.nf[[node, 2]],
+                ];
+                let g = grad(i, &pos);
+                for (d, &value) in g.iter().enumerate().take(dims) {
+                    cache.grad_nf[[node, d]] += value;
+                }
+            }
+            return;
+        }
+    }
+    for (i, &node) in node_indices.iter().enumerate() {
+        let pos = [
+            cache.nf[[node, 0]],
+            cache.nf[[node, 1]],
+            cache.nf[[node, 2]],
+        ];
+        let g = grad(i, &pos);
+        for (d, &value) in g.iter().enumerate().take(dims) {
+            add_node_position_grad(cache, node, d, value);
+        }
+    }
+}
+
 /// TargetXYZ:  L = w Σ_i ‖xyz[idx] − t_i‖²
 /// dL/dx̂[j,d] = 2w (xyz[idx,d] − t[i,d])  if idx is a free node at position j
 pub(crate) fn grad_target_xyz(
@@ -587,16 +734,42 @@ pub(crate) fn grad_target_xyz(
     weight: f64,
     node_indices: &[usize],
     target: &Array2<f64>,
-    _free_node_indices: &[usize],
+    free_node_indices: &[usize],
 ) {
-    for (i, &idx) in node_indices.iter().enumerate() {
-        for d in 0..3 {
-            add_node_position_grad(
-                cache,
-                idx,
-                d,
-                2.0 * weight * (cache.nf[[idx, d]] - target[[i, d]]),
-            );
+    let target = RowMajor3::new(target);
+    accumulate_node_position_grads(cache, node_indices, free_node_indices, 3, |i, p| {
+        let t = target.row(i);
+        [
+            2.0 * weight * (p[0] - t[0]),
+            2.0 * weight * (p[1] - t[1]),
+            2.0 * weight * (p[2] - t[2]),
+        ]
+    });
+}
+
+/// Row access to an `n × 3` array that avoids ndarray's per-element index
+/// arithmetic when the array is contiguous row-major (always the case for
+/// arrays built by the crate; falls back to `Array2` indexing otherwise).
+struct RowMajor3<'a> {
+    array: &'a Array2<f64>,
+    slice: Option<&'a [f64]>,
+}
+
+impl<'a> RowMajor3<'a> {
+    fn new(array: &'a Array2<f64>) -> Self {
+        let slice = if array.ncols() == 3 {
+            array.as_slice()
+        } else {
+            None
+        };
+        Self { array, slice }
+    }
+
+    #[inline]
+    fn row(&self, i: usize) -> [f64; 3] {
+        match self.slice {
+            Some(s) => [s[i * 3], s[i * 3 + 1], s[i * 3 + 2]],
+            None => [self.array[[i, 0]], self.array[[i, 1]], self.array[[i, 2]]],
         }
     }
 }
@@ -607,18 +780,17 @@ pub(crate) fn grad_target_xy(
     weight: f64,
     node_indices: &[usize],
     target: &Array2<f64>,
-    _free_node_indices: &[usize],
+    free_node_indices: &[usize],
 ) {
-    for (i, &idx) in node_indices.iter().enumerate() {
-        for d in 0..2 {
-            add_node_position_grad(
-                cache,
-                idx,
-                d,
-                2.0 * weight * (cache.nf[[idx, d]] - target[[i, d]]),
-            );
-        }
-    }
+    let target = RowMajor3::new(target);
+    accumulate_node_position_grads(cache, node_indices, free_node_indices, 2, |i, p| {
+        let t = target.row(i);
+        [
+            2.0 * weight * (p[0] - t[0]),
+            2.0 * weight * (p[1] - t[1]),
+            0.0,
+        ]
+    });
 }
 
 /// TargetPlane:  L = w Σ ((u_p − u_t)² + (v_p − v_t)²).  dL/dp = 2w((Δu)x_axis + (Δv)y_axis).
@@ -630,28 +802,32 @@ pub(crate) fn grad_target_plane(
     origin: &[f64; 3],
     x_axis: &[f64; 3],
     y_axis: &[f64; 3],
-    _free_node_indices: &[usize],
+    free_node_indices: &[usize],
 ) {
-    for (i, &idx) in node_indices.iter().enumerate() {
-        let u_p = (cache.nf[[idx, 0]] - origin[0]) * x_axis[0]
-            + (cache.nf[[idx, 1]] - origin[1]) * x_axis[1]
-            + (cache.nf[[idx, 2]] - origin[2]) * x_axis[2];
-        let v_p = (cache.nf[[idx, 0]] - origin[0]) * y_axis[0]
-            + (cache.nf[[idx, 1]] - origin[1]) * y_axis[1]
-            + (cache.nf[[idx, 2]] - origin[2]) * y_axis[2];
-        let u_t = (target[[i, 0]] - origin[0]) * x_axis[0]
-            + (target[[i, 1]] - origin[1]) * x_axis[1]
-            + (target[[i, 2]] - origin[2]) * x_axis[2];
-        let v_t = (target[[i, 0]] - origin[0]) * y_axis[0]
-            + (target[[i, 1]] - origin[1]) * y_axis[1]
-            + (target[[i, 2]] - origin[2]) * y_axis[2];
+    let scale = 2.0 * weight;
+    let target = RowMajor3::new(target);
+    accumulate_node_position_grads(cache, node_indices, free_node_indices, 3, |i, p| {
+        let t = target.row(i);
+        let u_p = (p[0] - origin[0]) * x_axis[0]
+            + (p[1] - origin[1]) * x_axis[1]
+            + (p[2] - origin[2]) * x_axis[2];
+        let v_p = (p[0] - origin[0]) * y_axis[0]
+            + (p[1] - origin[1]) * y_axis[1]
+            + (p[2] - origin[2]) * y_axis[2];
+        let u_t = (t[0] - origin[0]) * x_axis[0]
+            + (t[1] - origin[1]) * x_axis[1]
+            + (t[2] - origin[2]) * x_axis[2];
+        let v_t = (t[0] - origin[0]) * y_axis[0]
+            + (t[1] - origin[1]) * y_axis[1]
+            + (t[2] - origin[2]) * y_axis[2];
         let du = u_p - u_t;
         let dv = v_p - v_t;
-        let scale = 2.0 * weight;
-        for d in 0..3 {
-            add_node_position_grad(cache, idx, d, scale * (du * x_axis[d] + dv * y_axis[d]));
-        }
-    }
+        [
+            scale * (du * x_axis[0] + dv * y_axis[0]),
+            scale * (du * x_axis[1] + dv * y_axis[1]),
+            scale * (du * x_axis[2] + dv * y_axis[2]),
+        ]
+    });
 }
 
 /// PlanarConstraintAlongDirection:  L = w Σ t², t = n·(O−P)/(n·d).  dL/dP = −2w t · n / (n·d).
@@ -663,22 +839,18 @@ pub(crate) fn grad_planar_constraint_along_direction(
     x_axis: &[f64; 3],
     y_axis: &[f64; 3],
     direction: &[f64; 3],
-    _free_node_indices: &[usize],
+    free_node_indices: &[usize],
 ) -> Result<(), TheseusError> {
     let n_dot_d = crate::objectives::planar_constraint_n_dot_d(x_axis, y_axis, direction)?;
     let nx = x_axis[1] * y_axis[2] - x_axis[2] * y_axis[1];
     let ny = x_axis[2] * y_axis[0] - x_axis[0] * y_axis[2];
     let nz = x_axis[0] * y_axis[1] - x_axis[1] * y_axis[0];
     let scale = -2.0 * weight / n_dot_d;
-    for &idx in node_indices {
-        let n_dot_op = nx * (origin[0] - cache.nf[[idx, 0]])
-            + ny * (origin[1] - cache.nf[[idx, 1]])
-            + nz * (origin[2] - cache.nf[[idx, 2]]);
+    accumulate_node_position_grads(cache, node_indices, free_node_indices, 3, |_, p| {
+        let n_dot_op = nx * (origin[0] - p[0]) + ny * (origin[1] - p[1]) + nz * (origin[2] - p[2]);
         let t = n_dot_op / n_dot_d;
-        add_node_position_grad(cache, idx, 0, scale * t * nx);
-        add_node_position_grad(cache, idx, 1, scale * t * ny);
-        add_node_position_grad(cache, idx, 2, scale * t * nz);
-    }
+        [scale * t * nx, scale * t * ny, scale * t * nz]
+    });
     Ok(())
 }
 
@@ -1291,8 +1463,8 @@ fn accumulate_reaction_grad(
     node: usize,
     dl_dr: &[f64; 3],
 ) {
-    let incident = cache.node_incident_edges[node].clone();
-    for &k in &incident {
+    for idx in cache.adjacency.range(node) {
+        let k = cache.adjacency.edges[idx] as usize;
         let s = cache.edge_starts[k];
         let e = cache.edge_ends[k];
         let qi = cache.q[k];

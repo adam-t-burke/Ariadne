@@ -489,3 +489,87 @@ physical memory. Never infer QR rank from this harness.
 This document intentionally contains no paper baseline yet. A focused smoke
 run validates compilation and process isolation, but it is not a controlled
 end-to-end measurement suitable for publication.
+
+# WS-B: parallel O(ne) loops
+
+The O(ne)/O(nn) loops of the fused evaluation (`assemble_a`, `assemble_rhs`,
+`compute_geometry`, the objective reductions, the explicit node-position
+gradients and `accumulate_implicit_gradients`) now run as chunked rayon loops
+over fixed 4,096-element pieces, with per-node work expressed as gathers over
+the CSR adjacency `FdmCache::adjacency` (incident edges in ascending edge
+order) instead of edge scatters. Chunk boundaries depend only on the data
+length and reduction partials are combined in chunk order, so every result is
+bitwise identical for any pool size (`tests/graph_loops_determinism.rs`
+checks one evaluation and a full 8-iteration solve on the 160 grid under
+pools of 1, 2 and 4 threads). Loops under 16,384 elements, and every loop on
+a single-thread pool, run on the calling thread with the same chunking.
+
+## Reproduce
+
+```sh
+RAYON_NUM_THREADS=1 cargo run --release -p theseus --example profile_phases -- 224 708
+RAYON_NUM_THREADS=4 cargo run --release -p theseus --example profile_phases -- 224 708
+```
+
+## Per-phase times
+
+Milliseconds per phase of one warm evaluation; `before` is the parent
+commit built from the same tree, `after` this branch, run interleaved on the
+same 4 vCPU VM and reported as the minimum over 8 runs (each run averages
+3 repetitions). One core was occupied by an unrelated process for the whole
+session, so the 4-thread rows effectively had three cores and run-to-run
+variation was ±10% on the sub-millisecond phases; the factorization and the
+two triangular solves (`solve`, `adjoint`) are unchanged by this work and
+serve as the noise reference.
+
+`RAYON_NUM_THREADS=1`:
+
+| grid | edges | | assemble A | assemble b | numeric factor | solve | geometry | loss | explicit ∇ | adjoint solve | implicit ∇ | total |
+|-----:|------:|:--|-----------:|-----------:|---------------:|------:|---------:|-----:|-----------:|--------------:|-----------:|------:|
+| 224 | 99,904 | before | 0.42 | 0.08 | 38.1 | 4.05 | 0.39 | 0.14 | 0.41 | 4.03 | 0.57 | 48.6 |
+| 224 | 99,904 | after | 0.41 | 0.07 | 38.2 | 3.92 | 0.40 | 0.13 | 0.40 | 3.91 | 0.37 | 48.1 |
+| 708 | 1,001,112 | before | 8.08 | 1.62 | 668 | 93.6 | 6.00 | 2.23 | 7.44 | 95.4 | 6.72 | 900 |
+| 708 | 1,001,112 | after | 8.23 | 1.49 | 677 | 96.1 | 6.09 | 2.31 | 7.55 | 98.5 | 5.91 | 908 |
+
+`RAYON_NUM_THREADS=4`:
+
+| grid | edges | | assemble A | assemble b | numeric factor | solve | geometry | loss | explicit ∇ | adjoint solve | implicit ∇ | total |
+|-----:|------:|:--|-----------:|-----------:|---------------:|------:|---------:|-----:|-----------:|--------------:|-----------:|------:|
+| 224 | 99,904 | before | 0.70 | 0.14 | 42.1 | 4.71 | 0.51 | 0.26 | 0.66 | 4.39 | 0.61 | 55.2 |
+| 224 | 99,904 | after | 0.41 | 0.06 | 42.1 | 5.06 | 0.52 | 0.10 | 0.49 | 4.31 | 0.31 | 54.3 |
+| 708 | 1,001,112 | before | 8.05 | 1.64 | 673 | 101.3 | 6.11 | 2.29 | 7.44 | 100.8 | 6.87 | 913 |
+| 708 | 1,001,112 | after | 2.98 | 0.54 | 669 | 97.4 | 2.72 | 0.81 | 4.09 | 95.2 | 2.41 | 881 |
+
+Sum of the six rewritten phases at 1M edges (assemble A, assemble b,
+geometry, loss, explicit ∇, implicit ∇):
+
+| threads | before | after | speed-up |
+|--------:|-------:|------:|---------:|
+| 1 | 32.1 ms | 31.6 ms | 1.02× |
+| 4 | 32.4 ms | 13.6 ms | 2.4× |
+
+A quieter run of the same protocol (load average 0.95, min over 6) gave
+31.8 → 11.6 ms at 4 threads (2.7×) with the same 1-thread parity (31.8 →
+31.4 ms); the loops are memory-bound gathers, so with three effective cores
+2.4–2.7× is what the machine allows. At 1 thread no phase moved by more than
+0.1 ms except the implicit gradient, which is 12% faster because the fixed
+node contributions are gathered per node instead of scanning every edge for
+a fixed endpoint. The triangular solves (~190 ms at 1M) are sequential and
+outside this workstream, so the whole evaluation moves only from 913 to
+881 ms; replacing them and the factorization with the AMG-preconditioned
+iterative path (WS-C/WS-D) is what this infrastructure is for.
+
+## Numerical changes
+
+* `assemble_a`, `assemble_rhs`, `compute_geometry`, the explicit node
+  gradients and `accumulate_implicit_gradients` reproduce the previous
+  sequential loops **bitwise**: each output entry is a sum over the same
+  terms in the same order (incident edges ascending, boundary edges sorted
+  by free row then edge), and the parallel and sequential forms of each loop
+  are identical.
+* The objective loss reductions (`objectives.rs`) are the one place the
+  order changed: sums are formed sequentially inside 4,096-element chunks
+  and the chunk partials added in order, so losses over more than 4,096
+  entries may differ from the old values in the last bits (tested at 1e-12
+  relative against plain sequential sums; `total_loss` still adds the
+  objectives in order). Sums of at most 4,096 entries are unchanged.
