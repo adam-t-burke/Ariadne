@@ -776,7 +776,7 @@ noting it in the report.
 | M1 Phase-0 verdict | WS-A report merged with a go/no-go and parameter recommendation |
 | M2 Infrastructure | **reached** — WS-B, WS-E, WS-F merged (*WS-B done*, `16da146`; *WS-F done*, `cb562e6`: toggle, options and probe through FFI/C#/Grasshopper, iterative kinds return code `-4`); toggle visible in Grasshopper returning "not yet available" for iterative kinds; sweep tooling produces a `Direct` cost model. *WS-E done* (`6df10ba`): fixtures, JSON harness, `scripts/bench_sweep.py`, `crossover_fit.py`, first `Direct` sweep 10k–1M on the CI VM with fits at RMS < 15% (`benchmarks/reports/`) |
 | M3 CPU iterative | WS-C, WS-D merged; `IterativeCpu` passes all contract tests; `bench_scale` numbers at 224–708 recorded |
-| M4 GPU kernels | WS-G merged; kernels validated under software adapters on three OSes and on one real GPU |
+| M4 GPU kernels | WS-G merged (`1c51afc`); kernels validated under lavapipe (17/17, f32 + f64); Windows/macOS software-adapter runs pending the CI job, real-GPU validation pending WS-H machines |
 | M5 GPU end to end | WS-H merged; `IterativeGpu` validated on Windows/NVIDIA and Apple silicon; 10M-edge run recorded |
 | M6 Crossover | WS-J reports for ≥ 3 machines; defaults committed |
 | M7 Release ready | WS-K complete; §4 all green; docs and checklist done |
@@ -853,3 +853,21 @@ for a future `Auto` decision.
   `Level0Map` lives in the iterative solver state, not `FdmCache` (WS-C);
   the sequential triangular solves (~60% of non-factor time) are a WS-K
   candidate (parallel over the 3 columns or supernode-level parallelism).
+* 2026-09-18 — WS-G landed (`4b82feb`, merged `1c51afc`): cargo feature
+  `gpu` (`wgpu =30.0.1`, `pollster`, `bytemuck`; `ordered-float` pinned to
+  5.4 for the 1.89 toolchain), `backend::gpu` with adapter policy, buffer
+  pool, batched encoder, f32 kernels and f64 variants where `SHADER_F64`
+  (Vulkan only in wgpu-hal 30; naga accepts `f64` without an `enable`),
+  17/17 equivalence tests under lavapipe, `gpu-software` CI job
+  (`continue-on-error` until WS-K). Probe types unified at merge: one
+  `GpuProbe`/`GpuAdapterReport`, JSON keeps WS-F's keys and adds `driver`,
+  `max_buffer_size`, `software`, `selectable`, `built_with_gpu_feature`.
+  Decisions on WS-G's questions: (1) `Backend::alloc`/`upload_level`
+  become fallible (`Result<_, TheseusError>`) — WS-H changes the trait and
+  the CPU impl together, the integrator updates §2.3; (2) binding splitting
+  for `max_storage_buffer_binding_size` < largest array is WS-H scope,
+  required for 10M edges on lavapipe/iGPU-class adapters; (3) coarse-edge
+  ordering convention is ascending `(min(U,V), max(U,V))` — WS-C's
+  `hierarchy.rs` must emit exactly that; (4) per-dispatch bind-group and
+  `write_buffer` costs are removed in WS-H once a K-cycle is measured;
+  (5) Windows/macOS adapter limit rows are filled from the CI job output.

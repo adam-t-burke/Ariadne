@@ -6,9 +6,7 @@
 
 use ndarray::Array2;
 use std::sync::atomic::{AtomicBool, Ordering};
-use theseus::inverse::{
-    solve_inverse_fdm, InverseFdmOptions, InverseMetric, ParticularMethod,
-};
+use theseus::inverse::{solve_inverse_fdm, InverseFdmOptions, InverseMetric, ParticularMethod};
 use theseus::optimizer;
 use theseus::sparse::SparseColMatOwned;
 use theseus::types::*;
