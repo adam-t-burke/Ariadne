@@ -12,10 +12,10 @@
 //!   contract shared by all implementations;
 //! * the [`LinearSystemSolver`] trait and the [`LinearSolver`] factory.
 //!
-//! The direct adapter lives in [`direct`]. Iterative implementations are
-//! added by later workstreams (`amg/`, `backend/`) and plug into
-//! [`LinearSolver::new`]; until then requesting them yields
-//! [`TheseusError::IterativeSolverUnsupported`].
+//! The direct adapter lives in [`direct`]; the CPU iterative solver is
+//! [`crate::amg::AmgSolver`] over [`crate::backend::CpuBackend`]. The GPU
+//! kind plugs into [`LinearSolver::new`] in a later workstream; until then
+//! requesting it yields [`TheseusError::IterativeSolverUnsupported`].
 //!
 //! Enum discriminants that cross the FFI boundary (`LinearSolverKind`,
 //! `TolerancePolicy` mode, `CycleKind`, `Precision`, `GpuOuterLoop`,
@@ -159,11 +159,14 @@ impl Default for TolerancePolicy {
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CycleKind {
-    /// One recursive pass; cheaper per application, less grid-independent
-    /// with plain aggregation.
-    V = 0,
-    /// Two flexible-CG iterations per coarse level, recursively. Default.
+    /// One recursive pass (one pre- and one post-smoothing sweep): a fixed
+    /// SPD preconditioner for standard PCG. Default since the Phase-0
+    /// revision of §3 (smoothed aggregation keeps its iteration counts
+    /// size-independent).
     #[default]
+    V = 0,
+    /// Two flexible-CG iterations per coarse level, recursively (Notay).
+    /// Kept for experiments; the outer loop then runs FCG(1).
     K = 1,
 }
 
@@ -296,6 +299,9 @@ pub struct IterativeSolverOptions {
     pub cycle: CycleKind,
     /// Chebyshev smoother degree.
     pub smoother_degree: u8,
+    /// Spectral ratio `α` of the Chebyshev smoother: the polynomial damps
+    /// `[λ_max/α, λ_max]` of `D⁻¹A`. Must be `> 1`.
+    pub spectral_alpha: f64,
     /// Pairwise matching passes per level (aggregates of up to
     /// `2^passes` nodes).
     pub aggregation_passes: u8,
@@ -313,8 +319,10 @@ impl IterativeSolverOptions {
     pub const DEFAULT_MAX_ITERATIONS: u32 = 200;
     /// Default `smoother_degree`.
     pub const DEFAULT_SMOOTHER_DEGREE: u8 = 2;
-    /// Default `aggregation_passes`.
-    pub const DEFAULT_AGGREGATION_PASSES: u8 = 2;
+    /// Default `spectral_alpha` (§3: α = 10; α = 30 costs +40% iterations).
+    pub const DEFAULT_SPECTRAL_ALPHA: f64 = 10.0;
+    /// Default `aggregation_passes` (§3: three passes, aggregates of ≤ 8).
+    pub const DEFAULT_AGGREGATION_PASSES: u8 = 3;
     /// Default `coarsest_size`.
     pub const DEFAULT_COARSEST_SIZE: u32 = 2000;
 
@@ -335,6 +343,7 @@ impl Default for IterativeSolverOptions {
             max_iterations: Self::DEFAULT_MAX_ITERATIONS,
             cycle: CycleKind::default(),
             smoother_degree: Self::DEFAULT_SMOOTHER_DEGREE,
+            spectral_alpha: Self::DEFAULT_SPECTRAL_ALPHA,
             aggregation_passes: Self::DEFAULT_AGGREGATION_PASSES,
             coarsest_size: Self::DEFAULT_COARSEST_SIZE,
             precondition_precision: None,
@@ -544,12 +553,15 @@ impl LinearSolver {
         bounds: &Bounds,
         options: &IterativeSolverOptions,
     ) -> Result<Box<dyn LinearSystemSolver>, TheseusError> {
-        let _ = options;
         match kind {
             LinearSolverKind::Direct => Ok(Box::new(DirectSolver::from_bounds(topology, bounds)?)),
-            LinearSolverKind::IterativeCpu | LinearSolverKind::IterativeGpu => {
+            LinearSolverKind::IterativeCpu => Ok(Box::new(crate::amg::AmgSolver::cpu(
+                topology, bounds, options,
+            )?)),
+            LinearSolverKind::IterativeGpu => {
                 Err(TheseusError::IterativeSolverUnsupported(format!(
-                    "iterative solvers are not yet available (requested '{kind}')"
+                    "the GPU iterative solver is not yet available (requested '{kind}'); \
+                 use IterativeCpu or Direct"
                 )))
             }
         }
@@ -602,9 +614,10 @@ mod tests {
         );
         assert_eq!(o.tolerance.initial(), 1e-6);
         assert_eq!(o.max_iterations, 200);
-        assert_eq!(o.cycle, CycleKind::K);
+        assert_eq!(o.cycle, CycleKind::V);
         assert_eq!(o.smoother_degree, 2);
-        assert_eq!(o.aggregation_passes, 2);
+        assert_eq!(o.spectral_alpha, 10.0);
+        assert_eq!(o.aggregation_passes, 3);
         assert_eq!(o.coarsest_size, 2000);
         assert_eq!(
             o.precondition_precision_for(LinearSolverKind::IterativeCpu),

@@ -25,6 +25,7 @@
 //! buffers of one precision only — mixing them is a programming error and
 //! panics with a message naming the kernel.
 
+use crate::amg::hierarchy::LevelMatrix;
 use crate::backend::{Backend, BackendHandle};
 use crate::graph::{CsrAdjacency, LevelGraph};
 use crate::linear_solver::Precision;
@@ -322,6 +323,89 @@ impl CpuLevelGraph {
     }
 }
 
+/// One uploaded CSR matrix in precision `T` (see [`LevelMatrix`]): pattern
+/// shared with the host copy, values converted, reciprocal diagonal for the
+/// Jacobi-scaled smoother (empty for rectangular transfers).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CpuCsrData<T> {
+    pub nrows: usize,
+    pub ncols: usize,
+    pub row_ptr: Vec<u32>,
+    pub col_idx: Vec<u32>,
+    pub values: Vec<T>,
+    /// `1 / diag[u]` (0 where `diag[u] == 0`), computed in `f64` then rounded.
+    pub inv_diag: Vec<T>,
+}
+
+impl<T: CpuScalar> CpuCsrData<T> {
+    fn new(m: &LevelMatrix) -> Self {
+        m.check();
+        let mut data = Self {
+            nrows: m.n,
+            ncols: m.ncols,
+            row_ptr: m.row_ptr.clone(),
+            col_idx: m.col_idx.clone(),
+            values: vec![T::default(); m.values.len()],
+            inv_diag: vec![T::default(); m.diag.len()],
+        };
+        data.set_values(m);
+        data
+    }
+
+    fn set_values(&mut self, m: &LevelMatrix) {
+        assert_eq!(m.values.len(), self.values.len(), "csr value count changed");
+        assert_eq!(
+            m.diag.len(),
+            self.inv_diag.len(),
+            "csr diagonal length changed"
+        );
+        assert_eq!(m.n, self.nrows, "csr row count changed");
+        for_each_chunk_mut(&mut self.values, CHUNK * 4, |start, chunk| {
+            for (dst, &v) in chunk.iter_mut().zip(&m.values[start..]) {
+                *dst = T::from_f64(v);
+            }
+        });
+        for_each_chunk_mut(&mut self.inv_diag, CHUNK, |start, chunk| {
+            for (dst, &d) in chunk.iter_mut().zip(&m.diag[start..]) {
+                *dst = T::from_f64(if d != 0.0 { 1.0 / d } else { 0.0 });
+            }
+        });
+    }
+}
+
+/// Uploaded [`LevelMatrix`] in the precision chosen at upload.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CpuCsr {
+    F64(CpuCsrData<f64>),
+    F32(CpuCsrData<f32>),
+}
+
+impl CpuCsr {
+    /// Precision of the stored values.
+    pub fn precision(&self) -> Precision {
+        match self {
+            Self::F64(_) => Precision::F64,
+            Self::F32(_) => Precision::F32,
+        }
+    }
+
+    /// Rows of the matrix.
+    pub fn nrows(&self) -> usize {
+        match self {
+            Self::F64(m) => m.nrows,
+            Self::F32(m) => m.nrows,
+        }
+    }
+
+    /// Columns of the matrix.
+    pub fn ncols(&self) -> usize {
+        match self {
+            Self::F64(m) => m.ncols,
+            Self::F32(m) => m.ncols,
+        }
+    }
+}
+
 /// Fine → coarse map of one level, with the inverse CSR (coarse → its fine
 /// nodes, ascending) so restriction is a gather.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -420,7 +504,68 @@ fn chebyshev_step_t<T: CpuScalar>(
     d: &mut [T],
     x: &mut [T],
 ) {
-    let n = level.n();
+    chebyshev_step_inv(&level.inv_diag, alpha, beta, r, d, x);
+}
+
+/// `Σ_j values[j] · x[col[j]]` over row `u`, ascending column order.
+#[inline]
+fn csr_row<T: CpuScalar>(m: &CpuCsrData<T>, x: &[T], u: usize) -> [T; 3] {
+    let mut acc = [T::default(); 3];
+    let range = m.row_ptr[u] as usize..m.row_ptr[u + 1] as usize;
+    for (&c, &v) in m.col_idx[range.clone()].iter().zip(&m.values[range]) {
+        let c = c as usize * 3;
+        acc[0] += v * x[c];
+        acc[1] += v * x[c + 1];
+        acc[2] += v * x[c + 2];
+    }
+    acc
+}
+
+fn apply_csr_t<T: CpuScalar>(m: &CpuCsrData<T>, x: &[T], y: &mut [T], accumulate: bool) {
+    assert_eq!(x.len(), m.ncols * 3, "apply_csr: x length");
+    assert_eq!(y.len(), m.nrows * 3, "apply_csr: y length");
+    for_each_chunk_mut(y, CHUNK * 3, |start, chunk| {
+        for (j, row) in chunk.chunks_exact_mut(3).enumerate() {
+            let acc = csr_row(m, x, start / 3 + j);
+            if accumulate {
+                row[0] += acc[0];
+                row[1] += acc[1];
+                row[2] += acc[2];
+            } else {
+                row.copy_from_slice(&acc);
+            }
+        }
+    });
+}
+
+fn residual_csr_t<T: CpuScalar>(m: &CpuCsrData<T>, x: &[T], b: &[T], r: &mut [T]) {
+    assert_eq!(m.nrows, m.ncols, "residual_csr: matrix must be square");
+    let n = m.nrows;
+    assert_eq!(x.len(), n * 3, "residual_csr: x length");
+    assert_eq!(b.len(), n * 3, "residual_csr: b length");
+    assert_eq!(r.len(), n * 3, "residual_csr: r length");
+    for_each_chunk_mut(r, CHUNK * 3, |start, chunk| {
+        for (j, row) in chunk.chunks_exact_mut(3).enumerate() {
+            let i = start + j * 3;
+            let acc = csr_row(m, x, i / 3);
+            row[0] = b[i] - acc[0];
+            row[1] = b[i + 1] - acc[1];
+            row[2] = b[i + 2] - acc[2];
+        }
+    });
+}
+
+/// Shared body of `chebyshev_step` / `chebyshev_step_csr` over any
+/// reciprocal diagonal.
+fn chebyshev_step_inv<T: CpuScalar>(
+    inv_diag: &[T],
+    alpha: f64,
+    beta: f64,
+    r: &[T],
+    d: &mut [T],
+    x: &mut [T],
+) {
+    let n = inv_diag.len();
     assert_eq!(r.len(), n * 3, "chebyshev_step: r length");
     assert_eq!(d.len(), n * 3, "chebyshev_step: d length");
     assert_eq!(x.len(), n * 3, "chebyshev_step: x length");
@@ -429,7 +574,7 @@ fn chebyshev_step_t<T: CpuScalar>(
     for_each_chunk_mut2(d, CHUNK * 3, x, CHUNK * 3, |start, dc, xc| {
         for (j, (dv, xv)) in dc.iter_mut().zip(xc.iter_mut()).enumerate() {
             let i = start + j;
-            let z = level.inv_diag[i / 3] * r[i];
+            let z = inv_diag[i / 3] * r[i];
             *dv = alpha * z + beta * *dv;
             *xv += *dv;
         }
@@ -582,6 +727,7 @@ impl Backend for CpuBackend {
     type Buf = CpuBuf;
     type LevelGraphBuf = CpuLevelGraph;
     type AggBuf = CpuAggregates;
+    type CsrBuf = CpuCsr;
 
     fn handle(&self) -> BackendHandle {
         BackendHandle::Cpu
@@ -653,6 +799,68 @@ impl Backend for CpuBackend {
 
     fn upload_aggregates(&self, aggregate_of: &[u32], n_coarse: usize) -> CpuAggregates {
         CpuAggregates::new(aggregate_of, n_coarse)
+    }
+
+    fn upload_csr(&self, m: &LevelMatrix, precision: Precision) -> CpuCsr {
+        match precision {
+            Precision::F64 => CpuCsr::F64(CpuCsrData::new(m)),
+            Precision::F32 => CpuCsr::F32(CpuCsrData::new(m)),
+        }
+    }
+
+    fn update_csr_values(&self, m: &LevelMatrix, dst: &mut CpuCsr) {
+        match dst {
+            CpuCsr::F64(d) => d.set_values(m),
+            CpuCsr::F32(d) => d.set_values(m),
+        }
+    }
+
+    fn apply_csr(&self, m: &CpuCsr, x: &CpuBuf, y: &mut CpuBuf) {
+        match (m, x, y) {
+            (CpuCsr::F64(m), CpuBuf::F64(x), CpuBuf::F64(y)) => apply_csr_t(m, x, y, false),
+            (CpuCsr::F32(m), CpuBuf::F32(x), CpuBuf::F32(y)) => apply_csr_t(m, x, y, false),
+            _ => precision_mismatch("apply_csr"),
+        }
+    }
+
+    fn apply_csr_add(&self, m: &CpuCsr, x: &CpuBuf, y: &mut CpuBuf) {
+        match (m, x, y) {
+            (CpuCsr::F64(m), CpuBuf::F64(x), CpuBuf::F64(y)) => apply_csr_t(m, x, y, true),
+            (CpuCsr::F32(m), CpuBuf::F32(x), CpuBuf::F32(y)) => apply_csr_t(m, x, y, true),
+            _ => precision_mismatch("apply_csr_add"),
+        }
+    }
+
+    fn residual_csr(&self, m: &CpuCsr, x: &CpuBuf, b: &CpuBuf, r: &mut CpuBuf) {
+        match (m, x, b, r) {
+            (CpuCsr::F64(m), CpuBuf::F64(x), CpuBuf::F64(b), CpuBuf::F64(r)) => {
+                residual_csr_t(m, x, b, r)
+            }
+            (CpuCsr::F32(m), CpuBuf::F32(x), CpuBuf::F32(b), CpuBuf::F32(r)) => {
+                residual_csr_t(m, x, b, r)
+            }
+            _ => precision_mismatch("residual_csr"),
+        }
+    }
+
+    fn chebyshev_step_csr(
+        &self,
+        m: &CpuCsr,
+        alpha: f64,
+        beta: f64,
+        r: &CpuBuf,
+        d: &mut CpuBuf,
+        x: &mut CpuBuf,
+    ) {
+        match (m, r, d, x) {
+            (CpuCsr::F64(m), CpuBuf::F64(r), CpuBuf::F64(d), CpuBuf::F64(x)) => {
+                chebyshev_step_inv(&m.inv_diag, alpha, beta, r, d, x)
+            }
+            (CpuCsr::F32(m), CpuBuf::F32(r), CpuBuf::F32(d), CpuBuf::F32(x)) => {
+                chebyshev_step_inv(&m.inv_diag, alpha, beta, r, d, x)
+            }
+            _ => precision_mismatch("chebyshev_step_csr"),
+        }
     }
 
     fn apply_graph(&self, level: &CpuLevelGraph, x: &CpuBuf, y: &mut CpuBuf) {

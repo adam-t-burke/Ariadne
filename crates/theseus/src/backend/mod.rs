@@ -15,6 +15,7 @@
 
 pub mod cpu;
 
+use crate::amg::hierarchy::LevelMatrix;
 use crate::graph::LevelGraph;
 use crate::linear_solver::Precision;
 
@@ -218,6 +219,14 @@ impl std::fmt::Display for BackendHandle {
 /// Level operators and aggregate maps are uploaded once per topology
 /// (`upload_level`, `upload_aggregates`); per-`q` weight changes go through
 /// `update_level_weights` so no allocation happens inside a solve.
+///
+/// Smoothed aggregation (program plan §3) adds general sparse operators:
+/// the coarse levels `A_l = Pᵀ A_{l-1} P` (`l ≥ 1`) and the transfers `P`,
+/// `Pᵀ` are CSR [`LevelMatrix`] values uploaded once (`upload_csr`) and
+/// refreshed per `q` (`update_csr_values`); `apply_csr` / `apply_csr_add` /
+/// `residual_csr` / `chebyshev_step_csr` are the CSR counterparts of the
+/// graph kernels. The piecewise-constant `restrict` / `prolong_add` stay for
+/// the unsmoothed path.
 pub trait Backend {
     /// A vector of `n * 3` scalars (host `Vec` or device buffer) in the
     /// precision it was allocated with.
@@ -228,6 +237,10 @@ pub trait Backend {
     type LevelGraphBuf;
     /// Backend-resident fine-node → coarse-node map of one level.
     type AggBuf;
+    /// Backend-resident CSR matrix ([`LevelMatrix`]): frozen pattern, values
+    /// refreshed per `q`, plus the reciprocal diagonal for Jacobi scaling
+    /// when the matrix is square.
+    type CsrBuf;
 
     /// Which backend this is.
     fn handle(&self) -> BackendHandle;
@@ -256,6 +269,12 @@ pub trait Backend {
     fn update_level_weights(&self, level: &mut Self::LevelGraphBuf, weight: &[f64], anchor: &[f64]);
     /// Upload the fine → coarse map of a level (`aggregate_of[i] < n_coarse`).
     fn upload_aggregates(&self, aggregate_of: &[u32], n_coarse: usize) -> Self::AggBuf;
+    /// Upload a CSR matrix (pattern and values) in `precision`. For a square
+    /// matrix the reciprocal of `m.diag` is stored for `chebyshev_step_csr`.
+    fn upload_csr(&self, m: &LevelMatrix, precision: Precision) -> Self::CsrBuf;
+    /// Refresh the values (and reciprocal diagonal) of an uploaded CSR matrix
+    /// whose pattern is unchanged since `upload_csr`.
+    fn update_csr_values(&self, m: &LevelMatrix, dst: &mut Self::CsrBuf);
 
     // ── Kernels ────────────────────────────────────────────
 
@@ -276,6 +295,26 @@ pub trait Backend {
     fn chebyshev_step(
         &self,
         level: &Self::LevelGraphBuf,
+        alpha: f64,
+        beta: f64,
+        r: &Self::Buf,
+        d: &mut Self::Buf,
+        x: &mut Self::Buf,
+    );
+    /// `y = M x` for a CSR matrix with `nrows` rows and `ncols` columns
+    /// (`x` holds `ncols * 3`, `y` holds `nrows * 3` scalars); row `u` is
+    /// accumulated in ascending column order.
+    fn apply_csr(&self, m: &Self::CsrBuf, x: &Self::Buf, y: &mut Self::Buf);
+    /// `y += M x` (same shapes as [`Self::apply_csr`]); the smoothed
+    /// prolongation `x_fine += P x_coarse`.
+    fn apply_csr_add(&self, m: &Self::CsrBuf, x: &Self::Buf, y: &mut Self::Buf);
+    /// `r = b − M x` for a square CSR level matrix.
+    fn residual_csr(&self, m: &Self::CsrBuf, x: &Self::Buf, b: &Self::Buf, r: &mut Self::Buf);
+    /// [`Self::chebyshev_step`] with the diagonal of a square CSR level
+    /// matrix: `d = alpha · diag(M)⁻¹ r + beta · d;  x += d`.
+    fn chebyshev_step_csr(
+        &self,
+        m: &Self::CsrBuf,
         alpha: f64,
         beta: f64,
         r: &Self::Buf,
