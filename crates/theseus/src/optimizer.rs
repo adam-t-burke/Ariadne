@@ -4,7 +4,8 @@
 //! requests. Accepted steps drive progress independently of line-search trials.
 
 use crate::ffi::ProgressCallback;
-use crate::gradients::value_and_gradient;
+use crate::gradients::value_and_gradient_cancellable;
+use crate::linear_solver::ToleranceSchedule;
 use crate::types::{
     FdmCache, OptimizationState, Problem, QParameterizationMode, SolverResult, TheseusError,
     VariableSupportKind,
@@ -14,7 +15,7 @@ use basin::{
     BoxConstraints, CostFunction, Executor, Gradient, GradientState, LbfgsState, Lbfgsb,
     MoreThuente, Solver, State, StepOutcome, TerminationReason,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const DIRECT_BOX_SCALE_EPS: f64 = 1e-12;
@@ -29,6 +30,9 @@ struct Evaluation {
     value: f64,
     valid: bool,
     loss_trace: Vec<f64>,
+    /// Linear-solver iterations spent by each evaluation (parallel to
+    /// `loss_trace`; zeros on `Direct`).
+    linear_solver_iterations: Vec<u32>,
 }
 
 struct FdmProblem<'a> {
@@ -44,6 +48,11 @@ struct FdmProblem<'a> {
     evaluation: RefCell<Evaluation>,
     // A callback may need an accepted point after a rejected trial evaluation.
     observer_cache: RefCell<Option<FdmCache>>,
+    /// Relative-residual tolerance of the iterative linear solves, driven
+    /// by the (projected) gradient norm of the last accepted iterate
+    /// (`run_solver`) and read into `FdmCache::solve_tolerance` before each
+    /// evaluation. Ignored by `Direct`.
+    tolerance_schedule: Cell<ToleranceSchedule>,
 }
 
 impl<'a> FdmProblem<'a> {
@@ -88,9 +97,22 @@ impl<'a> FdmProblem<'a> {
                 value: 0.0,
                 valid: false,
                 loss_trace: Vec::new(),
+                linear_solver_iterations: Vec::new(),
             }),
             observer_cache: RefCell::new(None),
+            tolerance_schedule: Cell::new(ToleranceSchedule::new(
+                problem.solver.iterative.tolerance,
+            )),
         })
+    }
+
+    /// Feed the (projected) gradient norm of a newly accepted iterate to the
+    /// tolerance schedule; the evaluations that follow use the resulting
+    /// tolerance (`Direct` ignores it).
+    fn observe_accepted_gradient(&self, gradient_norm: f64) {
+        let mut schedule = self.tolerance_schedule.get();
+        schedule.observe(gradient_norm);
+        self.tolerance_schedule.set(schedule);
     }
 
     fn check_cancelled(&self) -> Result<(), TheseusError> {
@@ -122,7 +144,9 @@ impl<'a> FdmProblem<'a> {
             ..
         } = &mut *evaluation;
         fill_physical_parameters(self.problem, x, &self.anchor_scales, parameters);
-        let value = value_and_gradient(
+        cache.solve_tolerance = self.tolerance_schedule.get().current();
+        let iterations_before = cache.linear_solver_totals.iterations_total;
+        let value = value_and_gradient_cancellable(
             cache,
             self.problem,
             parameters,
@@ -131,7 +155,9 @@ impl<'a> FdmProblem<'a> {
             &self.evaluation_upper,
             &self.lower_indices,
             &self.upper_indices,
+            Some(self.cancel_flag),
         )?;
+        let iterations = cache.linear_solver_totals.iterations_total - iterations_before;
         fill_scaled_gradient(
             self.problem,
             physical_gradient,
@@ -147,6 +173,9 @@ impl<'a> FdmProblem<'a> {
         evaluation.value = value;
         evaluation.valid = true;
         evaluation.loss_trace.push(value);
+        evaluation
+            .linear_solver_iterations
+            .push(u32::try_from(iterations).unwrap_or(u32::MAX));
         self.check_cancelled()
     }
 
@@ -240,10 +269,21 @@ impl<'a> FdmProblem<'a> {
         } else {
             "gradient"
         };
-        let termination_reason = format!(
+        let mut termination_reason = format!(
             "{text}; iterations={iterations}; evaluations={}; {metric}={gradient_norm:.3e}",
             evaluation.loss_trace.len()
         );
+        let linear_solver_totals = evaluation.cache.linear_solver_totals;
+        // The direct path's termination string is part of its byte-identical
+        // contract; only the iterative kinds append their solver summary.
+        if evaluation.cache.linear_solver_kind.is_iterative() {
+            termination_reason.push_str(&format!(
+                "; linear solver: {}, {} solves, {} iterations",
+                linear_solver_totals.backend,
+                linear_solver_totals.solves,
+                linear_solver_totals.iterations_total
+            ));
+        }
         state.force_densities = q.clone();
         state.variable_anchor_positions = anchors.clone();
         state.variable_anchor_latents = latents;
@@ -261,6 +301,8 @@ impl<'a> FdmProblem<'a> {
             iterations,
             converged,
             termination_reason,
+            linear_solver_iterations: evaluation.linear_solver_iterations,
+            linear_solver_totals,
         })
     }
 }
@@ -406,25 +448,38 @@ where
 }
 
 fn gradient_norm(state: &OptimizerState, bounded: bool, lower: &[f64], upper: &[f64]) -> f64 {
-    let gradient = state
-        .gradient()
-        .expect("Basin initializes the gradient before publishing a state");
+    try_gradient_norm(state, bounded, lower, upper)
+        .expect("Basin initializes the gradient before publishing a state")
+}
+
+/// The convergence metric of `state`: the Euclidean gradient norm (soft
+/// bounds) or the ∞-norm of the projected gradient (box bounds); `None`
+/// while the state carries no gradient.
+fn try_gradient_norm(
+    state: &OptimizerState,
+    bounded: bool,
+    lower: &[f64],
+    upper: &[f64],
+) -> Option<f64> {
+    let gradient = state.gradient()?;
     if !bounded {
-        return gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
+        return Some(gradient.iter().map(|g| g * g).sum::<f64>().sqrt());
     }
-    state
-        .param()
-        .iter()
-        .zip(gradient)
-        .enumerate()
-        .map(|(i, (&x, &g))| {
-            if g < 0.0 {
-                g.max(x - upper[i]).abs()
-            } else {
-                g.min(x - lower[i]).abs()
-            }
-        })
-        .fold(0.0, f64::max)
+    Some(
+        state
+            .param()
+            .iter()
+            .zip(gradient)
+            .enumerate()
+            .map(|(i, (&x, &g))| {
+                if g < 0.0 {
+                    g.max(x - upper[i]).abs()
+                } else {
+                    g.min(x - lower[i]).abs()
+                }
+            })
+            .fold(0.0, f64::max),
+    )
 }
 
 fn termination_text(reason: TerminationReason) -> (bool, &'static str) {
@@ -481,6 +536,14 @@ where
     let mut stepper = Executor::new(fdm, solver, LbfgsState::new(initial, 10))
         .max_iter(max_iterations as u64)
         .into_stepper()?;
+    // The initial point is the first accepted iterate: its (projected)
+    // gradient norm is the reference ‖g⁺_0‖ of the adaptive tolerance policy.
+    let observe = |state: &OptimizerState| {
+        if let Some(norm) = try_gradient_norm(state, tolerances.bounded, &fdm.lower, &fdm.upper) {
+            fdm.observe_accepted_gradient(norm);
+        }
+    };
+    observe(stepper.state());
     let mut previous_cost = None;
     let reason = loop {
         fdm.check_cancelled()?;
@@ -489,6 +552,7 @@ where
             StepOutcome::Continue => {
                 previous_cost = Some(cost);
                 let state = stepper.state();
+                observe(state);
                 fdm.report(
                     state.iter() as usize,
                     state.param(),

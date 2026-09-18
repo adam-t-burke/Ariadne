@@ -1741,10 +1741,11 @@ pub unsafe extern "C" fn theseus_set_q_parameterization_mode(
 ///   2 = IterativeGpu (same algorithm on a wgpu device)
 ///
 /// Any other value is rejected and the handle keeps its previous selection.
-/// The iterative kinds are not available in this build: the next
-/// `theseus_optimize` / `theseus_solve_forward` on a handle set to 1 or 2
-/// returns `THESEUS_ERR_ITERATIVE_UNSUPPORTED` (-4) with an explanatory
-/// message instead of silently running the direct solver.
+/// When an iterative kind is not provided by this build, or cannot run on
+/// the problem (bounds permitting `q ≤ 0`), the next `theseus_optimize` /
+/// `theseus_solve_forward` on a handle set to 1 or 2 returns
+/// `THESEUS_ERR_ITERATIVE_UNSUPPORTED` (-4) with an explanatory message
+/// instead of silently running the direct solver.
 ///
 /// # Safety
 /// Valid handle.
@@ -2001,10 +2002,10 @@ impl From<&LinearSolverTotals> for TheseusLinearSolverStats {
 /// solve into `out`.
 ///
 /// Before any solve, or after `theseus_set_linear_solver`, the totals are
-/// empty (`solves = 0`) and `backend_kind` is the configured kind. The
-/// direct path does not yet report per-solve `SolveStats` through this
-/// counter, so on `Direct` the counters stay at zero with `converged_all = 1`;
-/// the FDM-integration workstream feeds them from the dispatch site.
+/// empty (`solves = 0`) and `backend_kind` is the configured kind. Every
+/// kind, `Direct` included, records each forward, adjoint and load-iteration
+/// solve of the run (`solves`, `solve_ms_total`, `setup_ms_total`); the
+/// iteration counters stay at zero on `Direct`, whose solves are exact.
 ///
 /// # Safety
 /// Valid handle; `out` must point to a writable `TheseusLinearSolverStats`.
@@ -2025,24 +2026,18 @@ pub unsafe extern "C" fn theseus_get_linear_solver_stats(
     }))
 }
 
-/// Refuse to start a solve whose configured linear solver this build cannot
-/// run, and reset the run's totals.
+/// Reset the handle's linear-solver totals for a new run on the configured
+/// kind.
 ///
-/// The iterative kinds exist as a toggle but have no implementation yet, so
-/// selecting one must fail loudly here rather than fall back to `Direct`.
-/// Called at the start of `theseus_optimize` and `theseus_solve_forward`;
-/// the FDM-integration workstream replaces this with the real dispatch
-/// (`LinearSolver::new`) inside `FdmCache`, at which point this check becomes
-/// redundant and is removed.
-fn begin_linear_solver_run(h: &mut TheseusHandleState) -> Result<(), TheseusError> {
-    let kind = h.problem.solver.linear_solver;
-    h.linear_solver_totals = LinearSolverTotals::new(kind);
-    if kind.is_iterative() {
-        return Err(TheseusError::IterativeSolverUnsupported(format!(
-            "iterative linear solvers are not yet available in this build (requested '{kind}')"
-        )));
-    }
-    Ok(())
+/// Called at the start of `theseus_optimize` and `theseus_solve_forward`.
+/// Whether the kind can actually run is decided by the real dispatch:
+/// `FdmCache::new` → `LinearSolver::new` returns
+/// `TheseusError::IterativeSolverUnsupported` for a kind this build does not
+/// provide (or for bounds that permit `q ≤ 0`), which reaches the caller as
+/// `THESEUS_ERR_ITERATIVE_UNSUPPORTED` — never a silent fallback to
+/// `Direct`. On success the run's totals replace the empty ones set here.
+fn begin_linear_solver_run(h: &mut TheseusHandleState) {
+    h.linear_solver_totals = LinearSolverTotals::new(h.problem.solver.linear_solver);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2585,7 +2580,7 @@ unsafe fn optimize_inner(
     let cancel = run.cancel.clone();
     let result = {
         let h = run.state_mut();
-        begin_linear_solver_run(h)?;
+        begin_linear_solver_run(h);
         let cb = h.progress_callback;
         let freq = h.report_frequency;
         optimizer::optimize(&h.problem, &mut h.state, cb, freq, &cancel)?
@@ -2593,6 +2588,7 @@ unsafe fn optimize_inner(
     run.finish_cancellation_window()?;
     let h = run.state_mut();
     h.last_termination_reason = result.termination_reason.clone();
+    h.linear_solver_totals = result.linear_solver_totals;
 
     let nn = h.problem.topology.num_nodes;
     let ne = h.problem.topology.num_edges;
@@ -2665,7 +2661,8 @@ pub unsafe extern "C" fn theseus_get_loss_trace(
 /// single sparse factorization or triangular solve is not interruptible.
 ///
 /// Returns 0 on success, -1 on error, -2 on internal panic, -4 when the
-/// handle is set to an iterative linear solver (not available in this build).
+/// handle is set to an iterative linear solver that this build does not
+/// provide or that cannot run on the problem (bounds permitting `q ≤ 0`).
 ///
 /// # Safety
 /// Valid handle and output buffers.
@@ -2732,7 +2729,7 @@ unsafe fn solve_forward_inner(
     let cancel = run.cancel.clone();
     let cache = {
         let h = run.state_mut();
-        begin_linear_solver_run(h)?;
+        begin_linear_solver_run(h);
         let mut cache = FdmCache::new(&h.problem)?;
         let anchors = crate::variable_supports::map_latents_to_positions(
             &h.problem,
@@ -2751,6 +2748,7 @@ unsafe fn solve_forward_inner(
     };
     run.finish_cancellation_window()?;
     let h = run.state_mut();
+    h.linear_solver_totals = cache.linear_solver_totals;
 
     let nn = h.problem.topology.num_nodes;
     let ne = h.problem.topology.num_edges;
@@ -4364,6 +4362,36 @@ mod linear_solver_ffi_tests {
             assert_eq!(theseus_get_linear_solver_stats(handle, &mut out), 0);
             assert_eq!(out.backend_kind, LinearSolverKind::Direct.as_i32());
             assert_eq!(out.converged_all, 1);
+            // The direct dispatch records its solves; its iteration counters
+            // stay at zero (exact solves).
+            assert_eq!(out.solves, 1, "one forward solve");
+            assert_eq!(out.iterations_total, 0);
+            assert_eq!(out.iterations_max, 0);
+            assert!(out.solve_ms_total >= 0.0 && out.setup_ms_total >= 0.0);
+
+            let node = [0usize];
+            let target = [0.0, 0.0, -0.5];
+            assert_eq!(
+                theseus_add_target_xyz(handle, 1.0, node.as_ptr(), 1, target.as_ptr(), 0),
+                0
+            );
+            assert_eq!(
+                theseus_set_solver_options(handle, 20, 1e-6, 1e-6, 10.0, 10.0, 1.0),
+                0
+            );
+            assert_eq!(optimize(handle), 0, "{}", last_error());
+            assert_eq!(theseus_get_linear_solver_stats(handle, &mut out), 0);
+            assert_eq!(out.backend_kind, 0);
+            assert_eq!(out.converged_all, 1);
+            let evaluations = theseus_get_loss_trace_len(handle) as u64;
+            assert!(evaluations >= 1);
+            assert!(
+                out.solves >= 2 * evaluations,
+                "each evaluation is at least a forward and an adjoint solve: solves = {}, \
+                 evaluations = {evaluations}",
+                out.solves
+            );
+            assert_eq!(out.iterations_total, 0);
 
             assert_eq!(theseus_set_linear_solver(handle, 2), 0);
             assert_eq!(theseus_get_linear_solver_stats(handle, &mut out), 0);

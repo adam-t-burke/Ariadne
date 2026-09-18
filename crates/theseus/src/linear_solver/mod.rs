@@ -420,15 +420,14 @@ impl SolveStats {
 /// that did not converge, so a run with no recorded solves reports
 /// `converged_all == true` and `solves == 0`.
 ///
-/// TODO(WS-D): nothing calls [`LinearSolverTotals::record`] yet. The FFI
-/// resets the totals at the start of every run, but `factor_and_solve`
-/// (`fdm.rs`) does not produce a [`SolveStats`], so `Direct` runs report
-/// `solves == 0` and zero times. Once the dispatch inside `FdmCache` returns
-/// `SolveStats`, `record` each of them into the handle's totals.
+/// Every solve dispatched by `FdmCache` (forward, adjoint, Neumann
+/// refinement, load-Newton preconditioner) is recorded into
+/// `FdmCache::linear_solver_totals`; the optimizer copies the cache's totals
+/// into `SolverResult::linear_solver_totals` and the FFI into the handle.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LinearSolverTotals {
-    /// Solver kind the run was configured with (and, once the dispatch
-    /// records stats, the kind that actually ran).
+    /// Solver kind the run was configured with and, once a solve has been
+    /// recorded, the kind that actually ran.
     pub backend: LinearSolverKind,
     /// Number of `solve` calls recorded.
     pub solves: u64,

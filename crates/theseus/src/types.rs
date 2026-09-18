@@ -1240,6 +1240,22 @@ impl FdmCache {
         // ── 1–2. The linear solver (owner of A's pattern, values and factors) ──
         let kind = problem.solver.linear_solver;
         let iterative = &problem.solver.iterative;
+        if kind.is_iterative() {
+            if let Some((k, lb)) = problem
+                .bounds
+                .lower
+                .iter()
+                .enumerate()
+                .find(|(_, &lb)| !(lb > 0.0))
+            {
+                return Err(TheseusError::IterativeSolverUnsupported(format!(
+                    "q may be non-positive under these bounds (edge {k} has lower bound {lb}), so \
+                     A(q) is not guaranteed positive definite; the iterative solvers ('{kind}') \
+                     need q > 0 on every edge"
+                )));
+            }
+            iterative.tolerance.validate()?;
+        }
         let linear_solver = LinearSolver::new(kind, topo, &problem.bounds, iterative)?;
         let linear_solver_kind = linear_solver.kind();
         let warm_len = if linear_solver_kind.is_iterative() {
@@ -1435,6 +1451,14 @@ pub struct SolverResult {
     pub termination_reason: String,
     /// Per-edge cross-section areas (populated in self-weight sizing mode).
     pub cross_section_areas: Vec<f64>,
+    /// Linear-solver iterations per objective/gradient evaluation (parallel
+    /// to `loss_trace`): the sum over the evaluation's solves (forward,
+    /// adjoint, and any load-iteration solves) of the largest per-column
+    /// iteration count. All zeros for [`LinearSolverKind::Direct`].
+    pub linear_solver_iterations: Vec<u32>,
+    /// Totals over every linear solve of the run (the value exported through
+    /// `theseus_get_linear_solver_stats`).
+    pub linear_solver_totals: LinearSolverTotals,
 }
 
 // ─────────────────────────────────────────────────────────────
