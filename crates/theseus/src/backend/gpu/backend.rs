@@ -150,7 +150,7 @@ pub struct GpuBackend {
     pending: RefCell<Option<Encoder>>,
     partials_f32: GpuBuf,
     partials_f64: Option<GpuBuf>,
-    dummy: wgpu::Buffer,
+    dummy: super::buffers::Tracked,
     partials_host: RefCell<Vec<f64>>,
     stats: RefCell<GpuStats>,
 }

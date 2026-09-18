@@ -12,6 +12,8 @@
 
 use std::cell::{Cell, RefCell};
 use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use crate::linear_solver::Precision;
 use crate::types::TheseusError;
@@ -28,10 +30,51 @@ pub(crate) fn buffer_bytes(bytes: u64) -> u64 {
     bytes.max(4).div_ceil(a) * a
 }
 
+/// Shared counter of live device bytes; decremented when a tracked buffer
+/// drops so `BufferPool::device_bytes` is the current working set.
+#[derive(Debug, Default)]
+struct ByteCounter(AtomicU64);
+
+impl ByteCounter {
+    fn add(&self, bytes: u64) {
+        self.0.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn sub(&self, bytes: u64) {
+        self.0.fetch_sub(bytes, Ordering::Relaxed);
+    }
+
+    fn get(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// A storage buffer whose size is accounted in its pool for as long as it
+/// lives.
+#[derive(Debug)]
+pub(crate) struct Tracked {
+    pub(crate) buffer: wgpu::Buffer,
+    counter: Arc<ByteCounter>,
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {
+        self.counter.sub(self.buffer.size());
+    }
+}
+
+impl std::ops::Deref for Tracked {
+    type Target = wgpu::Buffer;
+
+    fn deref(&self) -> &wgpu::Buffer {
+        &self.buffer
+    }
+}
+
 /// A vector buffer of `len` scalars in `precision`.
 #[derive(Debug)]
 pub struct GpuBuf {
-    pub(crate) buffer: wgpu::Buffer,
+    pub(crate) buffer: Tracked,
     pub(crate) len: usize,
     pub(crate) precision: Precision,
 }
@@ -71,7 +114,7 @@ impl GpuBuf {
 /// A `u32` index array (CSR offsets, edge ids, aggregate maps).
 #[derive(Debug)]
 pub struct IndexBuf {
-    pub(crate) buffer: wgpu::Buffer,
+    pub(crate) buffer: Tracked,
     pub(crate) len: usize,
 }
 
@@ -239,7 +282,7 @@ impl ParamsRing {
 pub struct BufferPool {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    device_bytes: Cell<u64>,
+    device_bytes: Arc<ByteCounter>,
     /// Two mappable readback buffers (double buffering), grown on demand.
     staging: RefCell<[Option<wgpu::Buffer>; 2]>,
     staging_next: Cell<usize>,
@@ -264,7 +307,7 @@ impl BufferPool {
         let pool = Self {
             device: device.clone(),
             queue: queue.clone(),
-            device_bytes: Cell::new(0),
+            device_bytes: Arc::new(ByteCounter::default()),
             staging: RefCell::new([None, None]),
             staging_next: Cell::new(0),
             params,
@@ -277,12 +320,12 @@ impl BufferPool {
     }
 
     fn account(&self, bytes: u64) {
-        self.device_bytes.set(self.device_bytes.get() + bytes);
+        self.device_bytes.add(bytes);
     }
 
-    /// Device bytes allocated through this pool. Buffers are released when
-    /// their handle drops but the counter is not decremented: the solver
-    /// allocates once per topology, so this is its working set.
+    /// Device bytes currently held through this pool (vectors, index
+    /// arrays, staging buffers, parameter ring); tracked buffers subtract
+    /// themselves when dropped.
     pub fn device_bytes(&self) -> u64 {
         self.device_bytes.get()
     }
@@ -295,11 +338,7 @@ impl BufferPool {
     /// Create a storage buffer of `bytes` (rounded up). Out-of-memory is
     /// caught through a wgpu error scope and reported as
     /// [`TheseusError::GpuOutOfMemory`] instead of being fatal.
-    pub(crate) fn create_storage(
-        &self,
-        bytes: u64,
-        label: &str,
-    ) -> Result<wgpu::Buffer, TheseusError> {
+    pub(crate) fn create_storage(&self, bytes: u64, label: &str) -> Result<Tracked, TheseusError> {
         let size = buffer_bytes(bytes);
         if size > self.max_binding_size {
             // Not a memory shortage: one array is larger than a single
@@ -334,7 +373,10 @@ impl BufferPool {
             });
         }
         self.account(size);
-        Ok(buffer)
+        Ok(Tracked {
+            buffer,
+            counter: Arc::clone(&self.device_bytes),
+        })
     }
 
     /// Zeroed vector of `len` scalars in `precision`.
@@ -434,8 +476,7 @@ impl BufferPool {
                 mapped_at_creation: false,
             });
             if let Some(old) = &slots[idx] {
-                self.device_bytes
-                    .set(self.device_bytes.get().saturating_sub(old.size()));
+                self.device_bytes.sub(old.size());
             }
             self.account(size);
             slots[idx] = Some(buffer);

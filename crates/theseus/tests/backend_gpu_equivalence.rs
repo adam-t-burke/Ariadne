@@ -457,6 +457,22 @@ fn f64_requires_shader_f64() {
 }
 
 #[test]
+fn device_bytes_track_live_buffers() {
+    let Some(gpu) = backend() else { return };
+    let base = gpu.device_bytes();
+    let a = gpu.alloc(3 * 100_000, Precision::F32);
+    assert_eq!(gpu.device_bytes(), base + a.size_bytes());
+    assert_eq!(a.size_bytes(), 3 * 100_000 * 4);
+    let level = grid_level(&mut Rng::new(12), 32, 32);
+    let dev = gpu.upload_level(&level, Precision::F32);
+    assert!(gpu.device_bytes() > base + a.size_bytes());
+    drop(dev);
+    assert_eq!(gpu.device_bytes(), base + a.size_bytes());
+    drop(a);
+    assert_eq!(gpu.device_bytes(), base);
+}
+
+#[test]
 fn upload_download_copy_zero() {
     let Some(gpu) = backend() else { return };
     let mut rng = Rng::new(1);
