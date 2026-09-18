@@ -1,7 +1,191 @@
 # Theseus benchmarks
 
-1. [Basin optimizer comparison](#basin-optimizer-comparison)
-2. [Null-space paper benchmarks](#null-space-paper-benchmarks)
+1. [Scaling the FDM solve to 100k edges](#scaling-the-fdm-solve-to-100k-edges)
+2. [Basin optimizer comparison](#basin-optimizer-comparison)
+3. [Null-space paper benchmarks](#null-space-paper-benchmarks)
+
+# Scaling the FDM solve to 100k edges
+
+Everything in a Theseus iteration other than the L-BFGS-B update is one fused
+objective/gradient evaluation: assemble `A(q) = Cnᵀ diag(q) Cn`, factor it,
+solve for the free-node positions, evaluate the objectives, solve the adjoint
+system with the same factor, and accumulate the gradient. This section
+profiles that evaluation on square cable-net grids up to 224×224 (99,904
+edges, 50,172 free nodes), records the optimisations made on the strength of
+the profile, and reports the matrix-free experiment.
+
+## Reproduce
+
+```sh
+# Per-phase profile of one evaluation (grid sizes as arguments).
+RAYON_NUM_THREADS=1 cargo run --release -p theseus --example profile_phases -- 72 160 224
+
+# Full box-constrained L-BFGS-B solves with a fixed iteration budget.
+RAYON_NUM_THREADS=1 cargo test --release -p theseus --test bench_scale -- --ignored --nocapture
+THESEUS_SCALE_GRIDS=72,160,224,320 THESEUS_SCALE_ITERS=40 cargo test --release -p theseus --test bench_scale -- --ignored --nocapture
+
+# Matrix-free PCG versus the direct solve.
+RAYON_NUM_THREADS=1 cargo run --release -p theseus --example matrix_free_pcg -- 224
+```
+
+The fixture (`tests/support/grid.rs`) is an `n × n` grid with four corner
+supports, unit downward loads and a `TargetXYZ` objective. `bench_scale` uses
+the *recoverable* variant, whose target is the equilibrium shape of a smooth
+interior force-density field, so the optimum is reachable inside the bounds
+and the line search behaves as it does on real problems (about 1.2
+evaluations per accepted iteration). With the unreachable flat target the
+solver stalls on the upper bound and burns ~3 evaluations per iteration, which
+says nothing about the linear algebra.
+
+Environment: 4 vCPU Linux VM, Rust 1.89, faer-sparse 0.17.1, Basin 1.13.0.
+Timings are medians of 3–5 repetitions and vary by roughly ±5% between runs.
+
+## Where an evaluation spends its time
+
+Milliseconds per phase of one warm evaluation (symbolic analysis already
+done), single-threaded, before this work:
+
+| grid | edges | free nodes | assemble A | assemble b | numeric factor | solve (3 rhs) | geometry | loss | explicit ∇ | adjoint solve | implicit ∇ | total |
+|-----:|------:|-----------:|-----------:|-----------:|---------------:|--------------:|---------:|-----:|-----------:|--------------:|-----------:|------:|
+|  72 | 10,224 | 5,180 | 0.06 | 0.12 | 2.06 | 0.36 | 0.34 | 0.02 | 0.05 | 0.36 | 0.07 | 3.5 |
+| 160 | 50,880 | 25,596 | 0.43 | 0.58 | 25.7 | 6.5 | 1.48 | 0.10 | 0.33 | 6.7 | 0.39 | 42.4 |
+| 224 | 99,904 | 50,172 | 1.37 | 1.27 | 51.1 | 12.4 | 3.3 | 0.22 | 0.79 | 11.7 | 0.62 | 83.1 |
+
+With the default rayon pool (4 threads) the same evaluation took 94 ms at
+224: the numeric factorization was not faster (`Parallelism::Rayon(0)` gave
+no speedup at any size and was 6–15% slower than `Parallelism::None`), and
+geometry went from 3.3 ms to 12.9 ms because the reaction fold allocated an
+`nn × 3` buffer per rayon work split and reduced them.
+
+After the changes below:
+
+| grid | assemble A | assemble b | numeric factor | solve (3 rhs) | geometry | loss | explicit ∇ | adjoint solve | implicit ∇ | total |
+|-----:|-----------:|-----------:|---------------:|--------------:|---------:|-----:|-----------:|--------------:|-----------:|------:|
+|  72 | 0.04 | 0.01 | 1.56 | 0.20 | 0.04 | 0.02 | 0.05 | 0.20 | 0.06 | 2.2 |
+| 160 | 0.19 | 0.04 | 18.7 | 1.86 | 0.20 | 0.04 | 0.32 | 1.87 | 0.29 | 23.6 |
+| 224 | 0.38 | 0.11 | 38.9 | 3.87 | 0.40 | 0.10 | 0.74 | 4.05 | 0.55 | 49.3 |
+
+The evaluation at 100k edges is 1.7× faster single-threaded (83 → 49 ms) and
+1.9× faster with the default pool (94 → 51 ms), and is now bit-identical
+across thread counts. The numeric Cholesky factorization is ~79% of what is
+left.
+
+## What changed
+
+* **Triangular solves** (`src/factor_solve.rs`). faer's generic
+  `solve_in_place_with_conj` was 12 ms per 3-column solve at 100k edges,
+  roughly a quarter of the factorization cost, because it goes through
+  entity-generic dense kernels per supernode and a column-major right-hand
+  side. The new routines walk faer's public factor layout directly
+  (simplicial CSC with the diagonal first; supernodal column-major blocks;
+  LLᵀ and LDLᵀ) with the three coordinates of a row stored contiguously, so a
+  factor column is streamed once and the inner loops vectorise over the three
+  right-hand sides. 12.4 ms → 3.9 ms. Unit tests check the result against
+  faer's own solver for every layout/kind combination.
+* **Scratch buffers**: the faer stack buffer was reallocated on every
+  factorization and every solve; it is now grown only when a request exceeds
+  the current size.
+* **Parallelism**: `Parallelism::None` for the numeric factorization and
+  solves. On these factors (~29 nonzeros per column, supernodes of a few
+  columns) faer's Rayon path has nothing to parallelise and only adds
+  scheduling cost.
+* **Assembly**: `assemble_a` gathers each nonzero from a flat CSR map of its
+  contributing edges instead of zero-filling and scattering through nested
+  `Vec`s; `assemble_rhs` accumulates only the edges with one fixed endpoint
+  instead of two sparse-dense products over all edges. The `ne × 3` scratch
+  arrays and the cached `Cn`, `Cnᵀ`, `Cf` copies were removed.
+* **Geometry**: one sequential pass computes lengths, forces and reactions.
+  The rayon fold is gone (3.3 ms → 0.4 ms single-threaded; 12.9 ms → 0.44 ms
+  with 4 threads), and the reaction sums are now deterministic.
+
+## Full solves
+
+40 L-BFGS-B iterations on the recoverable grid, box bounds `[0.1, 10]`,
+tolerances disabled so every run does the full budget. `evals` is the number
+of fused evaluations; `non-eval` is the total minus `evals × eval`, i.e.
+setup plus Basin's own bookkeeping (parameter copies, two-loop recursion,
+line search).
+
+Before (merge of the Basin PR onto the warm-start branch), 1 thread:
+
+| grid | edges | setup ms | eval ms | iters | evals | total ms | ms/iter | non-eval ms | peak RSS MB |
+|-----:|------:|---------:|--------:|------:|------:|---------:|--------:|------------:|------------:|
+|  72 | 10,224 | 8.0 | 3.68 | 40 | 50 | 181 | 4.5 | −3 | 17 |
+| 160 | 50,880 | 55.1 | 36.7 | 40 | 56 | 2,156 | 53.9 | 102 | 80 |
+| 224 | 99,904 | 114.3 | 74.3 | 40 | 55 | 4,310 | 107.8 | 225 | 147 |
+
+Before, default rayon pool: 204 / 2,253 / 5,034 ms, peak RSS 22 / 110 / 210 MB,
+and the final loss differed from the single-threaded run (non-deterministic
+reaction sums).
+
+After, 1 thread:
+
+| grid | edges | setup ms | eval ms | iters | evals | total ms | ms/iter | non-eval ms | peak RSS MB |
+|-----:|------:|---------:|--------:|------:|------:|---------:|--------:|------------:|------------:|
+|  72 | 10,224 | 7.3 | 2.51 | 40 | 50 | 145 | 3.6 | 19 | 14 |
+| 160 | 50,880 | 46.8 | 25.5 | 40 | 53 | 1,456 | 36.4 | 106 | 61 |
+| 224 | 99,904 | 100.5 | 55.4 | 40 | 53 | 3,195 | 79.9 | 261 | 110 |
+
+After, default rayon pool: 189 / 1,414 / 3,097 ms, peak RSS 14 / 59 / 111 MB,
+final loss identical to the single-threaded run.
+
+At 100k edges a full iteration is now ~80 ms (from 108 ms single-threaded and
+126 ms with the default pool), so a 200-iteration solve takes about 16 s in
+~110 MB. Basin's bookkeeping is ~6 ms per iteration at that size (`Vec`
+clones of the 100k-element parameter and gradient vectors); it is 8% of the
+iteration and the cost of its owned-`Vec` API rather than anything in
+Theseus.
+
+## Matrix-free solves
+
+`examples/matrix_free_pcg.rs` applies `A(q)` without assembling it — one pass
+over the edges — and solves the forward system with conjugate gradients on
+the three coordinate columns at once. Two preconditioners were tried: Jacobi
+(pure matrix-free) and the existing Cholesky factor of `A(q_prev)` from the
+previous evaluation ("frozen factor"). Each is started from zero and from the
+previous solution `x_prev`, for relative force-density steps of 0, 1, 5 and
+20%. 224×224 grid, `tol` is the relative residual, single thread:
+
+| method | q step | iterations | time | direct refactor + solve |
+|--------|-------:|-----------:|-----:|------------------------:|
+| Jacobi-CG, cold, tol 1e-8 | any | 1,190–1,220 | 1.15–1.17 s | 44–47 ms |
+| Jacobi-CG, warm, tol 1e-8 | 1% | 1,100 | 1.07 s | |
+| Jacobi-CG, warm, tol 1e-8 | 20% | 1,238 | 1.20 s | |
+| frozen factor, warm, tol 1e-8 | 1% | 3 | 30 ms | |
+| frozen factor, warm, tol 1e-8 | 5% | 5 | 29 ms | |
+| frozen factor, warm, tol 1e-8 | 20% | 7 | 39 ms | |
+
+One matrix-free `A·x` for three right-hand sides costs 0.4 ms, so the
+operator is not the problem; the iteration count is. `A` is a weighted grid
+Laplacian whose condition number grows with the number of nodes, and Jacobi
+does nothing about that: ~1,200 iterations regardless of the start vector
+(the warm start only helps when `q` has not changed). A pure matrix-free path
+would need a multilevel preconditioner (AMG or a geometric hierarchy of the
+network) to be competitive, which is a project in itself.
+
+Preconditioning with the previous factor converges in 3–7 iterations, and
+with the new triangular solves each iteration costs ~5.5 ms, so the forward
+solve is 30–39 ms against 44–47 ms for a refactor. But an evaluation also
+needs the adjoint solve, which with the direct method reuses the fresh factor
+for 4 ms and with PCG needs its own 3–7 iterations. Per evaluation that is
+34–76 ms against 47 ms: a gain only when consecutive force densities differ
+by a percent or so, a loss for the larger steps typical early in a solve, and
+the gradient becomes inexact to the CG tolerance. The variant is therefore
+left as an experiment. Making it pay would need an adaptive policy (attempt
+`k ≤ 3` PCG iterations, refactor on failure) and tolerance handling in the
+optimizer for inexact gradients, for a ceiling of roughly 1.3× on the
+favourable iterations.
+
+## Remaining floor
+
+The numeric factorization is 39 ms of the 49 ms evaluation at 100k edges.
+faer-sparse 0.17 only offers AMD ordering (fill is already good at ~29
+nonzeros per factor column) and its supernodal kernels do not parallelise on
+supernodes this small. Forcing the simplicial factorization cuts the factor's
+fill by 25% and halves the solve, but the numeric factorization becomes 2.5×
+slower, so the automatic choice stands. Further gains would come from a
+nested-dissection ordering (not exposed by faer 0.17) or a different sparse
+Cholesky implementation, not from anything around the factorization.
 
 # Basin optimizer comparison
 
