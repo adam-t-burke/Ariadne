@@ -20,6 +20,180 @@ use crate::linear_solver::Precision;
 
 pub use cpu::CpuBackend;
 
+#[cfg(feature = "gpu")]
+pub mod gpu;
+
+/// One adapter seen by [`probe_gpu`], with the limits the solver cares about.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GpuAdapterReport {
+    /// Adapter (device) name as reported by the driver.
+    pub name: String,
+    /// wgpu backend: `vulkan`, `dx12`, `metal`, `gl`, ….
+    pub backend: String,
+    /// `discrete`, `integrated`, `virtual`, `cpu` or `other`.
+    pub device_type: String,
+    /// Driver name and version string.
+    pub driver: String,
+    /// Largest single storage-buffer binding, in bytes.
+    pub max_storage_buffer_binding_size: u64,
+    /// Largest buffer allocation, in bytes.
+    pub max_buffer_size: u64,
+    /// Whether `wgpu::Features::SHADER_F64` is available.
+    pub shader_f64: bool,
+    /// `true` for software rasterisers (`DeviceType::Cpu`: lavapipe,
+    /// SwiftShader, WARP).
+    pub software: bool,
+    /// `true` when the selection policy accepts this adapter.
+    pub selectable: bool,
+}
+
+/// Result of enumerating GPU adapters (§2.5 of the program plan): every
+/// adapter seen, the one the policy would pick, and a human-readable message
+/// suitable for `GpuUnavailable` errors and the FFI probe.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GpuProbe {
+    /// `false` when the crate was compiled without the `gpu` feature.
+    pub built_with_gpu_feature: bool,
+    /// Adapters in the order the selection policy ranks them.
+    pub adapters: Vec<GpuAdapterReport>,
+    /// Index into `adapters` of the selected adapter, if any is usable.
+    pub chosen: Option<usize>,
+    /// Summary of the outcome (chosen adapter, or why none was usable).
+    pub message: String,
+}
+
+impl GpuProbe {
+    /// `true` when a usable adapter was found.
+    pub fn is_available(&self) -> bool {
+        self.chosen.is_some()
+    }
+
+    /// The selected adapter's report.
+    pub fn chosen_adapter(&self) -> Option<&GpuAdapterReport> {
+        self.chosen.and_then(|i| self.adapters.get(i))
+    }
+
+    /// A probe that found nothing usable, with `reason` as the message.
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            built_with_gpu_feature: cfg!(feature = "gpu"),
+            adapters: Vec::new(),
+            chosen: None,
+            message: reason.into(),
+        }
+    }
+
+    /// Serialise for the FFI (`theseus_gpu_probe`). Fixed shape consumed by
+    /// the C# side:
+    ///
+    /// ```json
+    /// {"available": bool, "adapters": [{"name", "backend", "device_type",
+    ///   "shader_f64", "max_storage_buffer_binding_size", "driver",
+    ///   "max_buffer_size", "software", "selectable"}],
+    ///  "chosen": index|null, "reason": string|null,
+    ///  "built_with_gpu_feature": bool}
+    /// ```
+    ///
+    /// `reason` carries `message` when no adapter is usable and is `null`
+    /// otherwise; readers must ignore keys they do not know.
+    pub fn to_json(&self) -> String {
+        let mut out = String::with_capacity(160 + 240 * self.adapters.len());
+        out.push_str("{\"available\":");
+        out.push_str(if self.is_available() { "true" } else { "false" });
+        out.push_str(",\"adapters\":[");
+        for (i, a) in self.adapters.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str("{\"name\":");
+            push_json_string(&mut out, &a.name);
+            out.push_str(",\"backend\":");
+            push_json_string(&mut out, &a.backend);
+            out.push_str(",\"device_type\":");
+            push_json_string(&mut out, &a.device_type);
+            out.push_str(",\"shader_f64\":");
+            out.push_str(if a.shader_f64 { "true" } else { "false" });
+            out.push_str(",\"max_storage_buffer_binding_size\":");
+            out.push_str(&a.max_storage_buffer_binding_size.to_string());
+            out.push_str(",\"driver\":");
+            push_json_string(&mut out, &a.driver);
+            out.push_str(",\"max_buffer_size\":");
+            out.push_str(&a.max_buffer_size.to_string());
+            out.push_str(",\"software\":");
+            out.push_str(if a.software { "true" } else { "false" });
+            out.push_str(",\"selectable\":");
+            out.push_str(if a.selectable { "true" } else { "false" });
+            out.push('}');
+        }
+        out.push_str("],\"chosen\":");
+        match self.chosen {
+            Some(i) => out.push_str(&i.to_string()),
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"reason\":");
+        if self.is_available() {
+            out.push_str("null");
+        } else {
+            push_json_string(&mut out, &self.message);
+        }
+        out.push_str(",\"built_with_gpu_feature\":");
+        out.push_str(if self.built_with_gpu_feature {
+            "true"
+        } else {
+            "false"
+        });
+        out.push('}');
+        out
+    }
+}
+
+/// Append `s` as a JSON string literal (RFC 8259 escaping).
+fn push_json_string(out: &mut String, s: &str) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+impl std::fmt::Display for GpuProbe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// Enumerate GPU adapters and report which one the solver would use.
+///
+/// Honours `THESEUS_GPU_ALLOW_SOFTWARE=1` (accept `DeviceType::Cpu`
+/// adapters), `WGPU_BACKEND` and `WGPU_ADAPTER_NAME`. Never fails: without
+/// the `gpu` feature, or when no adapter is usable, the report says so in
+/// `message` and `chosen` is `None`.
+pub fn probe_gpu() -> GpuProbe {
+    #[cfg(feature = "gpu")]
+    {
+        gpu::probe(&gpu::AdapterPolicy::from_env())
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        GpuProbe {
+            built_with_gpu_feature: false,
+            adapters: Vec::new(),
+            chosen: None,
+            message: "theseus was not built with the `gpu` feature".to_string(),
+        }
+    }
+}
+
 /// Marker for the compute backend an iterative solver runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BackendHandle {
@@ -125,196 +299,83 @@ pub trait Backend {
     fn sync(&self);
 }
 
-// ─────────────────────────────────────────────────────────────
-//  GPU adapter probe
-// ─────────────────────────────────────────────────────────────
-
-/// One GPU adapter seen by the probe.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GpuAdapterInfo {
-    /// Driver-reported adapter name.
-    pub name: String,
-    /// Graphics API the adapter is reached through (`"vulkan"`, `"dx12"`,
-    /// `"metal"`, ...).
-    pub backend: String,
-    /// `"discrete"`, `"integrated"`, `"cpu"` (software) or `"other"`.
-    pub device_type: String,
-    /// Whether the adapter exposes 64-bit floats in shaders (`SHADER_F64`).
-    pub shader_f64: bool,
-    /// `max_storage_buffer_binding_size` limit, in bytes.
-    pub max_storage_buffer_binding_size: u64,
-}
-
-/// Result of enumerating GPU adapters for the `IterativeGpu` backend.
-///
-/// Serialised to JSON by [`GpuProbe::to_json`] for the FFI
-/// (`theseus_gpu_probe`). The document has a fixed shape:
-///
-/// ```json
-/// {"available": false, "adapters": [], "chosen": null, "reason": "..."}
-/// ```
-///
-/// `adapters` lists every adapter seen (fields of [`GpuAdapterInfo`] in
-/// snake_case), `chosen` is the index into `adapters` of the one the solver
-/// would use (or `null`), and `reason` explains an unavailable result (or is
-/// `null`).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct GpuProbe {
-    /// A usable adapter exists.
-    pub available: bool,
-    /// All adapters enumerated, in enumeration order.
-    pub adapters: Vec<GpuAdapterInfo>,
-    /// Index into `adapters` of the adapter the solver would use.
-    pub chosen: Option<usize>,
-    /// Why no adapter is usable, when `available` is `false`.
-    pub reason: Option<String>,
-}
-
-impl GpuProbe {
-    /// The probe result of a build without a GPU backend.
-    pub fn unavailable(reason: impl Into<String>) -> Self {
-        Self {
-            available: false,
-            adapters: Vec::new(),
-            chosen: None,
-            reason: Some(reason.into()),
-        }
-    }
-
-    /// The adapter the solver would use, if any.
-    pub fn chosen_adapter(&self) -> Option<&GpuAdapterInfo> {
-        self.chosen.and_then(|i| self.adapters.get(i))
-    }
-
-    /// Serialise to the JSON document described on [`GpuProbe`].
-    pub fn to_json(&self) -> String {
-        let mut out = String::with_capacity(128 + 160 * self.adapters.len());
-        out.push_str("{\"available\":");
-        out.push_str(if self.available { "true" } else { "false" });
-        out.push_str(",\"adapters\":[");
-        for (i, a) in self.adapters.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            out.push_str("{\"name\":");
-            push_json_string(&mut out, &a.name);
-            out.push_str(",\"backend\":");
-            push_json_string(&mut out, &a.backend);
-            out.push_str(",\"device_type\":");
-            push_json_string(&mut out, &a.device_type);
-            out.push_str(",\"shader_f64\":");
-            out.push_str(if a.shader_f64 { "true" } else { "false" });
-            out.push_str(",\"max_storage_buffer_binding_size\":");
-            out.push_str(&a.max_storage_buffer_binding_size.to_string());
-            out.push('}');
-        }
-        out.push_str("],\"chosen\":");
-        match self.chosen {
-            Some(i) => out.push_str(&i.to_string()),
-            None => out.push_str("null"),
-        }
-        out.push_str(",\"reason\":");
-        match &self.reason {
-            Some(r) => push_json_string(&mut out, r),
-            None => out.push_str("null"),
-        }
-        out.push('}');
-        out
-    }
-}
-
-/// Append `s` as a JSON string literal (RFC 8259 escaping).
-fn push_json_string(out: &mut String, s: &str) {
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-}
-
-/// Enumerate GPU adapters and pick the one `IterativeGpu` would run on.
-///
-/// This build has no GPU backend (the wgpu layer is added by the GPU
-/// workstream), so the probe always reports `available: false` with a
-/// reason. The GPU workstream replaces the body with the real wgpu
-/// enumeration (prefer discrete, then integrated; reject software adapters
-/// unless `THESEUS_GPU_ALLOW_SOFTWARE=1`); the signature and the JSON shape
-/// stay as they are.
-pub fn probe_gpu() -> GpuProbe {
-    GpuProbe::unavailable("GPU backend not yet built")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn probe_without_backend_is_unavailable_with_reason() {
-        let probe = probe_gpu();
-        assert!(!probe.available);
-        assert!(probe.adapters.is_empty());
-        assert_eq!(probe.chosen, None);
+    fn unavailable_probe_serialises_with_reason() {
+        let probe = GpuProbe::unavailable("no adapter");
+        assert!(!probe.is_available());
         assert_eq!(probe.chosen_adapter(), None);
-        assert_eq!(probe.reason.as_deref(), Some("GPU backend not yet built"));
-        assert_eq!(
-            probe.to_json(),
-            r#"{"available":false,"adapters":[],"chosen":null,"reason":"GPU backend not yet built"}"#
-        );
+        assert_eq!(probe.built_with_gpu_feature, cfg!(feature = "gpu"));
+        let json = probe.to_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["available"], false);
+        assert_eq!(parsed["adapters"].as_array().unwrap().len(), 0);
+        assert!(parsed["chosen"].is_null());
+        assert_eq!(parsed["reason"], "no adapter");
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn probe_without_feature_reports_not_built() {
+        let probe = probe_gpu();
+        assert!(!probe.built_with_gpu_feature);
+        assert!(!probe.is_available());
+        assert!(probe.message.contains("gpu"));
+        let parsed: serde_json::Value = serde_json::from_str(&probe.to_json()).unwrap();
+        assert_eq!(parsed["available"], false);
+        assert_eq!(parsed["built_with_gpu_feature"], false);
     }
 
     #[test]
     fn json_serialises_adapters_and_escapes_strings() {
         let probe = GpuProbe {
-            available: true,
+            built_with_gpu_feature: true,
             adapters: vec![
-                GpuAdapterInfo {
+                GpuAdapterReport {
                     name: "Fake \"GPU\"\n".into(),
                     backend: "vulkan".into(),
                     device_type: "discrete".into(),
-                    shader_f64: true,
+                    driver: "test 1.0".into(),
                     max_storage_buffer_binding_size: 2_147_483_648,
+                    max_buffer_size: 4_294_967_296,
+                    shader_f64: true,
+                    software: false,
+                    selectable: true,
                 },
-                GpuAdapterInfo {
+                GpuAdapterReport {
                     name: "llvmpipe".into(),
                     backend: "vulkan".into(),
                     device_type: "cpu".into(),
-                    shader_f64: false,
+                    driver: "llvmpipe".into(),
                     max_storage_buffer_binding_size: 134_217_728,
+                    max_buffer_size: 2_147_483_648,
+                    shader_f64: false,
+                    software: true,
+                    selectable: false,
                 },
             ],
             chosen: Some(0),
-            reason: None,
+            message: "using Fake GPU".into(),
         };
         assert_eq!(
             probe.chosen_adapter().map(|a| a.name.as_str()),
             Some("Fake \"GPU\"\n")
         );
         let json = probe.to_json();
-        assert_eq!(
-            json,
-            concat!(
-                r#"{"available":true,"adapters":["#,
-                r#"{"name":"Fake \"GPU\"\n","backend":"vulkan","device_type":"discrete","shader_f64":true,"max_storage_buffer_binding_size":2147483648},"#,
-                r#"{"name":"llvmpipe","backend":"vulkan","device_type":"cpu","shader_f64":false,"max_storage_buffer_binding_size":134217728}"#,
-                r#"],"chosen":0,"reason":null}"#
-            )
-        );
-        // The dev-dependency parser confirms the hand-written document is valid JSON.
+        assert!(json.starts_with(
+            r#"{"available":true,"adapters":[{"name":"Fake \"GPU\"\n","backend":"vulkan","device_type":"discrete","shader_f64":true,"max_storage_buffer_binding_size":2147483648,"#
+        ));
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["available"], true);
         assert_eq!(parsed["adapters"].as_array().unwrap().len(), 2);
         assert_eq!(parsed["adapters"][0]["name"], "Fake \"GPU\"\n");
+        assert_eq!(parsed["adapters"][1]["software"], true);
+        assert_eq!(parsed["adapters"][1]["selectable"], false);
         assert_eq!(parsed["chosen"], 0);
         assert!(parsed["reason"].is_null());
+        assert_eq!(parsed["built_with_gpu_feature"], true);
     }
 }

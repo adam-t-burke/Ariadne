@@ -85,6 +85,66 @@ jobs:
           rm -f Cargo.lock
           cargo test --all-features
 
+  # WS-G: the wgpu backend (`--features gpu`) built on all three OSes and its
+  # kernel equivalence tests run under software adapters (lavapipe on Linux,
+  # WARP via DX12 on Windows, the runner's Metal device on macOS) with
+  # THESEUS_GPU_ALLOW_SOFTWARE=1. The GPU steps are `continue-on-error`
+  # until the matrix is proven; WS-K removes that once the software-adapter
+  # runs are green on every OS (program plan §4.2, §7.3).
+  gpu-software:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      THESEUS_GPU_ALLOW_SOFTWARE: "1"
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install lavapipe (Linux software Vulkan)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n 1)
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+          echo "WGPU_BACKEND=vulkan" >> "$GITHUB_ENV"
+          env -u DISPLAY vulkaninfo --summary || true
+
+      - name: Select WARP (Windows software DX12)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "WGPU_BACKEND=dx12" >> $env:GITHUB_ENV
+          "WGPU_ADAPTER_NAME=Microsoft Basic Render Driver" >> $env:GITHUB_ENV
+
+      - name: Select Metal (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: echo "WGPU_BACKEND=metal" >> "$GITHUB_ENV"
+
+      - name: Build with the gpu feature
+        run: cargo build --locked -p theseus --release --features gpu
+
+      - name: GPU kernel equivalence tests (software adapter)
+        # WS-K removes continue-on-error once the software-adapter matrix is proven.
+        continue-on-error: true
+        run: cargo test --locked -p theseus --release --features gpu --test backend_gpu_equivalence -- --nocapture --test-threads=1
+
+      - name: GPU kernel microbenchmark harness (smoke, 100k nodes)
+        # WS-K removes continue-on-error once the software-adapter matrix is proven.
+        continue-on-error: true
+        env:
+          THESEUS_GPU_BENCH_NODES: "100000"
+          THESEUS_GPU_BENCH_REPS: "2"
+        run: cargo run --locked -p theseus --release --features gpu --example gpu_kernels_bench
+
   dotnet:
     runs-on: windows-latest
     steps:

@@ -20,6 +20,35 @@ basin = { version = "1.13", default-features = false }
 nurbsbook = { path = "../nurbsbook" }
 clarabel = "0.10"
 
+# GPU backend (opt-in `gpu` feature). Versions are pinned exactly: wgpu
+# releases change APIs between majors, and the validation matrix of the
+# iterative-solver program is tied to one version (upgrade in WS-K only).
+wgpu = { version = "=30.0.1", optional = true, default-features = false, features = [
+    "std",
+    "parking_lot",
+    "wgsl",
+    "vulkan",
+    "dx12",
+    "metal",
+] }
+pollster = { version = "=1.0.1", optional = true }
+bytemuck = { version = "1.25", optional = true, features = ["derive"] }
+
+[features]
+default = []
+# wgpu compute backend for the iterative solvers (`backend::gpu`). Off by
+# default so the direct-solver build and the C# artefacts are unaffected
+# until WS-H enables it.
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
+[[example]]
+name = "gpu_kernels_bench"
+required-features = ["gpu"]
+
+[[test]]
+name = "backend_gpu_equivalence"
+required-features = ["gpu"]
+
 [dev-dependencies]
 # JSON case files of the external (JAX FDM / compas_cem) benchmark.
 serde = { version = "1", features = ["derive"] }

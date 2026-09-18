@@ -1935,8 +1935,10 @@ fn build_iterative_options(
 /// Call with `cap = 0` (and a null `out_json`) to query the size. Returns
 /// `THESEUS_ERR_PANIC` on an internal panic.
 ///
-/// Needs no handle. This build has no GPU backend, so the result is always
-/// `{"available": false, "adapters": [], "chosen": null, "reason": "GPU backend not yet built"}`.
+/// Needs no handle. Without the `gpu` cargo feature the result is always
+/// `available: false` with `reason` explaining that the backend is not built
+/// in; with it, the adapters are enumerated (see `backend::probe_gpu`).
+/// Extra keys may be added over time; readers must ignore unknown keys.
 ///
 /// # Safety
 /// `out_json` must point to at least `cap` writable bytes when `cap > 0`.
@@ -4272,7 +4274,8 @@ mod linear_solver_ffi_tests {
     #[test]
     fn gpu_probe_reports_size_and_writes_well_formed_json() {
         unsafe {
-            let expected = r#"{"available":false,"adapters":[],"chosen":null,"reason":"GPU backend not yet built"}"#;
+            let expected = crate::backend::probe_gpu().to_json();
+            let expected = expected.as_str();
             let required = theseus_gpu_probe(std::ptr::null_mut(), 0);
             assert_eq!(required as usize, expected.len() + 1);
 
@@ -4295,10 +4298,13 @@ mod linear_solver_ffi_tests {
             let json = std::str::from_utf8(&buf[..required as usize - 1]).unwrap();
             assert_eq!(json, expected);
             let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
-            assert_eq!(parsed["available"], false);
-            assert_eq!(parsed["adapters"].as_array().unwrap().len(), 0);
-            assert!(parsed["chosen"].is_null());
-            assert_eq!(parsed["reason"], "GPU backend not yet built");
+            assert!(parsed["available"].is_boolean());
+            assert!(parsed["adapters"].is_array());
+            if !cfg!(feature = "gpu") {
+                assert_eq!(parsed["available"], false);
+                assert!(parsed["chosen"].is_null());
+                assert!(parsed["reason"].as_str().unwrap().contains("gpu"));
+            }
         }
     }
 
