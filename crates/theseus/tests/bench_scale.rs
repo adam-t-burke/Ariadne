@@ -15,7 +15,7 @@
 //! | `THESEUS_SCALE_GRIDS` | grid sides; other fixtures are built at the matching edge count | `72,160,224` |
 //! | `THESEUS_SCALE_ITERS` | L-BFGS-B iteration budget (tolerances are zero) | `40` |
 //! | `THESEUS_BENCH_REPS` | timed fused evaluations per size (median + IQR reported) | `5` |
-//! | `THESEUS_LINEAR_SOLVER` | backend; only `direct` exists, anything else prints "not yet available" and skips | `direct` |
+//! | `THESEUS_LINEAR_SOLVER` | backend: `direct`, `iterative-cpu`, `iterative-gpu` (a kind this build cannot run prints the reason and skips) | `direct` |
 //! | `THESEUS_BENCH_JSON` | path of a JSON-lines file; one object per size is appended | unset |
 //! | `THESEUS_MACHINE_ID` | machine id recorded in the JSON (else derived from OS/CPU/RAM) | unset |
 //! | `THESEUS_ANISOTROPY` | `q*` ratio of the anisotropic fixture | `100` |
@@ -35,7 +35,19 @@ use ndarray::Array2;
 use serde_json::json;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
+use theseus::linear_solver::LinearSolverKind;
 use theseus::types::*;
+
+/// `THESEUS_LINEAR_SOLVER` → kind: `direct`, `iterative-cpu`, `iterative-gpu`
+/// (also the FFI codes `0`/`1`/`2` and underscore spellings).
+fn linear_solver_kind(backend: &str) -> Option<LinearSolverKind> {
+    match backend {
+        "direct" | "0" => Some(LinearSolverKind::Direct),
+        "iterative-cpu" | "iterative_cpu" | "1" => Some(LinearSolverKind::IterativeCpu),
+        "iterative-gpu" | "iterative_gpu" | "2" => Some(LinearSolverKind::IterativeGpu),
+        _ => None,
+    }
+}
 
 #[test]
 #[ignore]
@@ -53,10 +65,12 @@ fn bench_scale_grid_solves() {
         "fixture: {}; backend: {backend}; rayon threads: {threads}; iteration budget: {iters}; eval reps: {reps}",
         fixture_kind.name()
     );
-    if !harness::is_direct(&backend) {
-        println!("linear solver {backend:?}: not yet available; skipping");
+    let Some(kind) = linear_solver_kind(&backend) else {
+        println!(
+            "linear solver {backend:?}: unknown (expected direct, iterative-cpu or iterative-gpu); skipping"
+        );
         return;
-    }
+    };
     println!(
         "{:>5} {:>7} {:>7} | {:>9} {:>9} {:>8} | {:>5} {:>5} {:>9} {:>9} {:>11} {:>12} | {:>8}",
         "grid",
@@ -83,6 +97,7 @@ fn bench_scale_grid_solves() {
         problem.solver.absolute_tolerance = 0.0;
         problem.solver.relative_tolerance = 0.0;
         problem.solver.max_iterations = iters;
+        problem.solver.linear_solver = kind;
         let ne = problem.topology.num_edges;
         let nfree = problem.topology.free_node_indices.len();
 
@@ -90,7 +105,14 @@ fn bench_scale_grid_solves() {
         let anchors = Array2::zeros((0, 3));
         let q = vec![1.0; ne];
         let t = Instant::now();
-        let mut cache = FdmCache::new(&problem).unwrap();
+        let mut cache = match FdmCache::new(&problem) {
+            Ok(cache) => cache,
+            Err(TheseusError::IterativeSolverUnsupported(reason)) => {
+                println!("linear solver {backend:?}: {reason}; skipping");
+                return;
+            }
+            Err(error) => panic!("FdmCache::new failed: {error}"),
+        };
         theseus::fdm::solve_fdm(&mut cache, &q, &problem, &anchors, 1e-12).unwrap();
         let setup_ms = t.elapsed().as_secs_f64() * 1e3;
 
@@ -173,7 +195,11 @@ fn bench_scale_grid_solves() {
             "eval_ms": eval.to_json(),
             "evaluations": evals,
             "iterations": result.iterations,
-            "linear_solver_iterations": serde_json::Value::Null,
+            "linear_solver_iterations": if kind.is_iterative() {
+                json!(result.linear_solver_totals.iterations_total)
+            } else {
+                serde_json::Value::Null
+            },
             "total_ms": total_ms,
             "ms_per_iteration": total_ms / result.iterations.max(1) as f64,
             "non_eval_ms": non_eval_ms,
