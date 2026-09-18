@@ -171,7 +171,7 @@ fn direct_solver_error_paths() {
 }
 
 #[test]
-fn factory_builds_direct_and_refuses_iterative_kinds() {
+fn factory_builds_direct_and_cpu_kinds_and_refuses_gpu() {
     let problem = grid::make_grid_problem(6);
     let options = IterativeSolverOptions::default();
 
@@ -184,18 +184,25 @@ fn factory_builds_direct_and_refuses_iterative_kinds() {
     .unwrap();
     assert_eq!(solver.kind(), LinearSolverKind::Direct);
 
-    for kind in [
+    // WS-C: the CPU iterative kind is the smoothed-aggregation AMG solver.
+    let solver = LinearSolver::new(
         LinearSolverKind::IterativeCpu,
-        LinearSolverKind::IterativeGpu,
-    ] {
-        match LinearSolver::new(kind, &problem.topology, &problem.bounds, &options) {
-            Err(TheseusError::IterativeSolverUnsupported(msg)) => {
-                assert!(msg.contains("not yet available"), "{msg}");
-                assert!(msg.contains(&kind.to_string()), "{msg}");
-            }
-            Err(other) => panic!("unexpected error for {kind}: {other}"),
-            Ok(_) => panic!("{kind} should not be available yet"),
+        &problem.topology,
+        &problem.bounds,
+        &options,
+    )
+    .unwrap();
+    assert_eq!(solver.kind(), LinearSolverKind::IterativeCpu);
+
+    // The GPU kind waits for WS-H.
+    let kind = LinearSolverKind::IterativeGpu;
+    match LinearSolver::new(kind, &problem.topology, &problem.bounds, &options) {
+        Err(TheseusError::IterativeSolverUnsupported(msg)) => {
+            assert!(msg.contains("not yet available"), "{msg}");
+            assert!(msg.contains(&kind.to_string()), "{msg}");
         }
+        Err(other) => panic!("unexpected error for {kind}: {other}"),
+        Ok(_) => panic!("{kind} should not be available yet"),
     }
 }
 
