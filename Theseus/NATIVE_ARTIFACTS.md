@@ -25,3 +25,18 @@ The tracked bootstrap binaries predate the Basin migration and may include
 `ariadne-lbfgsb`. Its `ariadne-lbfgsb-*` notices remain in the distribution bundle
 to cover those binaries. The standalone crate also retains its own notices.
 The surrounding Ariadne project is MIT licensed; see `Ariadne-LICENSE.txt`.
+
+## GPU linear solver (future)
+
+The `Iterative (GPU)` linear solver selectable in the Optimization Config
+component is not implemented in the current native library; choosing it fails
+with native code -4 and `theseus_gpu_probe` reports `"available": false`.
+When the GPU backend lands it will be compiled into the same `theseus.dll` /
+`libtheseus.dylib` through wgpu, so **no new runtime files are added to the
+distribution bundle**. It will, however, need a working graphics driver on the
+user's machine: Vulkan or DirectX 12 on Windows, Metal on macOS. Software
+(CPU) adapters are rejected by the probe. Machines without a suitable driver
+keep working with the `Direct` and `Iterative (CPU)` solvers; the GPU option
+reports the probe's reason and the adapters it saw instead of falling back.
+Any additional third-party notices required by the GPU dependencies will be
+added to this bundle alongside the existing ones when that backend ships.

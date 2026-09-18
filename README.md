@@ -64,6 +64,58 @@ If the loaded shape must match a prescribed target, first optimize `q` against
 target-position objectives with the hydrostatic load connected, then recover
 rest lengths from that matched loaded state.
 
+## Linear solver backends
+
+Every forward solve and every gradient evaluation solves the sparse FDM system
+`A x = b` (and its adjoint) for three right-hand sides. Theseus offers three
+backends for that step, chosen explicitly per definition; nothing is selected
+automatically and the solver never falls back from one backend to another.
+
+| Kind | Menu label | Message | Status |
+| --- | --- | --- | --- |
+| `Direct` (default) | Direct | `lin: Direct` | Available. Sparse Cholesky factorization; exact, robust, the right choice up to a few tens of thousands of nodes. |
+| `IterativeCpu` | Iterative (CPU) | `lin: Iter-CPU` | **Not yet available in this build.** Matrix-free flexible CG with an aggregation-AMG preconditioner, for large meshes where factorization time or memory dominates. |
+| `IterativeGpu` | Iterative (GPU) | `lin: Iter-GPU` | **Not yet available in this build.** The same method on a wgpu compute device (Vulkan, DirectX 12, Metal) with a host or device f64 outer loop. |
+
+**Enabling a backend.** Right-click **Optimization Config** → **Linear solver**
+and pick a kind. The choice is saved with the definition (key
+`LinearSolverKind`; definitions saved before the toggle existed load as
+`Direct`) and shows up in the component message as `lin: Direct`,
+`lin: Iter-CPU` or `lin: Iter-GPU`. Selecting an iterative kind adds an
+optional **Iterative Options** input; feed it from the **Iterative Solver
+Options** component to change the tolerance schedule, iteration budget,
+multigrid cycle, smoother degree, aggregation passes, coarsest level size,
+preconditioner precision or GPU adapter preference. Leave it empty for the
+defaults (adaptive tolerance `clamp(1e-2 × projected-gradient ratio, 1e-10,
+1e-6)`, 200 iterations, K-cycle, degree-2 Chebyshev smoother, two aggregation
+passes, coarsest level of 2000 nodes, backend-default precision). The same
+knobs are exposed to C# through `TheseusSolver.SetLinearSolver` and
+`TheseusSolver.SetIterativeOptions`, and to the config record through
+`OptimizationConfig.LinearSolver` / `.IterativeOptions` (default `Direct`,
+`null`).
+
+**Reading the diagnostics.** After every solve **Theseus Solve** adds a remark
+of the form `Linear solver: IterativeCpu, 12 solve(s), 340 iteration(s),
+15.0 ms`. The same totals are available in C# as `SolverResult.LinearSolver`
+(`LinearSolverStats`: backend, solve count, total and maximum CG iterations,
+solve and setup milliseconds, whether every solve converged) and to native
+callers through `theseus_get_linear_solver_stats`. For `Direct` the iteration
+counts are always zero; in this build the direct factorization does not yet
+report per-solve statistics either, so a `Direct` run shows
+`Linear solver: Direct, 0 solve(s), 0 iteration(s)`.
+
+**Failures are loud.** Selecting `Iterative (CPU)` or `Iterative (GPU)` in this
+build makes the next solve fail with the **red** component error
+`Linear solver: iterative linear solvers are not yet available in this build
+(requested 'IterativeCpu') (native code -4)` (`TheseusException.NativeCode ==
+-4`). Once the backends land, `Iterative (GPU)` first runs a GPU probe
+(`GpuProbe.Query()` / `theseus_gpu_probe`) and, when no usable adapter is
+found, fails the same way with the probe's reason and the list of adapters it
+saw (native code -5). Iterative solves that do not converge within their
+budget report native code -3 and out-of-memory on the device -6. In every case
+the component shows an error instead of silently switching to `Direct`; switch
+back to **Direct** in the context menu to continue.
+
 ## Objective reference
 
 | C# method | Description |
