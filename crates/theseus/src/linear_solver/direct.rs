@@ -158,7 +158,7 @@ pub(crate) fn check_finite(x: &[f64]) -> Result<(), TheseusError> {
 /// triangular-solve workspace for one topology. `update(q)` reassembles and
 /// refactors (falling back from Cholesky to LDLᵀ if `A` stops being SPD, as
 /// the cache path does); `solve` runs the specialised three-column
-/// triangular solve of [`crate::factor_solve`].
+/// triangular solve of `crate::factor_solve`.
 pub struct DirectSolver {
     a_matrix: SparseColMatOwned,
     q_to_nz: QToNz,
