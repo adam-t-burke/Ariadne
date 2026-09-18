@@ -848,6 +848,106 @@ for a future `Auto` decision.
 
 ---
 
+## 9a. Status at pause (2026-09-18) and how to resume
+
+Work was paused with the program branch `cursor/theseus-scale-100k-2d27`
+(PR #14) at the WS-C merge. Read this section first when picking up.
+
+### What is on the program branch
+
+| workstream | state | branch (merged) |
+|---|---|---|
+| WS-I interfaces, `DirectSolver` | merged | `cursor/its-i-interfaces-2d27` |
+| WS-A Phase-0 prototype + verdict | merged | `cursor/its-a-phase0-2d27` |
+| WS-B `graph::build`, `CpuBackend`, parallel loops | merged | `cursor/its-b-graph-loops-2d27` |
+| WS-E fixtures, JSON harness, `scripts/`, first `Direct` sweep | merged | `cursor/its-e-bench-tooling-2d27` |
+| WS-F FFI/C#/Grasshopper toggle (+ `max_device_bytes`) | merged | `cursor/its-f-toggle-2d27` |
+| WS-G wgpu backend behind feature `gpu`, WGSL kernels, CI job | merged | `cursor/its-g-gpu-kernels-2d27` |
+| WS-D `FdmCache` dispatch, tolerance schedule, diagnostics | merged | `cursor/its-d-fdm-dispatch-2d27` |
+| WS-C smoothed-aggregation AMG (`IterativeCpu`), CSR kernels | merged (`f79ec1d`) — **3 test binaries fail**, see below | `cursor/its-c-amg-core-2d27` |
+| WS-C/WS-D integration fixes | **in flight** at pause: branch `cursor/its-d2-amg-integration-2d27` (may or may not have been pushed; check `git ls-remote origin 'cursor/its-d2-*'`) | — |
+| WS-H GPU end-to-end, WS-J crossover, WS-K robustness/docs | not started; specifications in §7.3 | — |
+
+Milestones: M0, M1, M2 reached; M4 reached except real-hardware
+validation; M3 blocked only on the three integration fixes below.
+
+### Known failing tests at `f79ec1d` (all `IterativeCpu` legs; `Direct` is fully green)
+
+Run `cargo test --workspace --release --no-fail-fast` to see all three at
+once (`cargo test` stops at the first failing binary otherwise).
+
+1. `optimization_diagnostic` (4 tests): soft-bounds problems drive `q < 0`;
+   the AMG coarsest-level faer LLT fails and surfaces as
+   `TheseusError::Linalg("CholeskyError …")`. Required: `AmgSolver::update`
+   checks `q > 0` and finite up front and returns
+   `IterativeSolverUnsupported` (message names the toggle); a coarsest
+   Cholesky failure maps to the same typed error.
+2. `linear_solver_dispatch::iterative_max_iterations_one_does_not_converge`:
+   `max_iterations = 1` returned `Ok`. Check that `AmgSolver::solve` honours
+   `SolveRequest.max_iterations`, reports `converged = false` on budget
+   exhaustion, and that `run_recorded_solve` turns that into
+   `IterativeSolverDidNotConverge`; or the tiny test problem converges in
+   one iteration and the test needs a harder system.
+3. `linear_solver_dispatch::every_solve_is_recorded_in_the_cache_totals`:
+   `Solver("Neumann adjoint did not converge within 30 iterations
+   (tolerance 1e-10)")` — `solve_modified_adjoint`'s inner iterative solves
+   run at `cache.solve_tolerance` (1e-6 ceiling); they must run ≥ 100×
+   tighter than the Neumann target (clamped ≥ 1e-14). `Direct` ignores
+   tolerances and must stay byte-identical.
+
+Also to verify at the same time (WS-D → WS-C hand-over, §10): `AmgSolver`
+overrides `precondition` with one V-cycle; `x0` is copied, not used in
+place; no 1e-12 diagonal shift in the AMG operator (matches the
+matrix-free `apply_a_xyz`).
+
+### Resume checklist
+
+```
+git fetch origin
+git checkout cursor/theseus-scale-100k-2d27
+git ls-remote origin 'cursor/its-d2-*'          # integration fixes pushed? merge them first
+export RUSTUP_TOOLCHAIN=1.89.0
+cargo test --workspace --release --no-fail-fast   # expect green after the fixes
+# GPU-feature build and tests (software adapter):
+sudo apt-get install -y mesa-vulkan-drivers libvulkan1
+THESEUS_GPU_ALLOW_SOFTWARE=1 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
+  cargo test -p theseus --release --features gpu
+# CPU numbers (ignored benches):
+RAYON_NUM_THREADS=4 cargo test -p theseus --release --test amg_bench -- --ignored --nocapture
+THESEUS_LINEAR_SOLVER=iterative-cpu THESEUS_FIXTURE=grid cargo test -p theseus --release --test bench_scale -- --ignored --nocapture
+```
+
+Then dispatch, in this order (prompts derive from §7.3 + §10 decisions):
+
+1. **WS-H** — `AmgSolver<GpuBackend>`: f32 preconditioner with f64 host
+   outer loop (device outer loop where `SHADER_F64`), fallible
+   `Backend::alloc`/`upload_level` (decision in §10), binding splitting for
+   adapters with `max_storage_buffer_binding_size` < largest array (needed
+   for 10M edges on lavapipe/iGPU), per-dispatch bind-group/param-upload
+   removal, `LinearSolver::new(IterativeGpu, …)`, GPU probe cached per
+   handle, `SolveStats.backend`/adapter reporting through FFI/C#. Validate
+   under lavapipe here, then on Windows/NVIDIA and Apple silicon (§5.4).
+2. **WS-J** — Stage A–C of §5.3 on this VM for `Direct` vs `IterativeCpu`
+   (tooling: `uv run --project scripts scripts/bench_sweep.py`, then
+   `crossover_fit.py`; see `benchmarks/README.md`); Stage D on GPU machines
+   after WS-H. WS-C's measured AMG defaults (`amg::recommended_options()`:
+   3 passes, Chebyshev 2, α = 10, V-cycle) are the Stage-A starting point;
+   `IterativeSolverOptions::default()` still holds the §2.1 values (K-cycle,
+   2 passes) — WS-J decides which becomes the default and the integrator
+   updates §2.1 and the C# defaults together.
+3. **WS-K** — §4.6 failure-mode tests, the every-objective fixture,
+   `gpu-software` CI job hardening (remove `continue-on-error`), hardware
+   CI job, docs, release checklist, crate-wide clippy sweep (≈70
+   pre-existing findings make `-D warnings` unusable as a gate today).
+
+### Measured standing at pause (4-vCPU Linux VM, from `BENCHMARKS.md` WS-C section)
+
+`IterativeCpu` update+solve vs `Direct` refactor+solve at 1M edges: 4
+threads 0.36–0.54× cold, 0.27–0.43× warm; 1 thread 1.10–1.67× cold,
+0.77–1.31× warm; `update(q)` 35–54 ms (1 thread) / 20–24 ms (4 threads),
+targets met. Break-even on 4 threads is near 100k edges; single-threaded
+the direct solver still wins below ~1M edges.
+
 ## 10. Decision log
 
 * 2026-09-18 — Direct sparse Cholesky retained as default; iterative
