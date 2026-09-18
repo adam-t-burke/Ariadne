@@ -34,6 +34,10 @@
 //! Results and the recommendation are recorded in `BENCHMARKS.md`
 //! ("Phase 0: aggregation AMG prototype").
 
+// Index loops over several parallel arrays mirror the kernel formulation in
+// the program document and are kept as written.
+#![allow(clippy::needless_range_loop)]
+
 #[path = "../tests/support/grid.rs"]
 #[allow(dead_code)]
 mod grid;
