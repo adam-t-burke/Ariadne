@@ -774,7 +774,7 @@ noting it in the report.
 |---|---|
 | M0 Interfaces | **reached** (`9a5f52d`): WS-I merged; `DirectSolver` bitwise-equal to the cache path, `factor_and_solve` shares its refactor code; full `Box<dyn LinearSystemSolver>` dispatch inside `FdmCache` deferred to WS-D |
 | M1 Phase-0 verdict | WS-A report merged with a go/no-go and parameter recommendation |
-| M2 Infrastructure | WS-B, WS-E, WS-F merged (*WS-F done*, `cb562e6`: toggle, options and probe through FFI/C#/Grasshopper, iterative kinds return code `-4`); toggle visible in Grasshopper returning "not yet available" for iterative kinds; sweep tooling produces a `Direct` cost model. *WS-E done* (`6df10ba`): fixtures, JSON harness, `scripts/bench_sweep.py`, `crossover_fit.py`, first `Direct` sweep 10k–1M on the CI VM with fits at RMS < 15% (`benchmarks/reports/`) |
+| M2 Infrastructure | **reached** — WS-B, WS-E, WS-F merged (*WS-B done*, `16da146`; *WS-F done*, `cb562e6`: toggle, options and probe through FFI/C#/Grasshopper, iterative kinds return code `-4`); toggle visible in Grasshopper returning "not yet available" for iterative kinds; sweep tooling produces a `Direct` cost model. *WS-E done* (`6df10ba`): fixtures, JSON harness, `scripts/bench_sweep.py`, `crossover_fit.py`, first `Direct` sweep 10k–1M on the CI VM with fits at RMS < 15% (`benchmarks/reports/`) |
 | M3 CPU iterative | WS-C, WS-D merged; `IterativeCpu` passes all contract tests; `bench_scale` numbers at 224–708 recorded |
 | M4 GPU kernels | WS-G merged; kernels validated under software adapters on three OSes and on one real GPU |
 | M5 GPU end to end | WS-H merged; `IterativeGpu` validated on Windows/NVIDIA and Apple silicon; 10M-edge run recorded |
@@ -841,3 +841,15 @@ for a future `Auto` decision.
   follow-up); the GPU pre-probe is cached per handle once WS-G lands and
   re-run only on explicit request (WS-H); preserving wires when the toggle
   rebuilds optional inputs goes to WS-K.
+* 2026-09-18 — WS-B landed (`16da146`): `graph::build` (`CsrAdjacency::
+  from_topology`, `Level0Map::update_weights(q)`, `LevelGraph::level0`),
+  `backend::cpu::CpuBackend` with the chunked deterministic helpers
+  (`CHUNK = 4096`, `PAR_MIN_LEN`, `deterministic_sum`), `FdmCache.adjacency`,
+  `boundary_edges` sorted by (free row, edge). Non-solver phases 2.4–2.7×
+  faster on 4 threads at 1M edges, no single-thread regression, bitwise
+  identical across thread counts (tests `graph_loops_determinism`). Only the
+  objective loss reductions reassociate (1e-12 tests). Decisions:
+  `run_sequential`'s one-thread shortcut stays (results identical);
+  `Level0Map` lives in the iterative solver state, not `FdmCache` (WS-C);
+  the sequential triangular solves (~60% of non-factor time) are a WS-K
+  candidate (parallel over the 3 columns or supernode-level parallelism).
