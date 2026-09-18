@@ -41,6 +41,10 @@ default = []
 # until WS-H enables it.
 gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 
+[[test]]
+name = "backend_gpu_equivalence"
+required-features = ["gpu"]
+
 [dev-dependencies]
 # JSON case files of the external (JAX FDM / compas_cem) benchmark.
 serde = { version = "1", features = ["derive"] }
