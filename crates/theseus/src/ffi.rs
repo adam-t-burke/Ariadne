@@ -59,6 +59,92 @@ pub(crate) fn set_last_error(msg: &str) {
     LAST_ERROR.with(|e| *e.borrow_mut() = msg.to_owned());
 }
 
+// ─────────────────────────────────────────────────────────────
+//  Return codes
+// ─────────────────────────────────────────────────────────────
+//
+// 0 = success, negative = error; `theseus_last_error` carries the message.
+// The codes are part of the C ABI: never renumber, only append.
+
+/// Generic failure (every `TheseusError` variant that has no code of its own).
+pub const THESEUS_ERR_GENERIC: i32 = -1;
+/// A panic was caught at the FFI boundary (a bug).
+pub const THESEUS_ERR_PANIC: i32 = -2;
+/// `TheseusError::IterativeSolverDidNotConverge`.
+pub const THESEUS_ERR_ITERATIVE_NOT_CONVERGED: i32 = -3;
+/// `TheseusError::IterativeSolverUnsupported`.
+pub const THESEUS_ERR_ITERATIVE_UNSUPPORTED: i32 = -4;
+/// `TheseusError::GpuUnavailable`.
+pub const THESEUS_ERR_GPU_UNAVAILABLE: i32 = -5;
+/// `TheseusError::GpuOutOfMemory`.
+pub const THESEUS_ERR_GPU_OUT_OF_MEMORY: i32 = -6;
+
+/// The `i32` return code for an error.
+pub fn error_code(error: &TheseusError) -> i32 {
+    match error {
+        TheseusError::IterativeSolverDidNotConverge { .. } => THESEUS_ERR_ITERATIVE_NOT_CONVERGED,
+        TheseusError::IterativeSolverUnsupported(_) => THESEUS_ERR_ITERATIVE_UNSUPPORTED,
+        TheseusError::GpuUnavailable(_) => THESEUS_ERR_GPU_UNAVAILABLE,
+        TheseusError::GpuOutOfMemory { .. } => THESEUS_ERR_GPU_OUT_OF_MEMORY,
+        TheseusError::Linalg(_)
+        | TheseusError::SparsityMismatch { .. }
+        | TheseusError::MissingFactorization
+        | TheseusError::Solver(_)
+        | TheseusError::Shape(_)
+        | TheseusError::Cancelled => THESEUS_ERR_GENERIC,
+    }
+}
+
+#[cfg(test)]
+mod error_code_tests {
+    use super::*;
+    use crate::linear_solver::LinearSolverKind;
+
+    #[test]
+    fn existing_variants_keep_the_generic_code() {
+        for e in [
+            TheseusError::Linalg("x".into()),
+            TheseusError::SparsityMismatch {
+                edge: 0,
+                row: 0,
+                col: 0,
+            },
+            TheseusError::MissingFactorization,
+            TheseusError::Solver("x".into()),
+            TheseusError::Shape("x".into()),
+            TheseusError::Cancelled,
+        ] {
+            assert_eq!(error_code(&e), THESEUS_ERR_GENERIC);
+        }
+    }
+
+    #[test]
+    fn linear_solver_variants_have_distinct_codes() {
+        let codes = [
+            error_code(&TheseusError::IterativeSolverDidNotConverge {
+                iterations: 1,
+                relative_residual: 1.0,
+                kind: LinearSolverKind::IterativeCpu,
+            }),
+            error_code(&TheseusError::IterativeSolverUnsupported("x".into())),
+            error_code(&TheseusError::GpuUnavailable("x".into())),
+            error_code(&TheseusError::GpuOutOfMemory {
+                requested: 1,
+                available: 0,
+            }),
+        ];
+        assert_eq!(codes, [-3, -4, -5, -6]);
+        let guarded = unsafe {
+            ffi_guard(|| Err(TheseusError::IterativeSolverUnsupported("not yet".into())))
+        };
+        assert_eq!(guarded, THESEUS_ERR_ITERATIVE_UNSUPPORTED);
+        let mut buf = [0u8; 256];
+        let len = unsafe { theseus_last_error(buf.as_mut_ptr(), buf.len()) };
+        let msg = std::str::from_utf8(&buf[..len as usize]).unwrap();
+        assert!(msg.contains("not yet") && msg.contains("Direct"), "{msg}");
+    }
+}
+
 /// Wrap an `extern "C"` body: calls the closure, translates `Result` to
 /// `i32`, stores error message, and uses `catch_unwind` as a final safety
 /// net against bugs.
@@ -70,11 +156,11 @@ where
         Ok(Ok(())) => 0,
         Ok(Err(e)) => {
             set_last_error(&e.to_string());
-            -1
+            error_code(&e)
         }
         Err(_panic) => {
             set_last_error("internal panic (this is a bug — please report it)");
-            -2
+            THESEUS_ERR_PANIC
         }
     }
 }
