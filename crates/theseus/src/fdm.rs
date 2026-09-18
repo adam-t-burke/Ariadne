@@ -1,5 +1,6 @@
 //! Forward FDM solver: assemble A(q), build RHS, factorise, triangular solve.
 
+use crate::backend::cpu::{for_each_chunk_mut, for_each_chunk_mut2, CHUNK};
 use crate::linear_solver::direct;
 use crate::types::{FdmCache, PressureParams, Problem, SelfWeightParams, TheseusError};
 use ndarray::Array2;
@@ -57,17 +58,28 @@ pub fn update_fixed_positions(
 
 /// Zero-allocation in-place update of A's values from current q.
 /// A = Cn^T diag(q) Cn  via the precomputed `q_to_nz` mapping.
+///
+/// Each nonzero is an independent gather over its contributing edges, summed
+/// in map order exactly as before; the nonzeros are processed in fixed
+/// [`CHUNK`]-sized chunks (parallel above [`PAR_MIN_LEN`]), so the values
+/// are bitwise identical for any thread count.
+///
+/// [`CHUNK`]: crate::backend::cpu::CHUNK
+/// [`PAR_MIN_LEN`]: crate::backend::cpu::PAR_MIN_LEN
 pub fn assemble_a(cache: &mut FdmCache) {
     let map = &cache.q_to_nz;
     let q = &cache.q;
-    for (nz, value) in cache.a_matrix.values.iter_mut().enumerate() {
-        let range = map.nz_offsets[nz]..map.nz_offsets[nz + 1];
-        *value = map.edge[range.clone()]
-            .iter()
-            .zip(&map.coeff[range])
-            .map(|(&k, &c)| q[k as usize] * c)
-            .sum();
-    }
+    for_each_chunk_mut(&mut cache.a_matrix.values, CHUNK, |start, chunk| {
+        for (j, value) in chunk.iter_mut().enumerate() {
+            let nz = start + j;
+            let range = map.nz_offsets[nz]..map.nz_offsets[nz + 1];
+            *value = map.edge[range.clone()]
+                .iter()
+                .zip(&map.coeff[range])
+                .map(|(&k, &c)| q[k as usize] * c)
+                .sum();
+        }
+    });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -82,23 +94,46 @@ pub fn assemble_a(cache: &mut FdmCache) {
 /// `diag(q) Cf Nf_fixed`, so the product is accumulated directly from the
 /// precomputed `boundary_edges` list: each such edge adds `q_k · x_fixed` to
 /// its free endpoint.
+///
+/// The free rows are processed in fixed [`CHUNK`]-row chunks (parallel above
+/// [`PAR_MIN_LEN`] scalars); each chunk copies its rows of `pn` and gathers
+/// the boundary edges of its rows, which `boundary_edges` stores sorted by
+/// free row then edge. Per row the additions happen in ascending edge order,
+/// the same order as the sequential edge loop, so the result is bitwise
+/// identical for any thread count.
+///
+/// [`CHUNK`]: crate::backend::cpu::CHUNK
+/// [`PAR_MIN_LEN`]: crate::backend::cpu::PAR_MIN_LEN
 pub fn assemble_rhs(cache: &mut FdmCache, problem: &Problem) {
     let _ = problem;
-    cache.rhs.assign(&cache.pn);
     let nf = cache
         .nf
         .as_slice()
         .expect("node positions must be contiguous row-major");
+    let pn = cache
+        .pn
+        .as_slice()
+        .expect("loads must be contiguous row-major");
     let rhs = cache
         .rhs
         .as_slice_mut()
         .expect("rhs must be contiguous row-major");
-    for &(k, free, fixed_node) in &cache.boundary_edges {
-        let qk = cache.q[k];
-        for d in 0..3 {
-            rhs[free * 3 + d] += qk * nf[fixed_node * 3 + d];
+    let boundary = &cache.boundary_edges;
+    let q = &cache.q;
+    for_each_chunk_mut(rhs, CHUNK * 3, |start, chunk| {
+        chunk.copy_from_slice(&pn[start..start + chunk.len()]);
+        let row0 = start / 3;
+        let row1 = row0 + chunk.len() / 3;
+        let lo = boundary.partition_point(|&(_, free, _)| free < row0);
+        let hi = boundary.partition_point(|&(_, free, _)| free < row1);
+        for &(k, free, fixed_node) in &boundary[lo..hi] {
+            let qk = q[k];
+            let row = (free - row0) * 3;
+            for d in 0..3 {
+                chunk[row + d] += qk * nf[fixed_node * 3 + d];
+            }
         }
-    }
+    });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -228,45 +263,75 @@ fn solve_fdm_cancellable(
 
 /// Compute member lengths, forces, and reactions from current positions and q.
 /// Uses max(0, …) before sqrt to avoid NaN from floating-point negative squared length.
+///
+/// Two chunked passes (parallel above [`PAR_MIN_LEN`] elements): one over
+/// the edges for lengths and forces, one over the nodes gathering the
+/// reactions `R_u = Σ_{e ∋ u} q_e (x_other − x_u)` from the CSR adjacency.
+/// Incident edges are listed in ascending edge order, so each node's sum is
+/// accumulated in exactly the order of the sequential edge-scatter loop;
+/// results are bitwise identical to it for any thread count.
+///
+/// [`PAR_MIN_LEN`]: crate::backend::cpu::PAR_MIN_LEN
 pub fn compute_geometry(cache: &mut FdmCache, problem: &Problem) {
-    let ne = problem.topology.num_edges;
-
-    // One sequential pass over the edges: lengths and forces per edge, and the
-    // nodal reactions scattered to both endpoints. At 100k edges this is well
-    // under a millisecond and deterministic; the previous rayon fold allocated
-    // an nn×3 buffer per work split, which cost more than the arithmetic.
+    let _ = problem;
     let nf = cache
         .nf
         .as_slice()
         .expect("node positions must be contiguous row-major");
+    let q = &cache.q;
+
+    let starts = &cache.edge_starts;
+    let ends = &cache.edge_ends;
+    for_each_chunk_mut2(
+        &mut cache.member_lengths,
+        CHUNK,
+        &mut cache.member_forces,
+        CHUNK,
+        |start, lengths, forces| {
+            for (j, (len_out, force_out)) in lengths.iter_mut().zip(forces.iter_mut()).enumerate() {
+                let i = start + j;
+                let s = starts[i] * 3;
+                let e = ends[i] * 3;
+                let dx = nf[e] - nf[s];
+                let dy = nf[e + 1] - nf[s + 1];
+                let dz = nf[e + 2] - nf[s + 2];
+                let len_sq = dx * dx + dy * dy + dz * dz;
+                let len = len_sq.max(0.0).sqrt();
+                *len_out = len;
+                *force_out = q[i] * len;
+            }
+        },
+    );
+
+    // Reaction gather. The scatter form adds `q (x_e − x_s)` at the start
+    // node and subtracts it at the end node; both are `q (x_other − x_u)`
+    // at node `u`, and since IEEE negation is exact the branch-free form is
+    // bitwise identical to the scatter.
+    let adjacency = &cache.adjacency;
     let reactions = cache
         .reactions
         .as_slice_mut()
         .expect("reactions must be contiguous row-major");
-    reactions.fill(0.0);
-
-    for i in 0..ne {
-        let s = cache.edge_starts[i];
-        let e = cache.edge_ends[i];
-        let qi = cache.q[i];
-
-        let dx = nf[e * 3] - nf[s * 3];
-        let dy = nf[e * 3 + 1] - nf[s * 3 + 1];
-        let dz = nf[e * 3 + 2] - nf[s * 3 + 2];
-
-        let len_sq = dx * dx + dy * dy + dz * dz;
-        let len = len_sq.max(0.0).sqrt();
-        cache.member_lengths[i] = len;
-        cache.member_forces[i] = qi * len;
-
-        let (rx, ry, rz) = (dx * qi, dy * qi, dz * qi);
-        reactions[s * 3] += rx;
-        reactions[s * 3 + 1] += ry;
-        reactions[s * 3 + 2] += rz;
-        reactions[e * 3] -= rx;
-        reactions[e * 3 + 1] -= ry;
-        reactions[e * 3 + 2] -= rz;
-    }
+    for_each_chunk_mut(reactions, CHUNK * 3, |start, chunk| {
+        for (j, row) in chunk.chunks_exact_mut(3).enumerate() {
+            let u = start / 3 + j;
+            let xu: &[f64; 3] = nf[u * 3..u * 3 + 3].try_into().expect("3 coordinates");
+            let range = adjacency.range(u);
+            let mut acc = [0.0f64; 3];
+            for (&k, &other) in adjacency.edges[range.clone()]
+                .iter()
+                .zip(&adjacency.other[range])
+            {
+                let qi = q[k as usize];
+                let o = other as usize * 3;
+                let xo: &[f64; 3] = nf[o..o + 3].try_into().expect("3 coordinates");
+                acc[0] += (xo[0] - xu[0]) * qi;
+                acc[1] += (xo[1] - xu[1]) * qi;
+                acc[2] += (xo[2] - xu[2]) * qi;
+            }
+            row.copy_from_slice(&acc);
+        }
+    });
 }
 
 // ─────────────────────────────────────────────────────────────
