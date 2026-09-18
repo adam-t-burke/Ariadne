@@ -13,6 +13,10 @@
 //! sign `+1` at its `end` node and `−1` at its `start` node, matching the
 //! `±1` entries of the incidence matrix (`−1` at start, `+1` at end).
 
+pub mod build;
+
+pub use build::Level0Map;
+
 /// Block of `K` right-hand sides / solutions, row-major: `v[node * K + k]`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockVec<const K: usize> {
