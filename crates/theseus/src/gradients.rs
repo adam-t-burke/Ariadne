@@ -581,8 +581,8 @@ pub fn accumulate_implicit_gradients(cache: &mut FdmCache, problem: &Problem) {
                 }
             }
         }
-        for d in 0..3 {
-            cache.grad_nf[[w, d]] = acc[d];
+        for (d, &value) in acc.iter().enumerate() {
+            cache.grad_nf[[w, d]] = value;
         }
     }
 }
@@ -696,8 +696,8 @@ fn accumulate_node_position_grads(
                     cache.nf[[node, 2]],
                 ];
                 let g = grad(i, &pos);
-                for d in 0..dims {
-                    cache.grad_nf[[node, d]] += g[d];
+                for (d, &value) in g.iter().enumerate().take(dims) {
+                    cache.grad_nf[[node, d]] += value;
                 }
             }
             return;
@@ -710,8 +710,8 @@ fn accumulate_node_position_grads(
             cache.nf[[node, 2]],
         ];
         let g = grad(i, &pos);
-        for d in 0..dims {
-            add_node_position_grad(cache, node, d, g[d]);
+        for (d, &value) in g.iter().enumerate().take(dims) {
+            add_node_position_grad(cache, node, d, value);
         }
     }
 }
