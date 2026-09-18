@@ -69,7 +69,9 @@ impl TolerancePolicy {
                 ceiling,
                 factor,
             } => {
-                if !(reference_norm.is_finite() && reference_norm > 0.0 && gradient_norm.is_finite())
+                if !(reference_norm.is_finite()
+                    && reference_norm > 0.0
+                    && gradient_norm.is_finite())
                 {
                     return ceiling;
                 }
@@ -230,9 +232,15 @@ mod tests {
         assert!(adaptive(1e-6, 1e-10, 1e-2).validate().is_err(), "inverted");
         assert!(adaptive(0.0, 1e-6, 1e-2).validate().is_err(), "zero floor");
         assert!(adaptive(1e-10, f64::INFINITY, 1e-2).validate().is_err());
-        assert!(adaptive(1e-10, 1e-6, 0.0).validate().is_err(), "zero factor");
+        assert!(
+            adaptive(1e-10, 1e-6, 0.0).validate().is_err(),
+            "zero factor"
+        );
         assert!(adaptive(1e-10, 1e-6, f64::NAN).validate().is_err());
-        assert!(adaptive(1e-8, 1e-8, 1.0).validate().is_ok(), "floor == ceiling");
+        assert!(
+            adaptive(1e-8, 1e-8, 1.0).validate().is_ok(),
+            "floor == ceiling"
+        );
         // An inverted pair still evaluates without panicking (ceiling wins).
         assert_eq!(adaptive(1e-6, 1e-10, 1e-2).tolerance_for(1.0, 1.0), 1e-10);
     }
