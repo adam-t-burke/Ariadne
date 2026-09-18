@@ -14,6 +14,7 @@ use std::sync::mpsc;
 use super::adapter::GpuContext;
 use super::buffers::{BufferPool, GpuBuf, IndexBuf, Params};
 use super::pipelines::{Kernel, KernelSet};
+use crate::amg::hierarchy::LevelMatrix;
 use crate::backend::{Backend, BackendHandle, GpuProbe};
 use crate::graph::LevelGraph;
 use crate::linear_solver::Precision;
@@ -94,6 +95,55 @@ impl GpuAggregates {
     /// Coarse nodes.
     pub fn n_coarse(&self) -> usize {
         self.n_coarse
+    }
+}
+
+/// One uploaded [`LevelMatrix`] (CSR, ascending columns per row): the
+/// pattern as `u32` arrays, the values in the upload precision and the
+/// Jacobi inverse diagonal (`1 / diag`, computed on the host in `f64` and
+/// rounded, exactly like `CpuCsrData`; a single dummy element for
+/// rectangular matrices, which have no diagonal).
+#[derive(Debug)]
+pub struct GpuCsr {
+    nrows: usize,
+    ncols: usize,
+    nnz: usize,
+    precision: Precision,
+    row_ptr: IndexBuf,
+    col_idx: IndexBuf,
+    values: GpuBuf,
+    inv_diag: GpuBuf,
+}
+
+impl GpuCsr {
+    /// Rows.
+    pub fn nrows(&self) -> usize {
+        self.nrows
+    }
+
+    /// Columns.
+    pub fn ncols(&self) -> usize {
+        self.ncols
+    }
+
+    /// Stored entries.
+    pub fn nnz(&self) -> usize {
+        self.nnz
+    }
+
+    /// Storage precision of the values and the inverse diagonal.
+    pub fn precision(&self) -> Precision {
+        self.precision
+    }
+
+    /// Entry values (readable through `GpuBackend::download`).
+    pub fn values(&self) -> &GpuBuf {
+        &self.values
+    }
+
+    /// `1 / diag` per row for square matrices (0 where the diagonal is 0).
+    pub fn inv_diag(&self) -> &GpuBuf {
+        &self.inv_diag
     }
 }
 
@@ -384,6 +434,40 @@ impl GpuBackend {
         })
     }
 
+    /// Upload a CSR level matrix (pattern, values, inverse diagonal).
+    pub fn try_upload_csr(
+        &self,
+        m: &LevelMatrix,
+        precision: Precision,
+    ) -> Result<GpuCsr, TheseusError> {
+        self.check_precision(precision)?;
+        m.check();
+        let row_ptr = self.pool.create_u32(&m.row_ptr, "theseus csr row_ptr")?;
+        let col_idx = self.pool.create_u32(&m.col_idx, "theseus csr col_idx")?;
+        let values = self
+            .pool
+            .create_vec_from(&m.values, precision, "theseus csr values")?;
+        let inv_diag = self.pool.create_vec_from(
+            &inverse_diagonal(&m.diag),
+            precision,
+            "theseus csr inv_diag",
+        )?;
+        let uploaded = GpuCsr {
+            nrows: m.n,
+            ncols: m.ncols,
+            nnz: m.nnz(),
+            precision,
+            row_ptr,
+            col_idx,
+            values,
+            inv_diag,
+        };
+        self.stats.borrow_mut().bytes_uploaded += uploaded.values.data_bytes()
+            + uploaded.inv_diag.data_bytes()
+            + (m.row_ptr.len() + m.col_idx.len()) as u64 * 4;
+        Ok(uploaded)
+    }
+
     /// Upload the coarse edge → fine edges CSR (`offsets.len() = coarse edges
     /// + 1`, `fine_edges` sorted within each list for determinism).
     pub fn upload_coarse_edge_map(
@@ -471,6 +555,35 @@ impl GpuBackend {
             );
         }
         self.compute_inv_diag(coarse);
+    }
+
+    /// `y = M x` (`accumulate == false`) or `y += M x`, one thread per row.
+    fn csr_multiply(&self, m: &GpuCsr, x: &GpuBuf, y: &GpuBuf, accumulate: bool) {
+        assert_eq!(x.len, m.ncols * 3, "gpu: apply_csr x length mismatch");
+        assert_eq!(y.len, m.nrows * 3, "gpu: apply_csr y length mismatch");
+        assert!(
+            x.precision == m.precision && y.precision == m.precision,
+            "gpu: precision mismatch"
+        );
+        if m.nrows == 0 {
+            return;
+        }
+        let mut params = Params::count(m.nrows);
+        params.flag = u32::from(accumulate);
+        self.dispatch(
+            Kernel::ApplyCsr,
+            m.precision,
+            params,
+            &[
+                &m.row_ptr.buffer,
+                &m.col_idx.buffer,
+                &m.values.buffer,
+                &x.buffer,
+                &self.dummy,
+                &y.buffer,
+            ],
+            self.groups_for(m.nrows),
+        );
     }
 
     fn compute_inv_diag(&self, level: &GpuLevel) {
@@ -668,6 +781,17 @@ impl GpuBackend {
     }
 }
 
+/// `1 / d` per entry (0 where `d == 0`), or a single 0 for an empty
+/// diagonal so that the buffer still holds one element.
+fn inverse_diagonal(diag: &[f64]) -> Vec<f64> {
+    if diag.is_empty() {
+        return vec![0.0];
+    }
+    diag.iter()
+        .map(|&d| if d != 0.0 { 1.0 / d } else { 0.0 })
+        .collect()
+}
+
 /// Inverse CSR of an aggregate map: `coarse_offsets[U]..coarse_offsets[U+1]`
 /// lists the fine members of `U` in ascending order (counting sort).
 pub fn members_csr(aggregate_of: &[u32], n_coarse: usize) -> (Vec<u32>, Vec<u32>) {
@@ -693,6 +817,7 @@ impl Backend for GpuBackend {
     type Buf = GpuBuf;
     type LevelGraphBuf = GpuLevel;
     type AggBuf = GpuAggregates;
+    type CsrBuf = GpuCsr;
 
     fn handle(&self) -> BackendHandle {
         BackendHandle::Gpu
@@ -757,6 +882,101 @@ impl Backend for GpuBackend {
     fn upload_aggregates(&self, aggregate_of: &[u32], n_coarse: usize) -> GpuAggregates {
         self.try_upload_aggregates(aggregate_of, n_coarse)
             .unwrap_or_else(|e| panic!("gpu: aggregate upload failed: {e}"))
+    }
+
+    fn upload_csr(&self, m: &LevelMatrix, precision: Precision) -> GpuCsr {
+        self.try_upload_csr(m, precision)
+            .unwrap_or_else(|e| panic!("gpu: csr upload failed: {e}"))
+    }
+
+    fn update_csr_values(&self, m: &LevelMatrix, dst: &mut GpuCsr) {
+        assert_eq!(m.n, dst.nrows, "gpu: csr row count changed");
+        assert_eq!(m.ncols, dst.ncols, "gpu: csr column count changed");
+        assert_eq!(m.values.len(), dst.nnz, "gpu: csr value count changed");
+        let inv = inverse_diagonal(&m.diag);
+        assert_eq!(
+            inv.len(),
+            dst.inv_diag.len,
+            "gpu: csr diagonal length changed"
+        );
+        self.flush();
+        self.pool.write_vec(&dst.values, &m.values);
+        self.pool.write_vec(&dst.inv_diag, &inv);
+        self.stats.borrow_mut().bytes_uploaded +=
+            dst.values.data_bytes() + dst.inv_diag.data_bytes();
+    }
+
+    fn apply_csr(&self, m: &GpuCsr, x: &GpuBuf, y: &mut GpuBuf) {
+        self.csr_multiply(m, x, y, false);
+    }
+
+    fn apply_csr_add(&self, m: &GpuCsr, x: &GpuBuf, y: &mut GpuBuf) {
+        self.csr_multiply(m, x, y, true);
+    }
+
+    fn residual_csr(&self, m: &GpuCsr, x: &GpuBuf, b: &GpuBuf, r: &mut GpuBuf) {
+        assert_eq!(m.nrows, m.ncols, "gpu: residual_csr needs a square matrix");
+        let n = m.nrows;
+        assert_eq!(x.len, n * 3, "gpu: x length mismatch");
+        assert_eq!(b.len, n * 3, "gpu: b length mismatch");
+        assert_eq!(r.len, n * 3, "gpu: r length mismatch");
+        assert!(
+            x.precision == m.precision && b.precision == m.precision && r.precision == m.precision,
+            "gpu: precision mismatch"
+        );
+        if n == 0 {
+            return;
+        }
+        self.dispatch(
+            Kernel::ResidualCsr,
+            m.precision,
+            Params::count(n),
+            &[
+                &m.row_ptr.buffer,
+                &m.col_idx.buffer,
+                &m.values.buffer,
+                &x.buffer,
+                &b.buffer,
+                &r.buffer,
+            ],
+            self.groups_for(n),
+        );
+    }
+
+    fn chebyshev_step_csr(
+        &self,
+        m: &GpuCsr,
+        alpha: f64,
+        beta: f64,
+        r: &GpuBuf,
+        d: &mut GpuBuf,
+        x: &mut GpuBuf,
+    ) {
+        assert_eq!(
+            m.nrows, m.ncols,
+            "gpu: chebyshev_step_csr needs a square matrix"
+        );
+        let len = m.nrows * 3;
+        assert!(
+            r.len == len && d.len == len && x.len == len,
+            "gpu: chebyshev length mismatch"
+        );
+        assert!(
+            r.precision == m.precision && d.precision == m.precision && x.precision == m.precision,
+            "gpu: precision mismatch"
+        );
+        if len == 0 {
+            return;
+        }
+        self.dispatch(
+            Kernel::ChebyshevStep,
+            m.precision,
+            Params::count(len)
+                .alpha([alpha, 0.0, 0.0])
+                .beta([beta, 0.0, 0.0]),
+            &[&m.inv_diag.buffer, &r.buffer, &d.buffer, &x.buffer],
+            self.groups_for(len),
+        );
     }
 
     fn apply_graph(&self, level: &GpuLevel, x: &GpuBuf, y: &mut GpuBuf) {

@@ -47,6 +47,8 @@ pub(crate) enum Family {
     Reduce,
     /// offsets, fine_edges, fine_weight, coarse_weight (23..=26).
     CoarseWeights,
+    /// row_ptr, col_idx, values, x, b, out (27..=32).
+    Csr,
 }
 
 impl Family {
@@ -68,16 +70,25 @@ impl Family {
             Family::Vector => &[(18, true), (19, false)],
             Family::Reduce => &[(20, true), (21, true), (22, false)],
             Family::CoarseWeights => &[(23, true), (24, true), (25, true), (26, false)],
+            Family::Csr => &[
+                (27, true),
+                (28, true),
+                (29, true),
+                (30, true),
+                (31, true),
+                (32, false),
+            ],
         }
     }
 
-    const ALL: [Family; 6] = [
+    const ALL: [Family; 7] = [
         Family::Graph,
         Family::Chebyshev,
         Family::Transfer,
         Family::Vector,
         Family::Reduce,
         Family::CoarseWeights,
+        Family::Csr,
     ];
 
     fn index(self) -> usize {
@@ -102,10 +113,12 @@ pub(crate) enum Kernel {
     DotPartial,
     NormPartial,
     CoarseWeightUpdate,
+    ApplyCsr,
+    ResidualCsr,
 }
 
 impl Kernel {
-    const ALL: [Kernel; 11] = [
+    const ALL: [Kernel; 13] = [
         Kernel::ApplyGraph,
         Kernel::Residual,
         Kernel::InvDiag,
@@ -117,6 +130,8 @@ impl Kernel {
         Kernel::DotPartial,
         Kernel::NormPartial,
         Kernel::CoarseWeightUpdate,
+        Kernel::ApplyCsr,
+        Kernel::ResidualCsr,
     ];
 
     /// WGSL entry-point name.
@@ -133,6 +148,8 @@ impl Kernel {
             Kernel::DotPartial => "dot_partial",
             Kernel::NormPartial => "norm_partial",
             Kernel::CoarseWeightUpdate => "coarse_weight_update",
+            Kernel::ApplyCsr => "apply_csr",
+            Kernel::ResidualCsr => "residual_csr",
         }
     }
 
@@ -144,6 +161,7 @@ impl Kernel {
             Kernel::Axpy | Kernel::Scale => Family::Vector,
             Kernel::DotPartial | Kernel::NormPartial => Family::Reduce,
             Kernel::CoarseWeightUpdate => Family::CoarseWeights,
+            Kernel::ApplyCsr | Kernel::ResidualCsr => Family::Csr,
         }
     }
 

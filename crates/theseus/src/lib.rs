@@ -19,6 +19,7 @@
 //! All public functions return `Result<_, TheseusError>` — the crate never
 //! panics in normal operation.
 
+pub mod amg;
 pub mod backend;
 pub(crate) mod factor_solve;
 pub mod fdm;

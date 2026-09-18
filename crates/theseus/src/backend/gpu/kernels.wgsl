@@ -68,6 +68,14 @@ struct Params {
 @group(0) @binding(25) var<storage, read> w_fine_weight: array<Real>;
 @group(0) @binding(26) var<storage, read_write> w_coarse_weight: array<Real>;
 
+// ── CSR level matrices (apply_csr / residual_csr) ────────────────────
+@group(0) @binding(27) var<storage, read> m_row_ptr: array<u32>;
+@group(0) @binding(28) var<storage, read> m_col_idx: array<u32>;
+@group(0) @binding(29) var<storage, read> m_values: array<Real>;
+@group(0) @binding(30) var<storage, read> m_x: array<Real>;
+@group(0) @binding(31) var<storage, read> m_b: array<Real>;
+@group(0) @binding(32) var<storage, read_write> m_out: array<Real>;
+
 // (A x)_u for the three columns, summed in the same order as the scalar
 // reference `LevelGraph::apply`: anchor term first, then incident edges in
 // CSR order.
@@ -280,6 +288,59 @@ fn norm_partial(
         acc += a * a;
     }
     reduce_write(acc, lid.x, wid.x);
+}
+
+// (M x)_u for the three columns of a CSR matrix, entries in stored
+// (ascending column) order — the same order as the CPU `csr_row`.
+fn csr_row(u: u32) -> vec3<Real> {
+    var acc = vec3<Real>(Real(0), Real(0), Real(0));
+    let begin = m_row_ptr[u];
+    let end = m_row_ptr[u + 1u];
+    for (var j = begin; j < end; j++) {
+        let c = 3u * m_col_idx[j];
+        let v = m_values[j];
+        acc += v * vec3<Real>(m_x[c], m_x[c + 1u], m_x[c + 2u]);
+    }
+    return acc;
+}
+
+// y = M x (params.flag = 0) or y += M x (params.flag = 1), one thread per
+// row of M (params.n = rows). Used for the coarse operators and for the
+// smoothed prolongation / restriction (`P`, `Pᵀ` as CSR).
+@compute @workgroup_size(WG)
+fn apply_csr(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(num_workgroups) nwg: vec3<u32>,
+) {
+    let stride = nwg.x * WG;
+    let accumulate = params.flag != 0u;
+    for (var u = gid.x; u < params.n; u += stride) {
+        let y = csr_row(u);
+        if (accumulate) {
+            m_out[3u * u] = m_out[3u * u] + y.x;
+            m_out[3u * u + 1u] = m_out[3u * u + 1u] + y.y;
+            m_out[3u * u + 2u] = m_out[3u * u + 2u] + y.z;
+        } else {
+            m_out[3u * u] = y.x;
+            m_out[3u * u + 1u] = y.y;
+            m_out[3u * u + 2u] = y.z;
+        }
+    }
+}
+
+// r = b − M x for a square CSR matrix (params.n = rows).
+@compute @workgroup_size(WG)
+fn residual_csr(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(num_workgroups) nwg: vec3<u32>,
+) {
+    let stride = nwg.x * WG;
+    for (var u = gid.x; u < params.n; u += stride) {
+        let y = csr_row(u);
+        m_out[3u * u] = m_b[3u * u] - y.x;
+        m_out[3u * u + 1u] = m_b[3u * u + 1u] - y.y;
+        m_out[3u * u + 2u] = m_b[3u * u + 2u] - y.z;
+    }
 }
 
 // coarse_weight[E] = Σ_{e ∈ fine_edges(E)} fine_weight[e], one thread per

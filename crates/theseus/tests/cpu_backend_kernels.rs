@@ -405,3 +405,267 @@ fn kernels_are_bitwise_identical_across_thread_counts() {
         }
     }
 }
+
+// ── CSR kernels (WS-C additions to `Backend`) ────────────
+
+mod csr {
+    use super::*;
+    use theseus::amg::hierarchy::LevelMatrix;
+
+    /// Random rectangular CSR (`nrows × ncols`, a few entries per row) and a
+    /// random square SPD-like one with a full diagonal.
+    fn random_rect(rng: &mut Lcg, nrows: usize, ncols: usize) -> LevelMatrix {
+        let mut rows: Vec<Vec<(u32, f64)>> = (0..nrows)
+            .map(|_| {
+                (0..1 + rng.below(4))
+                    .map(|_| (rng.below(ncols) as u32, rng.signed()))
+                    .collect()
+            })
+            .collect();
+        let m = LevelMatrix::from_rows(nrows, ncols, &mut rows);
+        m.check();
+        m
+    }
+
+    fn random_square(rng: &mut Lcg, n: usize) -> LevelMatrix {
+        let mut rows: Vec<Vec<(u32, f64)>> = (0..n)
+            .map(|u| {
+                let mut row: Vec<(u32, f64)> = (0..rng.below(5))
+                    .map(|_| (rng.below(n) as u32, -rng.unit()))
+                    .collect();
+                row.retain(|e| e.0 as usize != u);
+                let off: f64 = row.iter().map(|e| e.1.abs()).sum();
+                row.push((u as u32, off + 0.5 + rng.unit()));
+                row
+            })
+            .collect();
+        let m = LevelMatrix::from_rows(n, n, &mut rows);
+        m.check();
+        assert!(m.diag.iter().all(|&d| d > 0.0));
+        m
+    }
+
+    fn ref_apply(m: &LevelMatrix, x: &[f64]) -> Vec<f64> {
+        let mut y = vec![0.0; m.n * 3];
+        m.apply(x, &mut y, 3);
+        y
+    }
+
+    fn ref_chebyshev(
+        m: &LevelMatrix,
+        alpha: f64,
+        beta: f64,
+        r: &[f64],
+        d: &mut [f64],
+        x: &mut [f64],
+    ) {
+        for u in 0..m.n {
+            let inv = 1.0 / m.diag[u];
+            for k in 0..3 {
+                let i = u * 3 + k;
+                d[i] = alpha * (inv * r[i]) + beta * d[i];
+                x[i] += d[i];
+            }
+        }
+    }
+
+    #[test]
+    fn f64_csr_kernels_match_scalar_reference_bitwise() {
+        let be = CpuBackend::new();
+        let mut rng = Lcg(77);
+        for &n in &[
+            1usize,
+            7,
+            CHUNK - 1,
+            CHUNK + 1,
+            PAR_MIN_LEN + 5,
+            3 * PAR_MIN_LEN + 11,
+        ] {
+            let nc = n.div_ceil(3).max(1);
+            let p = random_rect(&mut rng, n, nc);
+            let pt = p.transpose();
+            let a = random_square(&mut rng, n);
+            let xc = rng.vec(nc * 3);
+            let x = rng.vec(n * 3);
+            let b = rng.vec(n * 3);
+            let d0 = rng.vec(n * 3);
+
+            let pb = be.upload_csr(&p, Precision::F64);
+            let ptb = be.upload_csr(&pt, Precision::F64);
+            let ab = be.upload_csr(&a, Precision::F64);
+            let xcb = upload(&be, &xc, Precision::F64);
+            let xb = upload(&be, &x, Precision::F64);
+            let bb = upload(&be, &b, Precision::F64);
+
+            // y = P x_c  (prolongation)
+            let mut y = be.alloc(n * 3, Precision::F64);
+            be.apply_csr(&pb, &xcb, &mut y);
+            assert_bitwise(
+                &y.to_vec_f64(),
+                &ref_apply(&p, &xc),
+                &format!("apply_csr P, n={n}"),
+            );
+            // y += P x_c
+            let mut y_add = upload(&be, &b, Precision::F64);
+            be.apply_csr_add(&pb, &xcb, &mut y_add);
+            let expected: Vec<f64> = b
+                .iter()
+                .zip(ref_apply(&p, &xc))
+                .map(|(b, y)| b + y)
+                .collect();
+            assert_bitwise(
+                &y_add.to_vec_f64(),
+                &expected,
+                &format!("apply_csr_add P, n={n}"),
+            );
+            // r_c = Pᵀ x  (restriction)
+            let mut rc = be.alloc(nc * 3, Precision::F64);
+            be.apply_csr(&ptb, &xb, &mut rc);
+            assert_bitwise(
+                &rc.to_vec_f64(),
+                &ref_apply(&pt, &x),
+                &format!("apply_csr Pᵀ, n={n}"),
+            );
+            // y = A x
+            let mut ya = be.alloc(n * 3, Precision::F64);
+            be.apply_csr(&ab, &xb, &mut ya);
+            assert_bitwise(
+                &ya.to_vec_f64(),
+                &ref_apply(&a, &x),
+                &format!("apply_csr A, n={n}"),
+            );
+            // r = b − A x
+            let mut r = be.alloc(n * 3, Precision::F64);
+            be.residual_csr(&ab, &xb, &bb, &mut r);
+            let expected: Vec<f64> = b
+                .iter()
+                .zip(ref_apply(&a, &x))
+                .map(|(b, y)| b - y)
+                .collect();
+            assert_bitwise(&r.to_vec_f64(), &expected, &format!("residual_csr, n={n}"));
+            // Chebyshev step with diag(A)
+            let mut d = upload(&be, &d0, Precision::F64);
+            let mut xk = upload(&be, &x, Precision::F64);
+            be.chebyshev_step_csr(&ab, 0.8, -0.3, &r, &mut d, &mut xk);
+            let mut d_ref = d0.clone();
+            let mut x_ref = x.clone();
+            ref_chebyshev(&a, 0.8, -0.3, &expected, &mut d_ref, &mut x_ref);
+            assert_bitwise(
+                &d.to_vec_f64(),
+                &d_ref,
+                &format!("chebyshev_step_csr d, n={n}"),
+            );
+            assert_bitwise(
+                &xk.to_vec_f64(),
+                &x_ref,
+                &format!("chebyshev_step_csr x, n={n}"),
+            );
+        }
+    }
+
+    #[test]
+    fn f32_csr_kernels_match_f64_reference() {
+        let be = CpuBackend::new();
+        let mut rng = Lcg(78);
+        let n = PAR_MIN_LEN + 3;
+        let nc = n / 3;
+        let p = random_rect(&mut rng, n, nc);
+        let a = random_square(&mut rng, n);
+        let xc = rng.vec(nc * 3);
+        let x = rng.vec(n * 3);
+        let b = rng.vec(n * 3);
+        let pb = be.upload_csr(&p, Precision::F32);
+        let ab = be.upload_csr(&a, Precision::F32);
+        let xcb = upload(&be, &xc, Precision::F32);
+        let xb = upload(&be, &x, Precision::F32);
+        let bb = upload(&be, &b, Precision::F32);
+        let mut y = be.alloc(n * 3, Precision::F32);
+        be.apply_csr(&pb, &xcb, &mut y);
+        assert_close(&y.to_vec_f64(), &ref_apply(&p, &xc), 1e-5, "apply_csr f32");
+        let mut r = be.alloc(n * 3, Precision::F32);
+        be.residual_csr(&ab, &xb, &bb, &mut r);
+        let expected: Vec<f64> = b
+            .iter()
+            .zip(ref_apply(&a, &x))
+            .map(|(b, y)| b - y)
+            .collect();
+        assert_close(&r.to_vec_f64(), &expected, 1e-5, "residual_csr f32");
+        let mut d = be.alloc(n * 3, Precision::F32);
+        let mut xk = upload(&be, &x, Precision::F32);
+        be.chebyshev_step_csr(&ab, 0.8, 0.0, &r, &mut d, &mut xk);
+        let mut d_ref = vec![0.0; n * 3];
+        let mut x_ref = x.clone();
+        ref_chebyshev(&a, 0.8, 0.0, &expected, &mut d_ref, &mut x_ref);
+        assert_close(&xk.to_vec_f64(), &x_ref, 1e-5, "chebyshev_step_csr f32");
+    }
+
+    #[test]
+    fn update_csr_values_matches_fresh_upload() {
+        let be = CpuBackend::new();
+        let mut rng = Lcg(79);
+        let n = 5000;
+        let a = random_square(&mut rng, n);
+        let mut a2 = a.clone();
+        for v in &mut a2.values {
+            *v *= 0.5 + rng.unit();
+        }
+        a2.refresh_diag();
+        for precision in [Precision::F64, Precision::F32] {
+            let mut updated = be.upload_csr(&a, precision);
+            be.update_csr_values(&a2, &mut updated);
+            let fresh = be.upload_csr(&a2, precision);
+            assert_eq!(updated, fresh, "{precision:?}");
+        }
+    }
+
+    #[test]
+    fn csr_kernels_are_bitwise_identical_across_thread_counts() {
+        let mut rng = Lcg(80);
+        let n = 50_000;
+        let nc = n / 3;
+        let p = random_rect(&mut rng, n, nc);
+        let pt = p.transpose();
+        let a = random_square(&mut rng, n);
+        let xc = rng.vec(nc * 3);
+        let x = rng.vec(n * 3);
+        let b = rng.vec(n * 3);
+        let run = |threads: usize| -> Vec<Vec<f64>> {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| {
+                    let be = CpuBackend::new();
+                    let pb = be.upload_csr(&p, Precision::F64);
+                    let ptb = be.upload_csr(&pt, Precision::F64);
+                    let ab = be.upload_csr(&a, Precision::F64);
+                    let xcb = upload(&be, &xc, Precision::F64);
+                    let xb = upload(&be, &x, Precision::F64);
+                    let bb = upload(&be, &b, Precision::F64);
+                    let mut y = be.alloc(n * 3, Precision::F64);
+                    be.apply_csr(&pb, &xcb, &mut y);
+                    let mut rc = be.alloc(nc * 3, Precision::F64);
+                    be.apply_csr(&ptb, &xb, &mut rc);
+                    let mut r = be.alloc(n * 3, Precision::F64);
+                    be.residual_csr(&ab, &xb, &bb, &mut r);
+                    let mut d = upload(&be, &b, Precision::F64);
+                    let mut xk = upload(&be, &x, Precision::F64);
+                    be.chebyshev_step_csr(&ab, 0.7, -0.1, &r, &mut d, &mut xk);
+                    vec![
+                        y.to_vec_f64(),
+                        rc.to_vec_f64(),
+                        r.to_vec_f64(),
+                        d.to_vec_f64(),
+                        xk.to_vec_f64(),
+                    ]
+                })
+        };
+        let base = run(1);
+        for threads in [2, 4] {
+            let other = run(threads);
+            for (k, (a, b)) in base.iter().zip(&other).enumerate() {
+                assert_bitwise(b, a, &format!("csr output {k}, {threads} threads"));
+            }
+        }
+    }
+}
