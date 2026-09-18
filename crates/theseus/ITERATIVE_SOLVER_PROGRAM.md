@@ -92,7 +92,8 @@ pub struct IterativeSolverOptions {
     pub smoother_degree: u8,                // Chebyshev degree, default 2
     pub aggregation_passes: u8,             // pairwise matching passes per level, default 2
     pub coarsest_size: u32,                 // stop coarsening below this many nodes, default 2000
-    pub precondition_precision: Precision,  // F64 | F32 (default F32 on GPU, F64 on CPU)
+    pub precondition_precision: Option<Precision>, // None = backend default (F64 CPU, F32 GPU);
+                                                   // FFI maps -1 -> None
     pub gpu: GpuOptions,                    // adapter preference, memory cap, outer-loop placement
 }
 
@@ -175,7 +176,8 @@ pub struct SolveStats {
     pub backend: LinearSolverKind,
 }
 
-pub trait LinearSystemSolver {
+/// `Send` so a boxed solver inside `FdmCache` can move to a worker thread.
+pub trait LinearSystemSolver: Send {
     /// Called whenever q changed. Direct: refactor. Iterative: recompute level weights,
     /// spectral bounds if needed, upload to device.
     fn update(&mut self, q: &[f64]) -> Result<(), TheseusError>;
@@ -184,20 +186,50 @@ pub trait LinearSystemSolver {
     fn memory_bytes(&self) -> MemoryReport;   // host, device
 }
 
+/// Factory (unit struct, not an enum): `LinearSolver::new(kind, &NetworkTopology, &Bounds,
+/// &IterativeSolverOptions) -> Result<Box<dyn LinearSystemSolver>, TheseusError>`.
+pub struct LinearSolver;
+
 pub trait Backend {
-    type Buf;                                   // device or host vector
+    type Buf;                                   // device or host vector (block of 3 per node)
+    type LevelGraphBuf;                         // one uploaded LevelGraph (CSR + weights + Jacobi diagonal)
+    type AggBuf;                                // one uploaded aggregate map
+    fn handle(&self) -> BackendHandle;
     fn alloc(&self, len: usize, precision: Precision) -> Self::Buf;
+    fn len(&self, buf: &Self::Buf) -> usize;
     fn upload(&self, src: &[f64], dst: &mut Self::Buf);
     fn download(&self, src: &Self::Buf, dst: &mut [f64]);
-    fn apply_graph(&self, level: &LevelGraphBuf, x: &Self::Buf, y: &mut Self::Buf);       // y = A_l x
-    fn chebyshev_step(&self, ...);                                                       // smoother update
-    fn restrict(&self, agg: &AggBuf, fine: &Self::Buf, coarse: &mut Self::Buf);
-    fn prolong_add(&self, agg: &AggBuf, coarse: &Self::Buf, fine: &mut Self::Buf);
-    fn axpy(&self, ...); fn scale(&self, ...); fn dot3(&self, a: &Self::Buf, b: &Self::Buf) -> [f64; 3];
+    fn copy(&self, src: &Self::Buf, dst: &mut Self::Buf);
+    fn zero(&self, buf: &mut Self::Buf);
+    fn upload_level(&self, level: &LevelGraph, precision: Precision) -> Self::LevelGraphBuf;
+    fn update_level_weights(&self, level: &LevelGraph, dst: &mut Self::LevelGraphBuf); // per update(q)
+    fn upload_aggregates(&self, aggregate_of: &[u32], n_coarse: usize) -> Self::AggBuf;
+    fn apply_graph(&self, level: &Self::LevelGraphBuf, x: &Self::Buf, y: &mut Self::Buf);      // y = A_l x
+    fn residual(&self, level: &Self::LevelGraphBuf, b: &Self::Buf, x: &Self::Buf, r: &mut Self::Buf); // r = b - A_l x
+    /// One Chebyshev update with shared scalars (same matrix for all 3 columns) using the
+    /// level's Jacobi diagonal: d = alpha * D⁻¹ r + beta * d; x += d.
+    fn chebyshev_step(&self, level: &Self::LevelGraphBuf, alpha: f64, beta: f64,
+                      r: &Self::Buf, d: &mut Self::Buf, x: &mut Self::Buf);
+    fn restrict(&self, agg: &Self::AggBuf, fine: &Self::Buf, coarse: &mut Self::Buf);
+    fn prolong_add(&self, agg: &Self::AggBuf, coarse: &Self::Buf, fine: &mut Self::Buf);
+    fn axpy(&self, alpha: [f64; 3], x: &Self::Buf, y: &mut Self::Buf);                   // per-column scalars
+    fn scale(&self, alpha: [f64; 3], x: &mut Self::Buf);
+    fn dot3(&self, a: &Self::Buf, b: &Self::Buf) -> [f64; 3];
     fn norm3(&self, a: &Self::Buf) -> [f64; 3];
     fn sync(&self);
 }
 ```
+
+Conventions fixed by WS-I: the `Direct` implementation reports
+`SolveStats { iterations: [0; 3], relative_residual: [0.0; 3], .. }` (not
+measured) and `setup_ms` = duration of the preceding `update`; the diagonal
+perturbation used by `factor_and_solve` is solver state
+(`DirectSolver::set_perturbation`) because `update(q)` carries no
+perturbation argument — iterative solvers apply it as an anchor-weight
+shift set the same way. `DirectSolver` exposes `a_matrix()` and
+`factorization()` accessors; WS-D decides whether `FdmCache` keeps its own
+`a_matrix` for `apply_a_xyz`/gradient loops or reads it from the solver
+(recommended: the solver is the single owner, and `FdmCache` borrows it).
 
 Errors (added to `TheseusError`):
 
@@ -208,8 +240,11 @@ GpuUnavailable(String),               // adapter probe result, with the adapters
 GpuOutOfMemory { requested: u64, available: u64 },
 ```
 
-FFI codes follow the existing mapping in `ffi.rs` (one new code per
-variant; `theseus_last_error` carries the message).
+FFI codes (`ffi.rs`, `error_code(&TheseusError)`): all pre-existing
+variants keep `-1`, panics `-2`; `IterativeSolverDidNotConverge` `-3`,
+`IterativeSolverUnsupported` `-4`, `GpuUnavailable` `-5`, `GpuOutOfMemory`
+`-6`. `theseus_last_error` carries the message. New codes are appended, never
+renumbered.
 
 ### 2.4 FDM integration points
 
@@ -528,6 +563,11 @@ Wave 2: WS-C, then WS-D. Wave 3 (parallel): WS-H, WS-J. Wave 4: WS-K.
 * Base branch for the program: `cursor/theseus-scale-100k-2d27` (this
   branch) until it is merged; agents branch as
   `cursor/its-<ws-letter>-<short-name>-2d27`.
+* **Private worktree per agent.** Agents that share a machine never work
+  in the shared checkout (`/workspace`): the first action is `git worktree
+  add <private-dir> -b <branch> <base>`, and all builds run there (a
+  private `CARGO_TARGET_DIR` avoids lock contention). Switching HEAD or
+  leaving untracked files in the shared checkout breaks the other agents.
 * One PR per workstream increment against the program base; the integrator
   (WS-I owner) merges in dependency order and rebases open branches after
   each merge. Interface changes go through the integrator as a separate
@@ -732,7 +772,7 @@ noting it in the report.
 
 | milestone | done when |
 |---|---|
-| M0 Interfaces | WS-I merged; `Direct` behind the trait; tests unchanged |
+| M0 Interfaces | **reached** (`9a5f52d`): WS-I merged; `DirectSolver` bitwise-equal to the cache path, `factor_and_solve` shares its refactor code; full `Box<dyn LinearSystemSolver>` dispatch inside `FdmCache` deferred to WS-D |
 | M1 Phase-0 verdict | WS-A report merged with a go/no-go and parameter recommendation |
 | M2 Infrastructure | WS-B, WS-E, WS-F merged; toggle visible in Grasshopper returning "not yet available" for iterative kinds; sweep tooling produces a `Direct` cost model |
 | M3 CPU iterative | WS-C, WS-D merged; `IterativeCpu` passes all contract tests; `bench_scale` numbers at 224–708 recorded |
@@ -776,3 +816,7 @@ for a future `Auto` decision.
   fallback.
 * 2026-09-18 — Crossover search produces data for a future `Auto` mode but
   does not change selection behaviour in this program.
+* 2026-09-18 — WS-I landed; interface refinements adopted: `LinearSystemSolver:
+  Send`, `precondition_precision: Option<Precision>`, `Backend` associated
+  buffer types and fused `residual` kernel, unit-struct `LinearSolver`
+  factory, perturbation as solver state, FFI codes `-3..-6`.
