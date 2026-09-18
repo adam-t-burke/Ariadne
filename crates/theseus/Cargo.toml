@@ -41,6 +41,10 @@ default = []
 # until WS-H enables it.
 gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 
+[[example]]
+name = "gpu_kernels_bench"
+required-features = ["gpu"]
+
 [[test]]
 name = "backend_gpu_equivalence"
 required-features = ["gpu"]
