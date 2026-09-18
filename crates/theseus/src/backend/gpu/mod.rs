@@ -24,5 +24,7 @@
 //! ```
 
 mod adapter;
+mod buffers;
 
 pub use adapter::{enumerate, instance, probe, AdapterPolicy, GpuContext, ALLOW_SOFTWARE_ENV};
+pub use buffers::{BufferPool, GpuBuf, IndexBuf};
