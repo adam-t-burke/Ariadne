@@ -1,3 +1,8 @@
+use crate::graph::CsrAdjacency;
+use crate::linear_solver::{
+    DirectSolver, IterativeSolverOptions, LinearSolver, LinearSolverKind, LinearSolverTotals,
+    LinearSystemSolver,
+};
 use crate::sparse::SparseColMatOwned;
 use ndarray::Array2;
 use std::fmt;
@@ -21,12 +26,27 @@ pub enum TheseusError {
     SparsityMismatch { edge: usize, row: usize, col: usize },
     /// The factorization has not been computed yet.
     MissingFactorization,
-    /// Argmin solver returned an error.
+    /// Optimization failed.
     Solver(String),
     /// Shape mismatch in input data.
     Shape(String),
     /// Optimization was cancelled by the caller via the progress callback.
     Cancelled,
+    /// An iterative linear solver (`IterativeCpu` / `IterativeGpu`) exhausted
+    /// its iteration budget before reaching the requested relative residual.
+    IterativeSolverDidNotConverge {
+        iterations: u32,
+        relative_residual: f64,
+        kind: LinearSolverKind,
+    },
+    /// An iterative linear solver was requested for a problem it cannot
+    /// solve (e.g. bounds permit `q ≤ 0`), or is not available in this build.
+    IterativeSolverUnsupported(String),
+    /// `IterativeGpu` was requested but no usable GPU adapter exists (the
+    /// message lists the adapters that were probed).
+    GpuUnavailable(String),
+    /// A GPU buffer allocation failed.
+    GpuOutOfMemory { requested: u64, available: u64 },
 }
 
 impl fmt::Display for TheseusError {
@@ -43,6 +63,44 @@ impl fmt::Display for TheseusError {
             Self::Solver(msg) => write!(f, "solver error: {msg}"),
             Self::Shape(msg) => write!(f, "shape error: {msg}"),
             Self::Cancelled => write!(f, "optimization cancelled by user"),
+            Self::IterativeSolverDidNotConverge {
+                iterations,
+                relative_residual,
+                kind,
+            } => write!(
+                f,
+                "linear solver '{kind}' did not converge after {iterations} iterations \
+                 (relative residual {relative_residual:.3e}); raise the iteration budget or \
+                 loosen the tolerance in the iterative options, or switch the linear solver \
+                 toggle to '{}'",
+                LinearSolverKind::Direct
+            ),
+            Self::IterativeSolverUnsupported(msg) => write!(
+                f,
+                "iterative linear solver not supported for this problem: {msg}; switch the \
+                 linear solver toggle to '{}'",
+                LinearSolverKind::Direct
+            ),
+            Self::GpuUnavailable(msg) => write!(
+                f,
+                "linear solver '{}' requested but no usable GPU adapter is available: {msg}; \
+                 switch the linear solver toggle to '{}' or '{}'",
+                LinearSolverKind::IterativeGpu,
+                LinearSolverKind::IterativeCpu,
+                LinearSolverKind::Direct
+            ),
+            Self::GpuOutOfMemory {
+                requested,
+                available,
+            } => write!(
+                f,
+                "linear solver '{}' ran out of device memory (requested {requested} bytes, \
+                 {available} bytes available); lower `max_device_bytes`, or switch the linear \
+                 solver toggle to '{}' or '{}'",
+                LinearSolverKind::IterativeGpu,
+                LinearSolverKind::IterativeCpu,
+                LinearSolverKind::Direct
+            ),
         }
     }
 }
@@ -61,19 +119,16 @@ impl From<faer_sparse::FaerError> for TheseusError {
     }
 }
 
-impl From<argmin::core::Error> for TheseusError {
-    fn from(e: argmin::core::Error) -> Self {
-        let msg = e.to_string();
-        if msg == Self::Cancelled.to_string() {
-            Self::Cancelled
-        } else {
-            Self::Solver(msg)
-        }
-    }
-}
-
 /// Resize a faer workspace buffer to satisfy the required stack size.
+/// Grow-only scratch buffer for faer. Buffers are over-aligned so a larger
+/// buffer from an earlier request can always be reused for a smaller one.
 fn ensure_pod_stack(stack: &mut dyn_stack::GlobalPodBuffer, req: dyn_stack::StackReq) {
+    const ALIGN: usize = 4096;
+    if stack.len() >= req.size_bytes() {
+        return;
+    }
+    let req =
+        dyn_stack::StackReq::new_aligned::<u8>(req.size_bytes(), req.align_bytes().max(ALIGN));
     *stack = dyn_stack::GlobalPodBuffer::new(req);
 }
 
@@ -436,6 +491,12 @@ pub struct SolverOptions {
     pub barrier_sharpness: f64,
     pub q_parameterization_mode: QParameterizationMode,
     pub anchor_saturation_lambda: f64,
+    /// Which linear solver evaluates `A(q) x = b` and the adjoint system.
+    /// Always [`LinearSolverKind::Direct`] unless explicitly toggled.
+    pub linear_solver: LinearSolverKind,
+    /// Parameters of the iterative solvers; ignored when `linear_solver` is
+    /// [`LinearSolverKind::Direct`].
+    pub iterative: IterativeSolverOptions,
 }
 
 impl Default for SolverOptions {
@@ -449,6 +510,8 @@ impl Default for SolverOptions {
             barrier_sharpness: DEFAULT_BARRIER_SHARPNESS,
             q_parameterization_mode: QParameterizationMode::DirectSoftBounds,
             anchor_saturation_lambda: 1.0,
+            linear_solver: LinearSolverKind::Direct,
+            iterative: IterativeSolverOptions::default(),
         }
     }
 }
@@ -710,8 +773,44 @@ pub struct Problem {
 /// Pre-computed contribution of edge `k` to the CSC `nzval` array of A.
 #[derive(Debug, Clone)]
 pub struct QToNz {
-    /// For each edge k: list of (nz_index_in_A_data, coefficient)
-    pub entries: Vec<Vec<(usize, f64)>>,
+    /// CSR-style offsets into `edge`/`coeff`, one range per nonzero of A.
+    pub nz_offsets: Vec<usize>,
+    /// Edge contributing to the nonzero.
+    pub edge: Vec<u32>,
+    /// Coefficient of that edge's force density in the nonzero.
+    pub coeff: Vec<f64>,
+}
+
+impl QToNz {
+    /// Build the gather map from per-edge `(nz_index, coefficient)` lists.
+    pub fn from_edge_entries(entries: &[Vec<(usize, f64)>], nnz: usize) -> Self {
+        let mut counts = vec![0usize; nnz + 1];
+        for list in entries {
+            for &(nz, _) in list {
+                counts[nz + 1] += 1;
+            }
+        }
+        for i in 0..nnz {
+            counts[i + 1] += counts[i];
+        }
+        let total = counts[nnz];
+        let mut fill = counts.clone();
+        let mut edge = vec![0u32; total];
+        let mut coeff = vec![0.0; total];
+        for (k, list) in entries.iter().enumerate() {
+            for &(nz, c) in list {
+                let slot = fill[nz];
+                fill[nz] += 1;
+                edge[slot] = k as u32;
+                coeff[slot] = c;
+            }
+        }
+        Self {
+            nz_offsets: counts,
+            edge,
+            coeff,
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -803,7 +902,7 @@ impl Factorization {
         match strategy {
             FactorizationStrategy::Cholesky => {
                 let req = symbolic
-                    .factorize_numeric_llt_req::<f64>(Parallelism::Rayon(0))
+                    .factorize_numeric_llt_req::<f64>(Parallelism::None)
                     .unwrap();
                 ensure_pod_stack(stack, req);
                 symbolic.factorize_numeric_llt(
@@ -811,14 +910,14 @@ impl Factorization {
                     a_ref,
                     Side::Upper,
                     LltRegularization::default(),
-                    Parallelism::Rayon(0),
+                    Parallelism::None,
                     PodStack::new(stack),
                 )?;
                 Ok(Self::Cholesky { symbolic, l_values })
             }
             FactorizationStrategy::LDL => {
                 let req = symbolic
-                    .factorize_numeric_ldlt_req::<f64>(false, Parallelism::Rayon(0))
+                    .factorize_numeric_ldlt_req::<f64>(false, Parallelism::None)
                     .unwrap();
                 ensure_pod_stack(stack, req);
                 symbolic.factorize_numeric_ldlt(
@@ -826,7 +925,7 @@ impl Factorization {
                     a_ref,
                     Side::Upper,
                     LdltRegularization::default(),
-                    Parallelism::Rayon(0),
+                    Parallelism::None,
                     PodStack::new(stack),
                 );
                 if l_values.iter().any(|v| !v.is_finite()) {
@@ -855,7 +954,7 @@ impl Factorization {
         match self {
             Self::Cholesky { symbolic, l_values } => {
                 let req = symbolic
-                    .factorize_numeric_llt_req::<f64>(Parallelism::Rayon(0))
+                    .factorize_numeric_llt_req::<f64>(Parallelism::None)
                     .unwrap();
                 ensure_pod_stack(stack, req);
                 symbolic.factorize_numeric_llt(
@@ -863,14 +962,14 @@ impl Factorization {
                     a_ref,
                     Side::Upper,
                     LltRegularization::default(),
-                    Parallelism::Rayon(0),
+                    Parallelism::None,
                     PodStack::new(stack),
                 )?;
                 Ok(())
             }
             Self::Ldl { symbolic, l_values } => {
                 let req = symbolic
-                    .factorize_numeric_ldlt_req::<f64>(false, Parallelism::Rayon(0))
+                    .factorize_numeric_ldlt_req::<f64>(false, Parallelism::None)
                     .unwrap();
                 ensure_pod_stack(stack, req);
                 symbolic.factorize_numeric_ldlt(
@@ -878,7 +977,7 @@ impl Factorization {
                     a_ref,
                     Side::Upper,
                     LdltRegularization::default(),
-                    Parallelism::Rayon(0),
+                    Parallelism::None,
                     PodStack::new(stack),
                 );
                 if l_values.iter().any(|v| !v.is_finite()) {
@@ -892,8 +991,56 @@ impl Factorization {
         }
     }
 
-    /// Solve A X = B in place. `rhs` and `x` are (n × ncols) row-major ndarray arrays.
+    /// Solve A X = B. `rhs` and `x` are (n × ncols) row-major ndarray arrays.
+    ///
+    /// One or three right-hand sides take the specialised multi-RHS path in
+    /// [`crate::factor_solve`] when `workspace` holds at least `2 * n * ncols`
+    /// values (as `FdmCache::solve_workspace` does); anything else goes
+    /// through faer's generic solver.
     pub fn solve_into(
+        &self,
+        rhs: &Array2<f64>,
+        x: &mut Array2<f64>,
+        workspace: &mut [f64],
+        stack: &mut dyn_stack::GlobalPodBuffer,
+    ) -> Result<(), TheseusError> {
+        let n = rhs.nrows();
+        let ncols = rhs.ncols();
+        assert_eq!(x.nrows(), n);
+        assert_eq!(x.ncols(), ncols);
+
+        if workspace.len() >= 2 * n * ncols {
+            if let (Some(rhs_slice), Some(x_slice)) = (rhs.as_slice(), x.as_slice_mut()) {
+                match ncols {
+                    3 => {
+                        self.solve_slices::<3>(rhs_slice, x_slice, workspace);
+                        return Ok(());
+                    }
+                    1 => {
+                        self.solve_slices::<1>(rhs_slice, x_slice, workspace);
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self.solve_into_faer(rhs, x, workspace, stack)
+    }
+
+    /// Specialised solve on row-major `n × K` slices; `work` needs `2 * n * K` values.
+    pub fn solve_slices<const K: usize>(&self, rhs: &[f64], x: &mut [f64], work: &mut [f64]) {
+        use crate::factor_solve::{solve, Kind};
+        match self {
+            Self::Cholesky { symbolic, l_values } => {
+                solve::<K>(symbolic, l_values, Kind::Llt, rhs, x, work)
+            }
+            Self::Ldl { symbolic, l_values } => {
+                solve::<K>(symbolic, l_values, Kind::Ldlt, rhs, x, work)
+            }
+        }
+    }
+
+    fn solve_into_faer(
         &self,
         rhs: &Array2<f64>,
         x: &mut Array2<f64>,
@@ -906,8 +1053,6 @@ impl Factorization {
 
         let n = rhs.nrows();
         let ncols = rhs.ncols();
-        assert_eq!(x.nrows(), n);
-        assert_eq!(x.ncols(), ncols);
         assert!(workspace.len() >= n * ncols);
 
         // Pack row-major ndarray RHS into column-major faer layout.
@@ -927,7 +1072,7 @@ impl Factorization {
                 llt.solve_in_place_with_conj(
                     Conj::No,
                     mat.as_mut(),
-                    Parallelism::Rayon(0),
+                    Parallelism::None,
                     PodStack::new(stack),
                 );
             }
@@ -936,7 +1081,7 @@ impl Factorization {
                 ldlt.solve_in_place_with_conj(
                     Conj::No,
                     mat.as_mut(),
-                    Parallelism::Rayon(0),
+                    Parallelism::None,
                     PodStack::new(stack),
                 );
             }
@@ -955,14 +1100,21 @@ impl Factorization {
     pub fn solve(
         &self,
         rhs: &[f64],
-        workspace: &mut [f64],
-        stack: &mut dyn_stack::GlobalPodBuffer,
+        _workspace: &mut [f64],
+        _stack: &mut dyn_stack::GlobalPodBuffer,
     ) -> Result<Vec<f64>, TheseusError> {
         let n = rhs.len();
-        let rhs_arr = Array2::from_shape_fn((n, 1), |(i, _)| rhs[i]);
-        let mut x = Array2::zeros((n, 1));
-        self.solve_into(&rhs_arr, &mut x, workspace, stack)?;
-        Ok((0..n).map(|i| x[[i, 0]]).collect())
+        let mut x = vec![0.0; n];
+        let mut work = vec![0.0; 2 * n];
+        self.solve_slices::<1>(rhs, &mut x, &mut work);
+        Ok(x)
+    }
+
+    /// Number of stored numeric factor values (`L`, or `L` and `D`).
+    pub fn len_values(&self) -> usize {
+        match self {
+            Self::Cholesky { l_values, .. } | Self::Ldl { l_values, .. } => l_values.len(),
+        }
     }
 
     /// The strategy this factorization was built with.
@@ -981,30 +1133,53 @@ impl Factorization {
 /// All mutable workspace for the forward solve, adjoint, and gradient
 /// accumulation.  Built once from a [`Problem`], reused across iterations.
 pub struct FdmCache {
-    // ── Sparse system ──────────────────────────────────────
-    /// System matrix A = Cn^T diag(q) Cn  (CSC, nn_free × nn_free).
-    /// Sparsity pattern is fixed; values are updated in-place each iteration.
-    pub a_matrix: SparseColMatOwned,
-
-    /// Numeric factorization — Cholesky (SPD) or LDL (indefinite).
-    /// Created on first factor, reused via `.update()` thereafter.
-    pub factorization: Option<Factorization>,
-
-    pub q_to_nz: QToNz,
+    // ── Linear solver ──────────────────────────────────────
+    /// The solver for `A(q) x = b`, built by [`LinearSolver::new`] from
+    /// `SolverOptions::linear_solver`. It is the single owner of the system:
+    /// for [`LinearSolverKind::Direct`] the [`DirectSolver`] holds `A(q)`,
+    /// its `q → nzval` map and the factorization (borrowed by the cache
+    /// through [`FdmCache::direct_solver`] for the operator applications);
+    /// iterative kinds hold the level-0 graph and the multigrid hierarchy,
+    /// and the cache applies `A` matrix-free over `adjacency`.
+    pub linear_solver: Box<dyn LinearSystemSolver>,
+    /// Kind of `linear_solver` (`linear_solver.kind()`, cached).
+    pub linear_solver_kind: LinearSolverKind,
+    /// Running totals of every solve dispatched through this cache.
+    pub linear_solver_totals: LinearSolverTotals,
+    /// Relative-residual tolerance for the next iterative solves; set by the
+    /// optimizer before each evaluation from the [`TolerancePolicy`]
+    /// schedule. Ignored by `Direct`.
+    ///
+    /// [`TolerancePolicy`]: crate::linear_solver::TolerancePolicy
+    pub solve_tolerance: f64,
+    /// Iteration budget per iterative solve. Ignored by `Direct`.
+    pub solve_max_iterations: u32,
+    /// Warm start of the forward solve (previous `x`, row-major `n * 3`);
+    /// empty for `Direct`, which ignores warm starts.
+    pub warm_x: Vec<f64>,
+    /// Warm start of the adjoint solve (previous `λ`); empty for `Direct`.
+    pub warm_lambda: Vec<f64>,
+    /// `warm_x` / `warm_lambda` hold a previous solution.
+    pub has_warm_x: bool,
+    pub has_warm_lambda: bool,
 
     /// Start / end node of each edge (global node indices, 0-based)
     pub edge_starts: Vec<usize>,
     pub edge_ends: Vec<usize>,
     /// Global-node → free-index mapping  (`None` if fixed)
     pub node_to_free_idx: Vec<Option<usize>>,
+    /// Free row → global node (`topology.free_node_indices`).
+    pub free_node_indices: Vec<usize>,
     /// Per-node lists of incident edge indices (for reaction gradients).
     pub node_incident_edges: Vec<Vec<usize>>,
+    /// Node-centred CSR adjacency over all nodes (incident edges ascending);
+    /// shared by the parallel node-gather loops and the iterative solvers.
+    pub adjacency: CsrAdjacency,
 
-    /// Cn  (ne × nn_free)  and  Cf  (ne × nn_fixed)  stored as CSC
-    pub cn: SparseColMatOwned,
-    /// Precomputed Cn^T  (nn_free × ne) — topology is fixed.
-    pub cn_t: SparseColMatOwned,
-    pub cf: SparseColMatOwned,
+    /// Edges with exactly one fixed endpoint, as `(edge, free row, fixed node)`,
+    /// sorted by free row then edge. Only these edges contribute to the
+    /// right-hand side.
+    pub boundary_edges: Vec<(usize, usize, usize)>,
 
     // ── Primal buffers ─────────────────────────────────────
     /// Free-node positions         (nn_free × 3, column-major)
@@ -1025,18 +1200,12 @@ pub struct FdmCache {
     pub member_forces: Vec<f64>,
     pub reactions: Array2<f64>, // nn × 3
 
-    // ── Intermediate RHS buffers ───────────────────────────
-    pub cf_nf: Array2<f64>,    // ne × 3
-    pub q_cf_nf: Array2<f64>,  // ne × 3
-    pub pn: Array2<f64>,       // nn_free × 3  (copy of free-node loads)
-    pub nf: Array2<f64>,       // nn × 3       (full node positions)
-    pub nf_fixed: Array2<f64>, // nn_fixed × 3
+    // ── RHS buffers ────────────────────────────────────────
+    pub pn: Array2<f64>, // nn_free × 3  (copy of free-node loads)
+    pub nf: Array2<f64>, // nn × 3       (full node positions)
 
     // ── RHS buffer (reusable for linear solve input) ───────
     pub rhs: Array2<f64>, // nn_free × 3
-
-    // ── Factorization ──────────────────────────────────────
-    pub strategy: FactorizationStrategy,
 
     // ── Self-weight / pressure iteration buffers ──────────
     /// Copy of the original (user-specified) free-node loads, used as the
@@ -1052,60 +1221,48 @@ pub struct FdmCache {
     /// Scratch for softmax weight computation in variation objectives.
     pub softmax_scratch: Vec<f64>,
     pub softmax_scratch_b: Vec<f64>,
-    /// Column-major buffer for faer triangular solves (nn_free × 3).
-    pub solve_workspace: Vec<f64>,
-    /// Reused faer stack for factorization numeric updates.
-    pub factor_stack: dyn_stack::GlobalPodBuffer,
-    /// Reused faer stack for triangular solves.
-    pub solve_stack: dyn_stack::GlobalPodBuffer,
 }
 
 impl FdmCache {
-    /// Build a fully pre-allocated cache from a [`Problem`].
+    /// Build a fully pre-allocated cache from a [`Problem`], with the linear
+    /// solver selected by `problem.solver.linear_solver`.
     ///
-    /// Returns `Err` if the incidence sparsity pattern is inconsistent.
+    /// Returns `Err` if the incidence sparsity pattern is inconsistent, if an
+    /// iterative kind is requested for bounds that permit `q ≤ 0`
+    /// ([`TheseusError::IterativeSolverUnsupported`]: the systems may be
+    /// indefinite), or if the requested kind is not available in this build.
     pub fn new(problem: &Problem) -> Result<Self, TheseusError> {
         let topo = &problem.topology;
         let ne = topo.num_edges;
         let nn = topo.num_nodes;
         let nn_free = topo.free_node_indices.len();
-        let nn_fixed = topo.fixed_node_indices.len();
 
-        // ── 1. Build A's sparsity pattern from Cn^T * Cn ──
-        let cn = &topo.free_incidence; // ne × nn_free
-        let cn_t = cn.transpose();
-        let a_matrix = SparseColMatOwned::sparse_times_sparse(&cn_t, cn)
-            .map_err(|e| TheseusError::Solver(e))?;
-
-        // ── 2. Build q_to_nz mapping ──────────────────────
-        // For each edge k, find which free nodes it touches in Cn,
-        // then map those (n1, n2) pairs to indices in a_matrix.values.
-        let mut edge_to_free_nodes: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ne];
-        for col in 0..nn_free {
-            let start = cn.col_ptrs[col] as usize;
-            let end_ = cn.col_ptrs[col + 1] as usize;
-            for idx in start..end_ {
-                let row = cn.row_indices[idx] as usize;
-                let val = cn.values[idx];
-                edge_to_free_nodes[row].push((col, val));
+        // ── 1–2. The linear solver (owner of A's pattern, values and factors) ──
+        let kind = problem.solver.linear_solver;
+        let iterative = &problem.solver.iterative;
+        if kind.is_iterative() {
+            if let Some((k, lb)) = problem
+                .bounds
+                .lower
+                .iter()
+                .enumerate()
+                .find(|(_, &lb)| lb <= 0.0 || lb.is_nan())
+            {
+                return Err(TheseusError::IterativeSolverUnsupported(format!(
+                    "q may be non-positive under these bounds (edge {k} has lower bound {lb}), so \
+                     A(q) is not guaranteed positive definite; the iterative solvers ('{kind}') \
+                     need q > 0 on every edge"
+                )));
             }
+            iterative.tolerance.validate()?;
         }
-
-        let mut q_to_nz_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ne];
-        for k in 0..ne {
-            let nodes = &edge_to_free_nodes[k];
-            for &(n1, v1) in nodes {
-                for &(n2, v2) in nodes {
-                    let nz_idx = find_nz_index(&a_matrix.col_ptrs, &a_matrix.row_indices, n1, n2)
-                        .ok_or(TheseusError::SparsityMismatch {
-                        edge: k,
-                        row: n1,
-                        col: n2,
-                    })?;
-                    q_to_nz_entries[k].push((nz_idx, v1 * v2));
-                }
-            }
-        }
+        let linear_solver = LinearSolver::new(kind, topo, &problem.bounds, iterative)?;
+        let linear_solver_kind = linear_solver.kind();
+        let warm_len = if linear_solver_kind.is_iterative() {
+            nn_free * 3
+        } else {
+            0
+        };
 
         // ── 3. Edge start / end from incidence ────────────
         let mut edge_starts = vec![0usize; ne];
@@ -1137,14 +1294,25 @@ impl FdmCache {
             node_incident_edges[edge_starts[k]].push(k);
             node_incident_edges[edge_ends[k]].push(k);
         }
+        let adjacency = CsrAdjacency::from_endpoints(nn, &edge_starts, &edge_ends);
 
-        // ── 5. Factorization strategy ─────────────────────
-        let strategy = FactorizationStrategy::from_bounds(&problem.bounds);
+        // ── 5. Edges with one free and one fixed endpoint ─
+        // These are the only edges that contribute to the right-hand side
+        // b = Pn − Cnᵀ diag(q) Cf Nf_fixed.
+        // Sorted by free row so `assemble_rhs` can gather each free node's
+        // boundary edges as one contiguous, ascending-edge run.
+        let mut boundary_edges = Vec::new();
+        for k in 0..ne {
+            let (s_node, e_node) = (edge_starts[k], edge_ends[k]);
+            match (node_to_free_idx[s_node], node_to_free_idx[e_node]) {
+                (Some(free), None) => boundary_edges.push((k, free, e_node)),
+                (None, Some(free)) => boundary_edges.push((k, free, s_node)),
+                _ => {}
+            }
+        }
+        boundary_edges.sort_unstable_by_key(|&(k, free, _)| (free, k));
 
         // ── 6. Pre-allocate all buffers ───────────────────
-        let cf = topo.fixed_incidence.clone();
-        let cn_owned = topo.free_incidence.clone();
-        let cn_t = cn_owned.transpose();
 
         let sw_mu = match &problem.self_weight {
             Some(SelfWeightParams::Prescribed {
@@ -1154,18 +1322,22 @@ impl FdmCache {
         };
 
         Ok(FdmCache {
-            a_matrix,
-            factorization: None,
-            q_to_nz: QToNz {
-                entries: q_to_nz_entries,
-            },
+            linear_solver,
+            linear_solver_kind,
+            linear_solver_totals: LinearSolverTotals::new(linear_solver_kind),
+            solve_tolerance: iterative.tolerance.initial(),
+            solve_max_iterations: iterative.max_iterations,
+            warm_x: vec![0.0; warm_len],
+            warm_lambda: vec![0.0; warm_len],
+            has_warm_x: false,
+            has_warm_lambda: false,
+            boundary_edges,
             edge_starts,
             edge_ends,
             node_to_free_idx,
+            free_node_indices: topo.free_node_indices.clone(),
             node_incident_edges,
-            cn: cn_owned,
-            cn_t,
-            cf,
+            adjacency,
             x: Array2::zeros((nn_free, 3)),
             lambda: Array2::zeros((nn_free, 3)),
             grad_x: Array2::zeros((nn_free, 3)),
@@ -1175,23 +1347,45 @@ impl FdmCache {
             member_lengths: vec![0.0; ne],
             member_forces: vec![0.0; ne],
             reactions: Array2::zeros((nn, 3)),
-            cf_nf: Array2::zeros((ne, 3)),
-            q_cf_nf: Array2::zeros((ne, 3)),
             pn: problem.free_node_loads.clone(),
             nf: Array2::zeros((nn, 3)),
-            nf_fixed: Array2::zeros((nn_fixed, 3)),
             rhs: Array2::zeros((nn_free, 3)),
-            strategy,
             pn_base: problem.free_node_loads.clone(),
             sw_mu,
             cross_section_areas: vec![0.0; ne],
             pn_prev: Array2::zeros((nn_free, 3)),
             softmax_scratch: Vec::new(),
             softmax_scratch_b: Vec::new(),
-            solve_workspace: vec![0.0; nn_free * 3],
-            factor_stack: dyn_stack::GlobalPodBuffer::new(dyn_stack::StackReq::empty()),
-            solve_stack: dyn_stack::GlobalPodBuffer::new(dyn_stack::StackReq::empty()),
         })
+    }
+
+    /// The direct solver behind `linear_solver`, when the kind is `Direct`.
+    pub fn direct_solver(&self) -> Option<&DirectSolver> {
+        self.linear_solver.as_direct()
+    }
+
+    /// Mutable form of [`Self::direct_solver`].
+    pub fn direct_solver_mut(&mut self) -> Option<&mut DirectSolver> {
+        self.linear_solver.as_direct_mut()
+    }
+
+    /// The assembled `A(q)` of the direct path (with the diagonal
+    /// perturbation of the last solve); `None` for the iterative kinds,
+    /// which never assemble it.
+    pub fn a_matrix(&self) -> Option<&SparseColMatOwned> {
+        self.direct_solver().map(DirectSolver::a_matrix)
+    }
+
+    /// The factorization of the direct path, if computed; `None` for the
+    /// iterative kinds.
+    pub fn factorization(&self) -> Option<&Factorization> {
+        self.direct_solver().and_then(DirectSolver::factorization)
+    }
+
+    /// Current factorization strategy of the direct path (`None` for the
+    /// iterative kinds).
+    pub fn strategy(&self) -> Option<FactorizationStrategy> {
+        self.direct_solver().map(DirectSolver::strategy)
     }
 }
 
@@ -1257,6 +1451,14 @@ pub struct SolverResult {
     pub termination_reason: String,
     /// Per-edge cross-section areas (populated in self-weight sizing mode).
     pub cross_section_areas: Vec<f64>,
+    /// Linear-solver iterations per objective/gradient evaluation (parallel
+    /// to `loss_trace`): the sum over the evaluation's solves (forward,
+    /// adjoint, and any load-iteration solves) of the largest per-column
+    /// iteration count. All zeros for [`LinearSolverKind::Direct`].
+    pub linear_solver_iterations: Vec<u32>,
+    /// Totals over every linear solve of the run (the value exported through
+    /// `theseus_get_linear_solver_stats`).
+    pub linear_solver_totals: LinearSolverTotals,
 }
 
 // ─────────────────────────────────────────────────────────────

@@ -2,6 +2,7 @@
 name = "theseus"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.87"
 description = "Force Density Method form-finding solver with hand-coded adjoints"
 license = "MIT"
 
@@ -15,11 +16,38 @@ faer-svd = "0.17"
 dyn-stack = "0.10"
 ndarray = { version = "0.16", features = ["rayon"] }
 rayon = "1.11"
-argmin = "0.10"
-argmin-math = { version = "0.4", features = ["vec"] }
+basin = { version = "1.13", default-features = false }
 nurbsbook = { path = "../nurbsbook" }
-ariadne-lbfgsb = { path = "../lbfgsb", features = ["faer-backend"] }
 clarabel = "0.10"
+
+# GPU backend (opt-in `gpu` feature). Versions are pinned exactly: wgpu
+# releases change APIs between majors, and the validation matrix of the
+# iterative-solver program is tied to one version (upgrade in WS-K only).
+wgpu = { version = "=30.0.1", optional = true, default-features = false, features = [
+    "std",
+    "parking_lot",
+    "wgsl",
+    "vulkan",
+    "dx12",
+    "metal",
+] }
+pollster = { version = "=1.0.1", optional = true }
+bytemuck = { version = "1.25", optional = true, features = ["derive"] }
+
+[features]
+default = []
+# wgpu compute backend for the iterative solvers (`backend::gpu`). Off by
+# default so the direct-solver build and the C# artefacts are unaffected
+# until WS-H enables it.
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
+[[example]]
+name = "gpu_kernels_bench"
+required-features = ["gpu"]
+
+[[test]]
+name = "backend_gpu_equivalence"
+required-features = ["gpu"]
 
 [dev-dependencies]
 # JSON case files of the external (JAX FDM / compas_cem) benchmark.

@@ -4,15 +4,60 @@
 //!
 //! These tests exercise both Cholesky and LDL paths, vary barrier weights,
 //! and print per-iteration loss traces so convergence behaviour is visible.
+//!
+//! Every test runs for each linear-solver kind this build provides
+//! (`Direct` always; `IterativeCpu` once its factory returns a solver, else
+//! skipped with a printed reason — `support/linear_solver_kinds.rs`). The
+//! LDL cases (bounds permitting `q ≤ 0`) must be *refused* by the iterative
+//! kinds with `IterativeSolverUnsupported`.
 
+#[path = "support/linear_solver_kinds.rs"]
+#[allow(dead_code)]
+mod kinds;
+
+use kinds::for_each_kind;
 use ndarray::Array2;
 use std::sync::atomic::AtomicBool;
+use theseus::linear_solver::LinearSolverKind;
 use theseus::sparse::SparseColMatOwned;
 use theseus::types::*;
 
 fn run_optimize(problem: &Problem, state: &mut OptimizationState) -> theseus::types::SolverResult {
     let cancel = AtomicBool::new(false);
     theseus::optimizer::optimize(problem, state, None, 1, &cancel).unwrap()
+}
+
+/// Default solver options with `max_iterations = 200` on `kind`.
+fn solver_options(kind: LinearSolverKind) -> SolverOptions {
+    SolverOptions {
+        max_iterations: 200,
+        linear_solver: kind,
+        ..SolverOptions::default()
+    }
+}
+
+/// The iterative kinds must refuse bounds that permit `q ≤ 0` at cache
+/// construction (`FdmCache::new`), before any solve.
+fn assert_refused_for_indefinite_bounds(kind: LinearSolverKind, problem: &Problem) {
+    match FdmCache::new(problem) {
+        Err(TheseusError::IterativeSolverUnsupported(msg)) => {
+            assert!(
+                msg.contains("non-positive") || msg.contains("q > 0"),
+                "{kind}: unexpected reason: {msg}"
+            );
+        }
+        Err(other) => panic!("{kind}: expected IterativeSolverUnsupported, got {other}"),
+        Ok(_) => panic!("{kind}: bounds permitting q <= 0 must be refused"),
+    }
+    let mut state =
+        OptimizationState::new(vec![1.0; problem.topology.num_edges], Array2::zeros((0, 3)));
+    assert!(
+        matches!(
+            try_optimize(problem, &mut state),
+            Err(TheseusError::IterativeSolverUnsupported(_))
+        ),
+        "{kind}: optimize must surface the same typed error"
+    );
 }
 
 fn try_optimize(
@@ -184,6 +229,10 @@ fn print_loss_trace(label: &str, result: &SolverResult) {
 
 #[test]
 fn diagnostic_grid_cholesky() {
+    for_each_kind(diagnostic_grid_cholesky_for);
+}
+
+fn diagnostic_grid_cholesky_for(kind: LinearSolverKind) {
     let n = 10;
     let num_edges = 2 * n * (n - 1);
     let fixed_idx: Vec<usize> = vec![0, n - 1, n * (n - 1), n * n - 1];
@@ -197,10 +246,7 @@ fn diagnostic_grid_cholesky() {
     let objectives: Vec<Box<dyn ObjectiveTrait>> =
         vec![Box::new(make_target_xyz(&free_idx, n, -0.2))];
 
-    let solver_opts = SolverOptions {
-        max_iterations: 200,
-        ..SolverOptions::default()
-    };
+    let solver_opts = solver_options(kind);
 
     assert_eq!(
         FactorizationStrategy::from_bounds(&bounds),
@@ -211,7 +257,15 @@ fn diagnostic_grid_cholesky() {
     let mut state = OptimizationState::new(vec![1.0; num_edges], Array2::zeros((0, 3)));
 
     let result = run_optimize(&problem, &mut state);
-    print_loss_trace("10×10 grid, Cholesky, barrier_weight=10", &result);
+    print_loss_trace(
+        &format!("10×10 grid, Cholesky, barrier_weight=10, {kind}"),
+        &result,
+    );
+    assert_eq!(result.linear_solver_totals.backend, kind);
+    assert_eq!(
+        result.linear_solver_iterations.len(),
+        result.loss_trace.len()
+    );
 
     assert!(
         result.iterations > 3,
@@ -247,6 +301,10 @@ fn diagnostic_grid_cholesky() {
 
 #[test]
 fn diagnostic_grid_ldl() {
+    for_each_kind(diagnostic_grid_ldl_for);
+}
+
+fn diagnostic_grid_ldl_for(kind: LinearSolverKind) {
     let n = 10;
     let num_edges = 2 * n * (n - 1);
     let fixed_idx: Vec<usize> = vec![0, n - 1, n * (n - 1), n * n - 1];
@@ -260,10 +318,7 @@ fn diagnostic_grid_ldl() {
     let objectives: Vec<Box<dyn ObjectiveTrait>> =
         vec![Box::new(make_target_xyz(&free_idx, n, -0.2))];
 
-    let solver_opts = SolverOptions {
-        max_iterations: 200,
-        ..SolverOptions::default()
-    };
+    let solver_opts = solver_options(kind);
 
     assert_eq!(
         FactorizationStrategy::from_bounds(&bounds),
@@ -271,6 +326,12 @@ fn diagnostic_grid_ldl() {
     );
 
     let problem = make_grid_problem(n, bounds, objectives, solver_opts);
+    if kind.is_iterative() {
+        // Mixed-sign bounds: A(q) may be indefinite, which the iterative
+        // solvers do not handle. Loud refusal, no fallback to Direct.
+        assert_refused_for_indefinite_bounds(kind, &problem);
+        return;
+    }
     let mut state = OptimizationState::new(vec![1.0; num_edges], Array2::zeros((0, 3)));
 
     let result = run_optimize(&problem, &mut state);
@@ -303,13 +364,17 @@ fn diagnostic_grid_ldl() {
 
 #[test]
 fn diagnostic_barrier_weight_sweep() {
+    for_each_kind(diagnostic_barrier_weight_sweep_for);
+}
+
+fn diagnostic_barrier_weight_sweep_for(kind: LinearSolverKind) {
     let n = 10;
     let num_edges = 2 * n * (n - 1);
     let fixed_idx: Vec<usize> = vec![0, n - 1, n * (n - 1), n * n - 1];
     let free_idx: Vec<usize> = (0..n * n).filter(|i| !fixed_idx.contains(i)).collect();
 
     eprintln!("\n╔════════════════════════════════════════════════════════════╗");
-    eprintln!("║           BARRIER WEIGHT SWEEP  (10×10 grid)             ║");
+    eprintln!("║           BARRIER WEIGHT SWEEP  (10×10 grid, {kind:<12})║");
     eprintln!("╠════════════╦════════╦══════════╦══════════╦══════════════╣");
     eprintln!("║  barrier_w ║  iters ║  init_L  ║  final_L ║  reduction   ║");
     eprintln!("╠════════════╬════════╬══════════╬══════════╬══════════════╣");
@@ -324,9 +389,8 @@ fn diagnostic_barrier_weight_sweep() {
             vec![Box::new(make_target_xyz(&free_idx, n, -0.2))];
 
         let solver_opts = SolverOptions {
-            max_iterations: 200,
             barrier_weight,
-            ..SolverOptions::default()
+            ..solver_options(kind)
         };
 
         let problem = make_grid_problem(n, bounds, objectives, solver_opts);
@@ -358,6 +422,10 @@ fn diagnostic_barrier_weight_sweep() {
 /// so the optimiser might push q close to zero.  Verify the fallback works.
 #[test]
 fn diagnostic_cholesky_fallback() {
+    for_each_kind(diagnostic_cholesky_fallback_for);
+}
+
+fn diagnostic_cholesky_fallback_for(kind: LinearSolverKind) {
     let n = 10;
     let num_edges = 2 * n * (n - 1);
     let fixed_idx: Vec<usize> = vec![0, n - 1, n * (n - 1), n * n - 1];
@@ -372,9 +440,8 @@ fn diagnostic_cholesky_fallback() {
         vec![Box::new(make_target_xyz(&free_idx, n, -0.2))];
 
     let solver_opts = SolverOptions {
-        max_iterations: 200,
         barrier_weight: 1.0,
-        ..SolverOptions::default()
+        ..solver_options(kind)
     };
 
     assert_eq!(
@@ -388,7 +455,10 @@ fn diagnostic_cholesky_fallback() {
     let result = try_optimize(&problem, &mut state);
     match result {
         Ok(result) => {
-            print_loss_trace("Cholesky fallback test (lb=1e-6, barrier_w=1)", &result);
+            print_loss_trace(
+                &format!("Cholesky fallback test (lb=1e-6, barrier_w=1), {kind}"),
+                &result,
+            );
             assert!(
                 result.iterations > 0,
                 "should complete at least 1 iteration"
@@ -397,8 +467,17 @@ fn diagnostic_cholesky_fallback() {
                 assert!(l.is_finite(), "length must be finite: {l}");
             }
         }
+        // Soft bounds let q drift below zero along the way; the direct path
+        // falls back to LDLᵀ, the iterative kinds have no fallback and must
+        // fail loudly with their typed errors rather than continue.
+        Err(
+            e @ (TheseusError::IterativeSolverUnsupported(_)
+            | TheseusError::IterativeSolverDidNotConverge { .. }),
+        ) if kind.is_iterative() => {
+            eprintln!("{kind}: indefinite A(q) refused as expected: {e}");
+        }
         Err(e) => {
-            panic!("Optimisation should not fail with fallback: {e}");
+            panic!("{kind}: optimisation should not fail with fallback: {e}");
         }
     }
 }
@@ -409,6 +488,10 @@ fn diagnostic_cholesky_fallback() {
 
 #[test]
 fn diagnostic_combined_objectives() {
+    for_each_kind(diagnostic_combined_objectives_for);
+}
+
+fn diagnostic_combined_objectives_for(kind: LinearSolverKind) {
     let n = 10;
     let num_edges = 2 * n * (n - 1);
     let fixed_idx: Vec<usize> = vec![0, n - 1, n * (n - 1), n * n - 1];
@@ -434,16 +517,16 @@ fn diagnostic_combined_objectives() {
         }),
     ];
 
-    let solver_opts = SolverOptions {
-        max_iterations: 200,
-        ..SolverOptions::default()
-    };
+    let solver_opts = solver_options(kind);
 
     let problem = make_grid_problem(n, bounds, objectives, solver_opts);
     let mut state = OptimizationState::new(vec![1.0; num_edges], Array2::zeros((0, 3)));
 
     let result = run_optimize(&problem, &mut state);
-    print_loss_trace("10×10 combined (TargetXYZ + LengthVar + SumFL)", &result);
+    print_loss_trace(
+        &format!("10×10 combined (TargetXYZ + LengthVar + SumFL), {kind}"),
+        &result,
+    );
 
     assert!(
         result.iterations > 0,
@@ -479,6 +562,10 @@ fn diagnostic_combined_objectives() {
 /// optimise toward a target geometry within bounds.
 #[test]
 fn diagnostic_arch_network() {
+    for_each_kind(diagnostic_arch_network_for);
+}
+
+fn diagnostic_arch_network_for(kind: LinearSolverKind) {
     let num_nodes = 7;
     let num_edges = 8;
 
@@ -550,10 +637,7 @@ fn diagnostic_arch_network() {
         anchors,
         objectives,
         bounds,
-        solver: SolverOptions {
-            max_iterations: 200,
-            ..SolverOptions::default()
-        },
+        solver: solver_options(kind),
         self_weight: None,
         pressure: None,
     };
@@ -561,7 +645,7 @@ fn diagnostic_arch_network() {
     let mut state = OptimizationState::new(vec![1.0; num_edges], Array2::zeros((0, 3)));
 
     let result = run_optimize(&problem, &mut state);
-    print_loss_trace("7-node arch, TargetXYZ", &result);
+    print_loss_trace(&format!("7-node arch, TargetXYZ, {kind}"), &result);
 
     assert!(
         result.iterations > 3,

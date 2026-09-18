@@ -85,6 +85,7 @@ public static class TheseusSolverService
             anchorSaturationLambda: 1.0);
         solver.SetQParameterizationMode((int)ResolveQParameterizationMode(
             inputs.QParameterizationMode, data.LowerBounds, data.UpperBounds));
+        ApplyLinearSolver(solver, inputs);
 
         if (cancellationToken.CanBeCanceled)
         {
@@ -148,6 +149,7 @@ public static class TheseusSolverService
             data.NurbsOffsets, data.NurbsLengths, data.NurbsData);
         solver.SetQParameterizationMode((int)ResolveQParameterizationMode(
             inputs.QParameterizationMode, data.LowerBounds, data.UpperBounds));
+        ApplyLinearSolver(solver, inputs);
 
         ApplyLoadConfig(solver, inputs, context);
 
@@ -419,6 +421,51 @@ public static class TheseusSolverService
     }
 
     #endregion
+
+    /// <summary>
+    /// Native error code of <c>TheseusError::GpuUnavailable</c>, used when the
+    /// managed pre-flight probe finds no usable adapter.
+    /// </summary>
+    internal const int GpuUnavailableCode = -5;
+
+    /// <summary>
+    /// Native codes -3..-6: iterative solver did not converge (-3) / unsupported
+    /// (-4), GPU unavailable (-5) / out of memory (-6).
+    /// </summary>
+    internal static bool IsLinearSolverErrorCode(int nativeCode) => nativeCode is >= -6 and <= -3;
+
+    /// <summary>
+    /// Build the error for an <see cref="LinearSolverKind.IterativeGpu"/>
+    /// request that the adapter probe cannot satisfy. Never falls back: the
+    /// caller surfaces this as a component error and the user changes the toggle.
+    /// </summary>
+    internal static TheseusException GpuUnavailableError(GpuProbe probe) => new(
+        $"Linear solver 'IterativeGpu' requested but no usable GPU adapter is available: {probe.Describe()}; "
+        + "switch the linear solver toggle to 'IterativeCpu' or 'Direct'.",
+        GpuUnavailableCode);
+
+    /// <summary>
+    /// Push the linear-solver selection to the native handle. Direct is the
+    /// default and needs no call; the iterative kinds also send their options.
+    /// A GPU request is probed first so a missing adapter fails with the probe
+    /// message instead of a generic error.
+    /// </summary>
+    private static void ApplyLinearSolver(TheseusSolver solver, SolverInputs inputs)
+    {
+        var kind = inputs.LinearSolver;
+        if (kind == LinearSolverKind.Direct)
+            return;
+
+        if (kind == LinearSolverKind.IterativeGpu)
+        {
+            var probe = GpuProbe.Query();
+            if (!probe.Available)
+                throw GpuUnavailableError(probe);
+        }
+
+        solver.SetLinearSolver(kind);
+        solver.SetIterativeOptions(inputs.IterativeOptions ?? new IterativeSolverOptions());
+    }
 
     #region Private Methods
 
@@ -864,7 +911,8 @@ public static class TheseusSolverService
             Iterations = result.Iterations,
             Converged = result.Converged,
             TerminationReason = result.TerminationReason,
-            GeometricError = result.GeometricError
+            GeometricError = result.GeometricError,
+            LinearSolver = result.LinearSolver,
         };
     }
 

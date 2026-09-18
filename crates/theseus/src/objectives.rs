@@ -3,6 +3,7 @@
 //! Each function computes a scalar loss from the current geometry snapshot.
 //! The corresponding hand-coded gradients live in `gradients.rs`.
 
+use crate::backend::cpu::deterministic_sum;
 use crate::gradients;
 use crate::types::{
     FdmCache, ForceVarianceNormalizationStrategy, ForceVariation, GeometrySnapshot,
@@ -14,6 +15,48 @@ use crate::types::{
 };
 use ndarray::Array2;
 use rayon::prelude::*;
+
+// ─────────────────────────────────────────────────────────────
+//  Reductions
+// ─────────────────────────────────────────────────────────────
+//
+// Every O(n) loss below is a fixed-order chunked sum (`deterministic_sum`):
+// sequential inside 4,096-element chunks, partials added in chunk order,
+// chunks evaluated in parallel above 16k elements. The result is identical
+// for any thread count. Relative to the previous fully sequential loops
+// this reassociates the sum once per chunk boundary, so losses over more
+// than 4,096 entries may differ from the old values in the last bits (tests
+// compare at 1e-12 relative); sums of ≤ 4,096 entries are unchanged.
+
+/// Sum `f(i)` for `i` in `0..n` in fixed chunk order.
+#[inline]
+fn chunked_sum(n: usize, f: impl Fn(usize) -> f64 + Sync) -> f64 {
+    deterministic_sum(n, |range| {
+        let mut acc = 0.0;
+        for i in range {
+            acc += f(i);
+        }
+        acc
+    })
+}
+
+/// Row `i` of an `n × 3` array without per-element stride arithmetic when
+/// the array is contiguous row-major.
+#[inline]
+fn row3(array: &Array2<f64>, slice: Option<&[f64]>, i: usize) -> [f64; 3] {
+    match slice {
+        Some(s) => [s[i * 3], s[i * 3 + 1], s[i * 3 + 2]],
+        None => [array[[i, 0]], array[[i, 1]], array[[i, 2]]],
+    }
+}
+
+fn row_major(array: &Array2<f64>) -> Option<&[f64]> {
+    if array.ncols() == 3 {
+        array.as_slice()
+    } else {
+        None
+    }
+}
 
 // ─────────────────────────────────────────────────────────────
 //  Softplus barrier
@@ -143,28 +186,38 @@ pub fn target_geometry_reduction_grad_scale(
     }
 }
 
-/// TargetXYZ:  Σ_i ‖xyz[idx_i] − target_i‖²
+/// TargetXYZ:  Σ_i ‖xyz[idx_i] − target_i‖²  (chunked fixed-order sum)
 fn target_xyz_loss(xyz: &Array2<f64>, node_indices: &[usize], target: &Array2<f64>) -> f64 {
-    let mut loss = 0.0;
-    for (i, &idx) in node_indices.iter().enumerate() {
-        for d in 0..3 {
-            let diff = xyz[[idx, d]] - target[[i, d]];
-            loss += diff * diff;
+    let (xs, ts) = (row_major(xyz), row_major(target));
+    deterministic_sum(node_indices.len(), |range| {
+        let mut loss = 0.0;
+        for i in range {
+            let p = row3(xyz, xs, node_indices[i]);
+            let t = row3(target, ts, i);
+            for d in 0..3 {
+                let diff = p[d] - t[d];
+                loss += diff * diff;
+            }
         }
-    }
-    loss
+        loss
+    })
 }
 
-/// TargetXY:  Σ_i (Δx² + Δy²)
+/// TargetXY:  Σ_i (Δx² + Δy²)  (chunked fixed-order sum)
 fn target_xy_loss(xyz: &Array2<f64>, node_indices: &[usize], target: &Array2<f64>) -> f64 {
-    let mut loss = 0.0;
-    for (i, &idx) in node_indices.iter().enumerate() {
-        for d in 0..2 {
-            let diff = xyz[[idx, d]] - target[[i, d]];
-            loss += diff * diff;
+    let (xs, ts) = (row_major(xyz), row_major(target));
+    deterministic_sum(node_indices.len(), |range| {
+        let mut loss = 0.0;
+        for i in range {
+            let p = row3(xyz, xs, node_indices[i]);
+            let t = row3(target, ts, i);
+            for d in 0..2 {
+                let diff = p[d] - t[d];
+                loss += diff * diff;
+            }
         }
-    }
-    loss
+        loss
+    })
 }
 
 /// TargetPlane:  Σ_i ((u_p − u_t)² + (v_p − v_t)²) in plane coords.
@@ -177,25 +230,26 @@ fn target_plane_loss(
     x_axis: &[f64; 3],
     y_axis: &[f64; 3],
 ) -> f64 {
-    let mut loss = 0.0;
-    for (i, &idx) in node_indices.iter().enumerate() {
-        let u_p = (xyz[[idx, 0]] - origin[0]) * x_axis[0]
-            + (xyz[[idx, 1]] - origin[1]) * x_axis[1]
-            + (xyz[[idx, 2]] - origin[2]) * x_axis[2];
-        let v_p = (xyz[[idx, 0]] - origin[0]) * y_axis[0]
-            + (xyz[[idx, 1]] - origin[1]) * y_axis[1]
-            + (xyz[[idx, 2]] - origin[2]) * y_axis[2];
-        let u_t = (target[[i, 0]] - origin[0]) * x_axis[0]
-            + (target[[i, 1]] - origin[1]) * x_axis[1]
-            + (target[[i, 2]] - origin[2]) * x_axis[2];
-        let v_t = (target[[i, 0]] - origin[0]) * y_axis[0]
-            + (target[[i, 1]] - origin[1]) * y_axis[1]
-            + (target[[i, 2]] - origin[2]) * y_axis[2];
+    let (xs, ts) = (row_major(xyz), row_major(target));
+    chunked_sum(node_indices.len(), |i| {
+        let p = row3(xyz, xs, node_indices[i]);
+        let t = row3(target, ts, i);
+        let u_p = (p[0] - origin[0]) * x_axis[0]
+            + (p[1] - origin[1]) * x_axis[1]
+            + (p[2] - origin[2]) * x_axis[2];
+        let v_p = (p[0] - origin[0]) * y_axis[0]
+            + (p[1] - origin[1]) * y_axis[1]
+            + (p[2] - origin[2]) * y_axis[2];
+        let u_t = (t[0] - origin[0]) * x_axis[0]
+            + (t[1] - origin[1]) * x_axis[1]
+            + (t[2] - origin[2]) * x_axis[2];
+        let v_t = (t[0] - origin[0]) * y_axis[0]
+            + (t[1] - origin[1]) * y_axis[1]
+            + (t[2] - origin[2]) * y_axis[2];
         let du = u_p - u_t;
         let dv = v_p - v_t;
-        loss += du * du + dv * dv;
-    }
-    loss
+        du * du + dv * dv
+    })
 }
 
 /// PlanarConstraintAlongDirection:  Σ_i t_i²  where t = n·(O−P)/(n·d).
@@ -234,35 +288,29 @@ fn planar_constraint_along_direction_loss(
     let nx = x_axis[1] * y_axis[2] - x_axis[2] * y_axis[1];
     let ny = x_axis[2] * y_axis[0] - x_axis[0] * y_axis[2];
     let nz = x_axis[0] * y_axis[1] - x_axis[1] * y_axis[0];
-    let mut loss = 0.0;
-    for &idx in node_indices {
-        let n_dot_op = nx * (origin[0] - xyz[[idx, 0]])
-            + ny * (origin[1] - xyz[[idx, 1]])
-            + nz * (origin[2] - xyz[[idx, 2]]);
+    let xs = row_major(xyz);
+    chunked_sum(node_indices.len(), |i| {
+        let p = row3(xyz, xs, node_indices[i]);
+        let n_dot_op = nx * (origin[0] - p[0]) + ny * (origin[1] - p[1]) + nz * (origin[2] - p[2]);
         let t = n_dot_op / n_dot_d;
-        loss += t * t;
-    }
-    loss
+        t * t
+    })
 }
 
-/// TargetLength:  Σ_i (ℓ[idx_i] − target_i)²
+/// TargetLength:  Σ_i (ℓ[idx_i] − target_i)²  (chunked fixed-order sum)
 fn target_length_loss(lengths: &[f64], edge_indices: &[usize], target: &[f64]) -> f64 {
-    let mut loss = 0.0;
-    for (i, &idx) in edge_indices.iter().enumerate() {
-        let diff = lengths[idx] - target[i];
-        loss += diff * diff;
-    }
-    loss
+    chunked_sum(edge_indices.len(), |i| {
+        let diff = lengths[edge_indices[i]] - target[i];
+        diff * diff
+    })
 }
 
-/// TargetForce:  Σ_i (f[idx_i] − target_i)²
+/// TargetForce:  Σ_i (f[idx_i] − target_i)²  (chunked fixed-order sum)
 fn target_force_loss(forces: &[f64], edge_indices: &[usize], target: &[f64]) -> f64 {
-    let mut loss = 0.0;
-    for (i, &idx) in edge_indices.iter().enumerate() {
-        let diff = forces[idx] - target[i];
-        loss += diff * diff;
-    }
-    loss
+    chunked_sum(edge_indices.len(), |i| {
+        let diff = forces[edge_indices[i]] - target[i];
+        diff * diff
+    })
 }
 
 /// Numerically stable log-sum-exp smooth maximum:
@@ -273,10 +321,7 @@ fn smooth_max(values: &[f64], indices: &[usize], beta: f64) -> f64 {
         .iter()
         .map(|&i| values[i])
         .fold(f64::NEG_INFINITY, f64::max);
-    let sum: f64 = indices
-        .iter()
-        .map(|&i| ((values[i] - m) * beta).exp())
-        .sum();
+    let sum = chunked_sum(indices.len(), |i| ((values[indices[i]] - m) * beta).exp());
     m + sum.ln() / beta
 }
 
@@ -287,10 +332,7 @@ fn smooth_min(values: &[f64], indices: &[usize], beta: f64) -> f64 {
         .iter()
         .map(|&i| values[i])
         .fold(f64::INFINITY, f64::min);
-    let sum: f64 = indices
-        .iter()
-        .map(|&i| ((m - values[i]) * beta).exp())
-        .sum();
+    let sum = chunked_sum(indices.len(), |i| ((m - values[indices[i]]) * beta).exp());
     m - sum.ln() / beta
 }
 
@@ -304,15 +346,11 @@ fn variance_loss(values: &[f64], edge_indices: &[usize]) -> f64 {
     }
 
     let n = edge_indices.len() as f64;
-    let mean = edge_indices.iter().map(|&i| values[i]).sum::<f64>() / n;
-    edge_indices
-        .iter()
-        .map(|&i| {
-            let diff = values[i] - mean;
-            diff * diff
-        })
-        .sum::<f64>()
-        / n
+    let mean = chunked_sum(edge_indices.len(), |i| values[edge_indices[i]]) / n;
+    chunked_sum(edge_indices.len(), |i| {
+        let diff = values[edge_indices[i]] - mean;
+        diff * diff
+    }) / n
 }
 
 /// Dimensionless variation metric: variance(values) / (mean(values)^2 + epsilon).
@@ -322,7 +360,7 @@ fn normalized_variance_loss(values: &[f64], edge_indices: &[usize]) -> f64 {
     }
 
     let n = edge_indices.len() as f64;
-    let mean = edge_indices.iter().map(|&i| values[i]).sum::<f64>() / n;
+    let mean = chunked_sum(edge_indices.len(), |i| values[edge_indices[i]]) / n;
     let variance = variance_loss(values, edge_indices);
     variance / (mean * mean + NORMALIZED_VARIANCE_EPSILON)
 }
@@ -334,7 +372,7 @@ fn absolute_normalized_variance_loss(values: &[f64], edge_indices: &[usize]) -> 
     }
 
     let n = edge_indices.len() as f64;
-    let abs_mean = edge_indices.iter().map(|&i| values[i].abs()).sum::<f64>() / n;
+    let abs_mean = chunked_sum(edge_indices.len(), |i| values[edge_indices[i]].abs()) / n;
     let variance = variance_loss(values, edge_indices);
     variance / (abs_mean * abs_mean + NORMALIZED_VARIANCE_EPSILON)
 }
@@ -359,33 +397,36 @@ fn force_variation_loss(forces: &[f64], edge_indices: &[usize], beta: f64) -> f6
 
 /// SumForceLength:  Σ_i ℓ_i · |f_i|  =  Σ_i |q_i| · ℓ_i²
 fn sum_force_length_loss(lengths: &[f64], forces: &[f64], edge_indices: &[usize]) -> f64 {
-    let mut loss = 0.0;
-    for &idx in edge_indices {
-        loss += lengths[idx] * forces[idx].abs();
-    }
-    loss
+    chunked_sum(edge_indices.len(), |i| {
+        let idx = edge_indices[i];
+        lengths[idx] * forces[idx].abs()
+    })
 }
 
 /// MinLength / MinForce barrier:  Σ softplus(x_i, threshold_i, −k)
 fn min_penalty(values: &[f64], edge_indices: &[usize], threshold: &[f64], k: f64) -> f64 {
-    let mut loss = 0.0;
-    for (i, &idx) in edge_indices.iter().enumerate() {
-        if threshold[i].is_finite() {
-            loss += softplus(values[idx], threshold[i], -k);
+    deterministic_sum(edge_indices.len(), |range| {
+        let mut loss = 0.0;
+        for i in range {
+            if threshold[i].is_finite() {
+                loss += softplus(values[edge_indices[i]], threshold[i], -k);
+            }
         }
-    }
-    loss
+        loss
+    })
 }
 
 /// MaxLength / MaxForce barrier:  Σ softplus(x_i, threshold_i, +k)
 fn max_penalty(values: &[f64], edge_indices: &[usize], threshold: &[f64], k: f64) -> f64 {
-    let mut loss = 0.0;
-    for (i, &idx) in edge_indices.iter().enumerate() {
-        if threshold[i].is_finite() {
-            loss += softplus(values[idx], threshold[i], k);
+    deterministic_sum(edge_indices.len(), |range| {
+        let mut loss = 0.0;
+        for i in range {
+            if threshold[i].is_finite() {
+                loss += softplus(values[edge_indices[i]], threshold[i], k);
+            }
         }
-    }
-    loss
+        loss
+    })
 }
 
 /// RigidSetCompare: Σ_{i<j} (d_target − d_network)²
@@ -955,8 +996,12 @@ impl ObjectiveTrait for ReactionDirectionMagnitude {
 // ─────────────────────────────────────────────────────────────
 
 /// Evaluate total geometric loss (sum of all objectives).
+///
+/// Objectives are evaluated in parallel but their losses are added in
+/// objective order, so the total does not depend on the thread count.
 pub fn total_loss(objectives: &[Box<dyn ObjectiveTrait>], snap: &GeometrySnapshot) -> f64 {
-    objectives.par_iter().map(|obj| obj.loss(snap)).sum()
+    let losses: Vec<f64> = objectives.par_iter().map(|obj| obj.loss(snap)).collect();
+    losses.iter().fold(0.0, |acc, l| acc + l)
 }
 
 /// Validate all objective configurations before a solve.

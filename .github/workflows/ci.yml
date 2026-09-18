@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 jobs:
   rust:
@@ -28,6 +28,23 @@ jobs:
               raise SystemExit("CR bytes found in canonical-LF files:\n" + "\n".join(bad))
           PY
           bash -n build.sh
+
+      - name: Verify Basin attribution matches the locked dependency
+        shell: bash
+        run: |
+          cargo metadata --locked --format-version 1 > "$RUNNER_TEMP/metadata.json"
+          python3 - "$RUNNER_TEMP/metadata.json" <<'PYTHON'
+          import json
+          from pathlib import Path
+          import sys
+
+          metadata = json.loads(Path(sys.argv[1]).read_text())
+          basin = next(package for package in metadata["packages"] if package["name"] == "basin")
+          source = Path(basin["manifest_path"]).parent
+          for name in ("LICENSE-MIT", "LICENSE-APACHE", "COPYRIGHT"):
+              if (source / name).read_bytes() != (Path("third-party/basin") / name).read_bytes():
+                  raise SystemExit(f"Update Basin attribution: {name}")
+          PYTHON
 
       - name: Test standalone solver (scalar)
         run: cargo test --locked -p ariadne-lbfgsb --no-default-features
@@ -68,6 +85,66 @@ jobs:
           rm -f Cargo.lock
           cargo test --all-features
 
+  # WS-G: the wgpu backend (`--features gpu`) built on all three OSes and its
+  # kernel equivalence tests run under software adapters (lavapipe on Linux,
+  # WARP via DX12 on Windows, the runner's Metal device on macOS) with
+  # THESEUS_GPU_ALLOW_SOFTWARE=1. The GPU steps are `continue-on-error`
+  # until the matrix is proven; WS-K removes that once the software-adapter
+  # runs are green on every OS (program plan §4.2, §7.3).
+  gpu-software:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      THESEUS_GPU_ALLOW_SOFTWARE: "1"
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install lavapipe (Linux software Vulkan)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n 1)
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+          echo "WGPU_BACKEND=vulkan" >> "$GITHUB_ENV"
+          env -u DISPLAY vulkaninfo --summary || true
+
+      - name: Select WARP (Windows software DX12)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "WGPU_BACKEND=dx12" >> $env:GITHUB_ENV
+          "WGPU_ADAPTER_NAME=Microsoft Basic Render Driver" >> $env:GITHUB_ENV
+
+      - name: Select Metal (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: echo "WGPU_BACKEND=metal" >> "$GITHUB_ENV"
+
+      - name: Build with the gpu feature
+        run: cargo build --locked -p theseus --release --features gpu
+
+      - name: GPU kernel equivalence tests (software adapter)
+        # WS-K removes continue-on-error once the software-adapter matrix is proven.
+        continue-on-error: true
+        run: cargo test --locked -p theseus --release --features gpu --test backend_gpu_equivalence -- --nocapture --test-threads=1
+
+      - name: GPU kernel microbenchmark harness (smoke, 100k nodes)
+        # WS-K removes continue-on-error once the software-adapter matrix is proven.
+        continue-on-error: true
+        env:
+          THESEUS_GPU_BENCH_NODES: "100000"
+          THESEUS_GPU_BENCH_REPS: "2"
+        run: cargo run --locked -p theseus --release --features gpu --example gpu_kernels_bench
+
   dotnet:
     runs-on: windows-latest
     steps:
@@ -92,6 +169,9 @@ jobs:
           }
           @(
             'Ariadne-LICENSE.txt',
+            'basin-LICENSE-MIT.txt',
+            'basin-LICENSE-APACHE.txt',
+            'basin-COPYRIGHT.txt',
             'ariadne-lbfgsb-LICENSE.txt',
             'ariadne-lbfgsb-UPSTREAM_LICENSE.txt',
             'ariadne-lbfgsb-THIRD_PARTY_NOTICES.md',
@@ -116,6 +196,9 @@ jobs:
             'Ariadne.gha',
             'theseus.dll',
             'Ariadne-LICENSE.txt',
+            'basin-LICENSE-MIT.txt',
+            'basin-LICENSE-APACHE.txt',
+            'basin-COPYRIGHT.txt',
             'ariadne-lbfgsb-LICENSE.txt',
             'ariadne-lbfgsb-UPSTREAM_LICENSE.txt',
             'ariadne-lbfgsb-THIRD_PARTY_NOTICES.md',
@@ -134,6 +217,9 @@ jobs:
             bin/Release/net8.0/Ariadne.gha
             bin/Release/net8.0/theseus.dll
             bin/Release/net8.0/Ariadne-LICENSE.txt
+            bin/Release/net8.0/basin-LICENSE-MIT.txt
+            bin/Release/net8.0/basin-LICENSE-APACHE.txt
+            bin/Release/net8.0/basin-COPYRIGHT.txt
             bin/Release/net8.0/ariadne-lbfgsb-LICENSE.txt
             bin/Release/net8.0/ariadne-lbfgsb-UPSTREAM_LICENSE.txt
             bin/Release/net8.0/ariadne-lbfgsb-THIRD_PARTY_NOTICES.md
@@ -154,6 +240,9 @@ jobs:
           ./build.sh release --skip-tests
           lipo -verify_arch arm64 x86_64 Theseus/libtheseus.dylib
           test -s Theseus/Ariadne-LICENSE.txt
+          test -s Theseus/basin-LICENSE-MIT.txt
+          test -s Theseus/basin-LICENSE-APACHE.txt
+          test -s Theseus/basin-COPYRIGHT.txt
           test -s Theseus/ariadne-lbfgsb-LICENSE.txt
           test -s Theseus/ariadne-lbfgsb-UPSTREAM_LICENSE.txt
           test -s Theseus/ariadne-lbfgsb-THIRD_PARTY_NOTICES.md
@@ -166,6 +255,9 @@ jobs:
           path: |
             Theseus/libtheseus.dylib
             Theseus/Ariadne-LICENSE.txt
+            Theseus/basin-LICENSE-MIT.txt
+            Theseus/basin-LICENSE-APACHE.txt
+            Theseus/basin-COPYRIGHT.txt
             Theseus/ariadne-lbfgsb-LICENSE.txt
             Theseus/ariadne-lbfgsb-UPSTREAM_LICENSE.txt
             Theseus/ariadne-lbfgsb-THIRD_PARTY_NOTICES.md

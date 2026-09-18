@@ -35,12 +35,17 @@
 //! progress callback.
 //! `theseus_free` must not run concurrently with any use of the handle.
 
+use crate::linear_solver::{
+    AdapterPreference, CycleKind, GpuOuterLoop, IterativeSolverOptions, LinearSolverKind,
+    LinearSolverTotals, Precision, TolerancePolicy,
+};
 use crate::optimizer;
 use crate::sparse::SparseColMatOwned;
 use crate::types::*;
 use ndarray::Array2;
 use std::cell::RefCell;
 use std::ops::{Deref, DerefMut};
+use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -59,6 +64,92 @@ pub(crate) fn set_last_error(msg: &str) {
     LAST_ERROR.with(|e| *e.borrow_mut() = msg.to_owned());
 }
 
+// ─────────────────────────────────────────────────────────────
+//  Return codes
+// ─────────────────────────────────────────────────────────────
+//
+// 0 = success, negative = error; `theseus_last_error` carries the message.
+// The codes are part of the C ABI: never renumber, only append.
+
+/// Generic failure (every `TheseusError` variant that has no code of its own).
+pub const THESEUS_ERR_GENERIC: i32 = -1;
+/// A panic was caught at the FFI boundary (a bug).
+pub const THESEUS_ERR_PANIC: i32 = -2;
+/// `TheseusError::IterativeSolverDidNotConverge`.
+pub const THESEUS_ERR_ITERATIVE_NOT_CONVERGED: i32 = -3;
+/// `TheseusError::IterativeSolverUnsupported`.
+pub const THESEUS_ERR_ITERATIVE_UNSUPPORTED: i32 = -4;
+/// `TheseusError::GpuUnavailable`.
+pub const THESEUS_ERR_GPU_UNAVAILABLE: i32 = -5;
+/// `TheseusError::GpuOutOfMemory`.
+pub const THESEUS_ERR_GPU_OUT_OF_MEMORY: i32 = -6;
+
+/// The `i32` return code for an error.
+pub fn error_code(error: &TheseusError) -> i32 {
+    match error {
+        TheseusError::IterativeSolverDidNotConverge { .. } => THESEUS_ERR_ITERATIVE_NOT_CONVERGED,
+        TheseusError::IterativeSolverUnsupported(_) => THESEUS_ERR_ITERATIVE_UNSUPPORTED,
+        TheseusError::GpuUnavailable(_) => THESEUS_ERR_GPU_UNAVAILABLE,
+        TheseusError::GpuOutOfMemory { .. } => THESEUS_ERR_GPU_OUT_OF_MEMORY,
+        TheseusError::Linalg(_)
+        | TheseusError::SparsityMismatch { .. }
+        | TheseusError::MissingFactorization
+        | TheseusError::Solver(_)
+        | TheseusError::Shape(_)
+        | TheseusError::Cancelled => THESEUS_ERR_GENERIC,
+    }
+}
+
+#[cfg(test)]
+mod error_code_tests {
+    use super::*;
+    use crate::linear_solver::LinearSolverKind;
+
+    #[test]
+    fn existing_variants_keep_the_generic_code() {
+        for e in [
+            TheseusError::Linalg("x".into()),
+            TheseusError::SparsityMismatch {
+                edge: 0,
+                row: 0,
+                col: 0,
+            },
+            TheseusError::MissingFactorization,
+            TheseusError::Solver("x".into()),
+            TheseusError::Shape("x".into()),
+            TheseusError::Cancelled,
+        ] {
+            assert_eq!(error_code(&e), THESEUS_ERR_GENERIC);
+        }
+    }
+
+    #[test]
+    fn linear_solver_variants_have_distinct_codes() {
+        let codes = [
+            error_code(&TheseusError::IterativeSolverDidNotConverge {
+                iterations: 1,
+                relative_residual: 1.0,
+                kind: LinearSolverKind::IterativeCpu,
+            }),
+            error_code(&TheseusError::IterativeSolverUnsupported("x".into())),
+            error_code(&TheseusError::GpuUnavailable("x".into())),
+            error_code(&TheseusError::GpuOutOfMemory {
+                requested: 1,
+                available: 0,
+            }),
+        ];
+        assert_eq!(codes, [-3, -4, -5, -6]);
+        let guarded = unsafe {
+            ffi_guard(|| Err(TheseusError::IterativeSolverUnsupported("not yet".into())))
+        };
+        assert_eq!(guarded, THESEUS_ERR_ITERATIVE_UNSUPPORTED);
+        let mut buf = [0u8; 256];
+        let len = unsafe { theseus_last_error(buf.as_mut_ptr(), buf.len()) };
+        let msg = std::str::from_utf8(&buf[..len as usize]).unwrap();
+        assert!(msg.contains("not yet") && msg.contains("Direct"), "{msg}");
+    }
+}
+
 /// Wrap an `extern "C"` body: calls the closure, translates `Result` to
 /// `i32`, stores error message, and uses `catch_unwind` as a final safety
 /// net against bugs.
@@ -70,11 +161,11 @@ where
         Ok(Ok(())) => 0,
         Ok(Err(e)) => {
             set_last_error(&e.to_string());
-            -1
+            error_code(&e)
         }
         Err(_panic) => {
             set_last_error("internal panic (this is a bug — please report it)");
-            -2
+            THESEUS_ERR_PANIC
         }
     }
 }
@@ -181,6 +272,9 @@ struct TheseusHandleState {
     pub report_frequency: usize,
     pub last_termination_reason: String,
     pub pending_rigidity_report: Option<crate::nullspace::NullspaceReport>,
+    /// Linear-solver totals of the most recent optimisation or forward solve
+    /// (exported by `theseus_get_linear_solver_stats`).
+    pub linear_solver_totals: LinearSolverTotals,
 }
 
 struct HandleLifecycle {
@@ -929,6 +1023,7 @@ unsafe fn create_inner_with_variable_supports(
                 report_frequency: 1,
                 last_termination_reason: "not run".to_string(),
                 pending_rigidity_report: None,
+                linear_solver_totals: LinearSolverTotals::default(),
             }),
             active_cancel: None,
             active_cancel_scope: None,
@@ -1635,6 +1730,317 @@ pub unsafe extern "C" fn theseus_set_q_parameterization_mode(
 }
 
 // ─────────────────────────────────────────────────────────────
+//  Linear solver selection
+// ─────────────────────────────────────────────────────────────
+
+/// Select the linear solver used for the forward and adjoint systems.
+///
+/// kind:
+///   0 = Direct       (sparse Cholesky / LDLᵀ; the default, never changed automatically)
+///   1 = IterativeCpu (matrix-free FCG + aggregation AMG on the CPU)
+///   2 = IterativeGpu (same algorithm on a wgpu device)
+///
+/// Any other value is rejected and the handle keeps its previous selection.
+/// When an iterative kind is not provided by this build, or cannot run on
+/// the problem (bounds permitting `q ≤ 0`), the next `theseus_optimize` /
+/// `theseus_solve_forward` on a handle set to 1 or 2 returns
+/// `THESEUS_ERR_ITERATIVE_UNSUPPORTED` (-4) with an explanatory message
+/// instead of silently running the direct solver.
+///
+/// # Safety
+/// Valid handle.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_set_linear_solver(handle: *mut TheseusHandle, kind: i32) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let mut h = require_handle(handle)?;
+        let kind = LinearSolverKind::try_from(kind)?;
+        h.problem.solver.linear_solver = kind;
+        h.linear_solver_totals = LinearSolverTotals::new(kind);
+        Ok(())
+    }))
+}
+
+/// Configure the iterative linear solvers (ignored while the kind is `Direct`).
+///
+/// The whole option set is passed as flat scalars, in the style of the other
+/// setters; every field is validated and the options are applied atomically
+/// (an invalid field leaves the handle's options unchanged).
+///
+///   tolerance_mode:          0 = Fixed (`tolerance` is the relative residual of every solve;
+///                                `tolerance_floor/ceiling/factor` are ignored)
+///                            1 = Adaptive (`tol_k = clamp(factor · ‖g⁺_k‖/‖g⁺_0‖, floor, ceiling)`;
+///                                `tolerance` is ignored)
+///   tolerance:               > 0, finite
+///   tolerance_floor:         > 0, finite, ≤ tolerance_ceiling
+///   tolerance_ceiling:       > 0, finite
+///   tolerance_factor:        > 0, finite
+///   max_iterations:          ≥ 1, per solve
+///   cycle:                   0 = V, 1 = K
+///   smoother_degree:         1..=255 (Chebyshev degree)
+///   aggregation_passes:      1..=255 (pairwise matching passes per level)
+///   coarsest_size:           ≥ 1 (stop coarsening below this many nodes)
+///   precondition_precision: -1 = backend default (F64 on CPU, F32 on GPU), 0 = F64, 1 = F32
+///   gpu_outer_loop:          0 = Auto, 1 = Device, 2 = Host
+///   adapter_preference:      0 = Discrete, 1 = Integrated, 2 = Any
+///   max_device_bytes:        cap on device memory the GPU solver may allocate;
+///                            0 = adapter limit (`None`), any other value = `Some(bytes)`
+///
+/// Defaults (Rust `IterativeSolverOptions::default()`): Adaptive
+/// (1e-10, 1e-6, 1e-2), 200 iterations, K-cycle, degree 2, 2 passes,
+/// coarsest 2000, default precision, Auto, Discrete, adapter memory limit.
+///
+/// # Safety
+/// Valid handle.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn theseus_set_iterative_options(
+    handle: *mut TheseusHandle,
+    tolerance_mode: i32,
+    tolerance: f64,
+    tolerance_floor: f64,
+    tolerance_ceiling: f64,
+    tolerance_factor: f64,
+    max_iterations: u32,
+    cycle: i32,
+    smoother_degree: u32,
+    aggregation_passes: u32,
+    coarsest_size: u32,
+    precondition_precision: i32,
+    gpu_outer_loop: i32,
+    adapter_preference: i32,
+    max_device_bytes: u64,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let mut h = require_handle(handle)?;
+        let options = build_iterative_options(
+            tolerance_mode,
+            tolerance,
+            tolerance_floor,
+            tolerance_ceiling,
+            tolerance_factor,
+            max_iterations,
+            cycle,
+            smoother_degree,
+            aggregation_passes,
+            coarsest_size,
+            precondition_precision,
+            gpu_outer_loop,
+            adapter_preference,
+            max_device_bytes,
+        )?;
+        h.problem.solver.iterative = options;
+        Ok(())
+    }))
+}
+
+/// Validate and assemble [`IterativeSolverOptions`] from the flat FFI scalars.
+#[allow(clippy::too_many_arguments)]
+fn build_iterative_options(
+    tolerance_mode: i32,
+    tolerance: f64,
+    tolerance_floor: f64,
+    tolerance_ceiling: f64,
+    tolerance_factor: f64,
+    max_iterations: u32,
+    cycle: i32,
+    smoother_degree: u32,
+    aggregation_passes: u32,
+    coarsest_size: u32,
+    precondition_precision: i32,
+    gpu_outer_loop: i32,
+    adapter_preference: i32,
+    max_device_bytes: u64,
+) -> Result<IterativeSolverOptions, TheseusError> {
+    fn positive(value: f64, label: &str) -> Result<f64, TheseusError> {
+        if value.is_finite() && value > 0.0 {
+            Ok(value)
+        } else {
+            Err(TheseusError::Shape(format!(
+                "invalid iterative solver option: {label} must be finite and > 0 (got {value})"
+            )))
+        }
+    }
+    fn small_count(value: u32, label: &str) -> Result<u8, TheseusError> {
+        match u8::try_from(value) {
+            Ok(v) if v >= 1 => Ok(v),
+            _ => Err(TheseusError::Shape(format!(
+                "invalid iterative solver option: {label} must be in 1..=255 (got {value})"
+            ))),
+        }
+    }
+
+    let tolerance = match tolerance_mode {
+        TolerancePolicy::FIXED => TolerancePolicy::Fixed(positive(tolerance, "tolerance")?),
+        TolerancePolicy::ADAPTIVE => {
+            let floor = positive(tolerance_floor, "tolerance_floor")?;
+            let ceiling = positive(tolerance_ceiling, "tolerance_ceiling")?;
+            let factor = positive(tolerance_factor, "tolerance_factor")?;
+            if floor > ceiling {
+                return Err(TheseusError::Shape(format!(
+                    "invalid iterative solver option: tolerance_floor ({floor}) must not exceed \
+                     tolerance_ceiling ({ceiling})"
+                )));
+            }
+            TolerancePolicy::Adaptive {
+                floor,
+                ceiling,
+                factor,
+            }
+        }
+        other => {
+            return Err(TheseusError::Shape(format!(
+                "invalid tolerance mode: {other} (expected 0 = Fixed, 1 = Adaptive)"
+            )))
+        }
+    };
+    if max_iterations == 0 {
+        return Err(TheseusError::Shape(
+            "invalid iterative solver option: max_iterations must be >= 1".into(),
+        ));
+    }
+    if coarsest_size == 0 {
+        return Err(TheseusError::Shape(
+            "invalid iterative solver option: coarsest_size must be >= 1".into(),
+        ));
+    }
+    let precondition_precision = if precondition_precision == -1 {
+        None
+    } else {
+        Some(Precision::try_from(precondition_precision)?)
+    };
+    let mut options = IterativeSolverOptions {
+        tolerance,
+        max_iterations,
+        cycle: CycleKind::try_from(cycle)?,
+        smoother_degree: small_count(smoother_degree, "smoother_degree")?,
+        aggregation_passes: small_count(aggregation_passes, "aggregation_passes")?,
+        coarsest_size,
+        precondition_precision,
+        ..IterativeSolverOptions::default()
+    };
+    options.gpu.outer_loop = GpuOuterLoop::try_from(gpu_outer_loop)?;
+    options.gpu.adapter_preference = AdapterPreference::try_from(adapter_preference)?;
+    options.gpu.max_device_bytes = (max_device_bytes != 0).then_some(max_device_bytes);
+    Ok(options)
+}
+
+/// Enumerate GPU adapters and report which one `IterativeGpu` would use.
+///
+/// Writes a NUL-terminated UTF-8 JSON document of the form
+/// `{"available": bool, "adapters": [{"name", "backend", "device_type",
+/// "shader_f64", "max_storage_buffer_binding_size"}, ...], "chosen": index|null,
+/// "reason": string|null}` into `out_json` when `cap` is large enough.
+///
+/// Returns the number of bytes the document needs **including** the NUL
+/// terminator; the document was written only if that value is `<= cap`.
+/// Call with `cap = 0` (and a null `out_json`) to query the size. Returns
+/// `THESEUS_ERR_PANIC` on an internal panic.
+///
+/// Needs no handle. Without the `gpu` cargo feature the result is always
+/// `available: false` with `reason` explaining that the backend is not built
+/// in; with it, the adapters are enumerated (see `backend::probe_gpu`).
+/// Extra keys may be added over time; readers must ignore unknown keys.
+///
+/// # Safety
+/// `out_json` must point to at least `cap` writable bytes when `cap > 0`.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_gpu_probe(out_json: *mut c_char, cap: usize) -> i32 {
+    match catch_unwind(AssertUnwindSafe(|| crate::backend::probe_gpu().to_json())) {
+        Ok(json) => {
+            let bytes = json.as_bytes();
+            let required = bytes.len() + 1;
+            if cap >= required && !out_json.is_null() {
+                let out = slice::from_raw_parts_mut(out_json as *mut u8, cap);
+                out[..bytes.len()].copy_from_slice(bytes);
+                out[bytes.len()] = 0;
+            }
+            i32::try_from(required).unwrap_or(i32::MAX)
+        }
+        Err(_panic) => {
+            set_last_error("internal panic (this is a bug — please report it)");
+            THESEUS_ERR_PANIC
+        }
+    }
+}
+
+/// Linear-solver totals of the most recent optimisation or forward solve on
+/// a handle (`theseus_get_linear_solver_stats`).
+///
+/// `backend_kind` uses the `theseus_set_linear_solver` encoding. Counters are
+/// sums over every linear solve of the run: `iterations_total` adds the
+/// largest per-column iteration count of each solve, `iterations_max` is the
+/// largest of those, and the millisecond fields sum `SolveStats::solve_ms` /
+/// `setup_ms`. `converged_all` is 1 when every recorded solve converged (so
+/// also when no solve was recorded).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct TheseusLinearSolverStats {
+    pub backend_kind: i32,
+    pub solves: u64,
+    pub iterations_total: u64,
+    pub iterations_max: u32,
+    pub solve_ms_total: f64,
+    pub setup_ms_total: f64,
+    pub converged_all: i32,
+}
+
+impl From<&LinearSolverTotals> for TheseusLinearSolverStats {
+    fn from(t: &LinearSolverTotals) -> Self {
+        Self {
+            backend_kind: t.backend.as_i32(),
+            solves: t.solves,
+            iterations_total: t.iterations_total,
+            iterations_max: t.iterations_max,
+            solve_ms_total: t.solve_ms_total,
+            setup_ms_total: t.setup_ms_total,
+            converged_all: i32::from(t.converged_all),
+        }
+    }
+}
+
+/// Copy the linear-solver totals of the most recent optimisation or forward
+/// solve into `out`.
+///
+/// Before any solve, or after `theseus_set_linear_solver`, the totals are
+/// empty (`solves = 0`) and `backend_kind` is the configured kind. Every
+/// kind, `Direct` included, records each forward, adjoint and load-iteration
+/// solve of the run (`solves`, `solve_ms_total`, `setup_ms_total`); the
+/// iteration counters stay at zero on `Direct`, whose solves are exact.
+///
+/// # Safety
+/// Valid handle; `out` must point to a writable `TheseusLinearSolverStats`.
+#[no_mangle]
+pub unsafe extern "C" fn theseus_get_linear_solver_stats(
+    handle: *mut TheseusHandle,
+    out: *mut TheseusLinearSolverStats,
+) -> i32 {
+    ffi_guard(AssertUnwindSafe(|| {
+        let h = require_handle(handle)?;
+        if out.is_null() {
+            return Err(TheseusError::Shape(
+                "null TheseusLinearSolverStats output pointer".into(),
+            ));
+        }
+        *out = TheseusLinearSolverStats::from(&h.linear_solver_totals);
+        Ok(())
+    }))
+}
+
+/// Reset the handle's linear-solver totals for a new run on the configured
+/// kind.
+///
+/// Called at the start of `theseus_optimize` and `theseus_solve_forward`.
+/// Whether the kind can actually run is decided by the real dispatch:
+/// `FdmCache::new` → `LinearSolver::new` returns
+/// `TheseusError::IterativeSolverUnsupported` for a kind this build does not
+/// provide (or for bounds that permit `q ≤ 0`), which reaches the caller as
+/// `THESEUS_ERR_ITERATIVE_UNSUPPORTED` — never a silent fallback to
+/// `Direct`. On success the run's totals replace the empty ones set here.
+fn begin_linear_solver_run(h: &mut TheseusHandleState) {
+    h.linear_solver_totals = LinearSolverTotals::new(h.problem.solver.linear_solver);
+}
+
+// ─────────────────────────────────────────────────────────────
 //  Self-weight configuration
 // ─────────────────────────────────────────────────────────────
 
@@ -2095,7 +2501,9 @@ pub unsafe extern "C" fn theseus_complete_cancel_scope(
 /// Run L-BFGS optimisation.  Results are written into caller-provided buffers.
 ///
 /// Returns 0 on success, -1 on error (call `theseus_last_error` for details),
-/// -2 on internal panic (a bug).
+/// -2 on internal panic (a bug), and the linear-solver codes -3..-6 (see the
+/// `THESEUS_ERR_*` constants); in this build a handle set to an iterative
+/// linear solver returns -4 before any work is done.
 ///
 /// # Safety
 /// All output buffers must have the correct sizes.
@@ -2172,6 +2580,7 @@ unsafe fn optimize_inner(
     let cancel = run.cancel.clone();
     let result = {
         let h = run.state_mut();
+        begin_linear_solver_run(h);
         let cb = h.progress_callback;
         let freq = h.report_frequency;
         optimizer::optimize(&h.problem, &mut h.state, cb, freq, &cancel)?
@@ -2179,6 +2588,7 @@ unsafe fn optimize_inner(
     run.finish_cancellation_window()?;
     let h = run.state_mut();
     h.last_termination_reason = result.termination_reason.clone();
+    h.linear_solver_totals = result.linear_solver_totals;
 
     let nn = h.problem.topology.num_nodes;
     let ne = h.problem.topology.num_edges;
@@ -2250,7 +2660,9 @@ pub unsafe extern "C" fn theseus_get_loss_trace(
 /// load/GMRES iterations and after a sparse factorization/solve completes. A
 /// single sparse factorization or triangular solve is not interruptible.
 ///
-/// Returns 0 on success, -1 on error, -2 on internal panic.
+/// Returns 0 on success, -1 on error, -2 on internal panic, -4 when the
+/// handle is set to an iterative linear solver that this build does not
+/// provide or that cannot run on the problem (bounds permitting `q ≤ 0`).
 ///
 /// # Safety
 /// Valid handle and output buffers.
@@ -2317,6 +2729,7 @@ unsafe fn solve_forward_inner(
     let cancel = run.cancel.clone();
     let cache = {
         let h = run.state_mut();
+        begin_linear_solver_run(h);
         let mut cache = FdmCache::new(&h.problem)?;
         let anchors = crate::variable_supports::map_latents_to_positions(
             &h.problem,
@@ -2335,6 +2748,7 @@ unsafe fn solve_forward_inner(
     };
     run.finish_cancellation_window()?;
     let h = run.state_mut();
+    h.linear_solver_totals = cache.linear_solver_totals;
 
     let nn = h.problem.topology.num_nodes;
     let ne = h.problem.topology.num_edges;
@@ -3421,6 +3835,649 @@ mod lifecycle_tests {
             assert!((eigenvalue[0] - 2.0).abs() < 1e-10);
             assert!((rotated[1].abs() - 1.0).abs() < 1e-10);
 
+            theseus_free(handle);
+        }
+    }
+}
+
+#[cfg(test)]
+mod linear_solver_ffi_tests {
+    use super::*;
+
+    unsafe fn tiny_handle() -> *mut TheseusHandle {
+        let rows = [0usize, 0];
+        let cols = [0usize, 1];
+        let vals = [-1.0, 1.0];
+        let free = [0usize];
+        let fixed = [1usize];
+        let loads = [0.0, 0.0, -1.0];
+        let fixed_positions = [0.0, 0.0, 0.0];
+        let q = [1.0];
+        let lower = [0.1];
+        let upper = [10.0];
+        let handle = theseus_create(
+            1,
+            2,
+            1,
+            rows.as_ptr(),
+            cols.as_ptr(),
+            vals.as_ptr(),
+            2,
+            free.as_ptr(),
+            fixed.as_ptr(),
+            1,
+            loads.as_ptr(),
+            fixed_positions.as_ptr(),
+            q.as_ptr(),
+            lower.as_ptr(),
+            upper.as_ptr(),
+        );
+        assert!(!handle.is_null());
+        handle
+    }
+
+    fn last_error() -> String {
+        let mut buf = vec![0u8; 1024];
+        let n = unsafe { theseus_last_error(buf.as_mut_ptr(), buf.len()) };
+        String::from_utf8_lossy(&buf[..n.max(0) as usize]).into_owned()
+    }
+
+    unsafe fn set_default_iterative_options(handle: *mut TheseusHandle) -> i32 {
+        theseus_set_iterative_options(
+            handle, 1, 1e-8, 1e-10, 1e-6, 1e-2, 200, 1, 2, 2, 2000, -1, 0, 0, 0,
+        )
+    }
+
+    unsafe fn forward(handle: *mut TheseusHandle) -> i32 {
+        let mut xyz = [0.0; 6];
+        let mut lengths = [0.0; 1];
+        let mut forces = [0.0; 1];
+        let mut q = [0.0; 1];
+        let mut reactions = [0.0; 6];
+        theseus_solve_forward(
+            handle,
+            xyz.as_mut_ptr(),
+            lengths.as_mut_ptr(),
+            forces.as_mut_ptr(),
+            q.as_mut_ptr(),
+            reactions.as_mut_ptr(),
+        )
+    }
+
+    unsafe fn optimize(handle: *mut TheseusHandle) -> i32 {
+        let mut xyz = [0.0; 6];
+        let mut lengths = [0.0; 1];
+        let mut forces = [0.0; 1];
+        let mut q = [0.0; 1];
+        let mut reactions = [0.0; 6];
+        let mut iterations = 0usize;
+        let mut converged = false;
+        theseus_optimize(
+            handle,
+            xyz.as_mut_ptr(),
+            lengths.as_mut_ptr(),
+            forces.as_mut_ptr(),
+            q.as_mut_ptr(),
+            reactions.as_mut_ptr(),
+            &mut iterations,
+            &mut converged,
+        )
+    }
+
+    #[test]
+    fn handle_defaults_to_direct_with_default_iterative_options() {
+        unsafe {
+            let handle = tiny_handle();
+            {
+                let h = require_handle(handle).unwrap();
+                assert_eq!(h.problem.solver.linear_solver, LinearSolverKind::Direct);
+                assert_eq!(
+                    h.problem.solver.iterative,
+                    IterativeSolverOptions::default()
+                );
+                assert_eq!(h.linear_solver_totals, LinearSolverTotals::default());
+            }
+            theseus_free(handle);
+        }
+    }
+
+    #[test]
+    fn set_linear_solver_round_trips_and_rejects_invalid_kinds() {
+        unsafe {
+            let handle = tiny_handle();
+            for kind in [
+                LinearSolverKind::IterativeCpu,
+                LinearSolverKind::IterativeGpu,
+                LinearSolverKind::Direct,
+            ] {
+                assert_eq!(theseus_set_linear_solver(handle, kind.as_i32()), 0);
+                let h = require_handle(handle).unwrap();
+                assert_eq!(h.problem.solver.linear_solver, kind);
+                assert_eq!(h.linear_solver_totals.backend, kind);
+                assert_eq!(h.linear_solver_totals.solves, 0);
+            }
+            assert_eq!(theseus_set_linear_solver(handle, 1), 0);
+            for bad in [-1, 3, i32::MAX] {
+                assert_eq!(theseus_set_linear_solver(handle, bad), THESEUS_ERR_GENERIC);
+                assert!(
+                    last_error().contains("invalid linear solver kind"),
+                    "{}",
+                    last_error()
+                );
+                let h = require_handle(handle).unwrap();
+                assert_eq!(
+                    h.problem.solver.linear_solver,
+                    LinearSolverKind::IterativeCpu,
+                    "an invalid kind must not change the selection"
+                );
+            }
+            assert_eq!(
+                theseus_set_linear_solver(std::ptr::null_mut(), 0),
+                THESEUS_ERR_GENERIC
+            );
+            theseus_free(handle);
+        }
+    }
+
+    #[test]
+    fn set_iterative_options_round_trips_every_field() {
+        unsafe {
+            let handle = tiny_handle();
+            assert_eq!(set_default_iterative_options(handle), 0, "{}", last_error());
+            assert_eq!(
+                require_handle(handle).unwrap().problem.solver.iterative,
+                IterativeSolverOptions::default()
+            );
+
+            assert_eq!(
+                theseus_set_iterative_options(
+                    handle, 0, 1e-9, 0.0, 0.0, 0.0, 50, 0, 3, 1, 500, 1, 2, 1, 0
+                ),
+                0,
+                "{}",
+                last_error()
+            );
+            let h = require_handle(handle).unwrap();
+            let o = &h.problem.solver.iterative;
+            assert_eq!(o.tolerance, TolerancePolicy::Fixed(1e-9));
+            assert_eq!(o.max_iterations, 50);
+            assert_eq!(o.cycle, CycleKind::V);
+            assert_eq!(o.smoother_degree, 3);
+            assert_eq!(o.aggregation_passes, 1);
+            assert_eq!(o.coarsest_size, 500);
+            assert_eq!(o.precondition_precision, Some(Precision::F32));
+            assert_eq!(o.gpu.outer_loop, GpuOuterLoop::Host);
+            assert_eq!(o.gpu.adapter_preference, AdapterPreference::Integrated);
+            assert_eq!(o.gpu.max_device_bytes, None);
+            drop(h);
+
+            assert_eq!(
+                theseus_set_iterative_options(
+                    handle,
+                    1,
+                    0.0,
+                    1e-12,
+                    1e-4,
+                    0.5,
+                    7,
+                    1,
+                    1,
+                    3,
+                    1,
+                    0,
+                    1,
+                    2,
+                    6 << 30
+                ),
+                0,
+                "{}",
+                last_error()
+            );
+            let h = require_handle(handle).unwrap();
+            let o = &h.problem.solver.iterative;
+            assert_eq!(
+                o.tolerance,
+                TolerancePolicy::Adaptive {
+                    floor: 1e-12,
+                    ceiling: 1e-4,
+                    factor: 0.5
+                }
+            );
+            assert_eq!(o.max_iterations, 7);
+            assert_eq!(o.cycle, CycleKind::K);
+            assert_eq!(o.smoother_degree, 1);
+            assert_eq!(o.aggregation_passes, 3);
+            assert_eq!(o.coarsest_size, 1);
+            assert_eq!(o.precondition_precision, Some(Precision::F64));
+            assert_eq!(o.gpu.outer_loop, GpuOuterLoop::Device);
+            assert_eq!(o.gpu.adapter_preference, AdapterPreference::Any);
+            assert_eq!(o.gpu.max_device_bytes, Some(6 << 30));
+            drop(h);
+
+            // 0 maps back to the adapter default (None), and u64::MAX is valid.
+            assert_eq!(
+                theseus_set_iterative_options(
+                    handle,
+                    1,
+                    0.0,
+                    1e-10,
+                    1e-6,
+                    1e-2,
+                    200,
+                    1,
+                    2,
+                    2,
+                    2000,
+                    -1,
+                    0,
+                    0,
+                    u64::MAX
+                ),
+                0
+            );
+            assert_eq!(
+                require_handle(handle)
+                    .unwrap()
+                    .problem
+                    .solver
+                    .iterative
+                    .gpu
+                    .max_device_bytes,
+                Some(u64::MAX)
+            );
+            assert_eq!(set_default_iterative_options(handle), 0);
+            assert_eq!(
+                require_handle(handle)
+                    .unwrap()
+                    .problem
+                    .solver
+                    .iterative
+                    .gpu
+                    .max_device_bytes,
+                None
+            );
+            theseus_free(handle);
+        }
+    }
+
+    #[test]
+    fn set_iterative_options_rejects_invalid_fields_atomically() {
+        unsafe {
+            let handle = tiny_handle();
+            let before = require_handle(handle)
+                .unwrap()
+                .problem
+                .solver
+                .iterative
+                .clone();
+            let cases: [(&str, [f64; 4], [i64; 9]); 16] = [
+                // (label, [tolerance, floor, ceiling, factor],
+                //  [mode, max_iter, cycle, degree, passes, coarsest, precision, outer, adapter])
+                (
+                    "tolerance mode",
+                    [1e-8, 1e-10, 1e-6, 1e-2],
+                    [2, 200, 1, 2, 2, 2000, -1, 0, 0],
+                ),
+                (
+                    "fixed tolerance zero",
+                    [0.0, 1e-10, 1e-6, 1e-2],
+                    [0, 200, 1, 2, 2, 2000, -1, 0, 0],
+                ),
+                (
+                    "fixed tolerance nan",
+                    [f64::NAN, 1e-10, 1e-6, 1e-2],
+                    [0, 200, 1, 2, 2, 2000, -1, 0, 0],
+                ),
+                (
+                    "floor zero",
+                    [1e-8, 0.0, 1e-6, 1e-2],
+                    [1, 200, 1, 2, 2, 2000, -1, 0, 0],
+                ),
+                (
+                    "ceiling inf",
+                    [1e-8, 1e-10, f64::INFINITY, 1e-2],
+                    [1, 200, 1, 2, 2, 2000, -1, 0, 0],
+                ),
+                (
+                    "factor negative",
+                    [1e-8, 1e-10, 1e-6, -1e-2],
+                    [1, 200, 1, 2, 2, 2000, -1, 0, 0],
+                ),
+                (
+                    "floor above ceiling",
+                    [1e-8, 1e-4, 1e-6, 1e-2],
+                    [1, 200, 1, 2, 2, 2000, -1, 0, 0],
+                ),
+                (
+                    "max_iterations zero",
+                    [1e-8, 1e-10, 1e-6, 1e-2],
+                    [1, 0, 1, 2, 2, 2000, -1, 0, 0],
+                ),
+                (
+                    "cycle",
+                    [1e-8, 1e-10, 1e-6, 1e-2],
+                    [1, 200, 2, 2, 2, 2000, -1, 0, 0],
+                ),
+                (
+                    "smoother_degree zero",
+                    [1e-8, 1e-10, 1e-6, 1e-2],
+                    [1, 200, 1, 0, 2, 2000, -1, 0, 0],
+                ),
+                (
+                    "smoother_degree > 255",
+                    [1e-8, 1e-10, 1e-6, 1e-2],
+                    [1, 200, 1, 256, 2, 2000, -1, 0, 0],
+                ),
+                (
+                    "aggregation_passes zero",
+                    [1e-8, 1e-10, 1e-6, 1e-2],
+                    [1, 200, 1, 2, 0, 2000, -1, 0, 0],
+                ),
+                (
+                    "coarsest_size zero",
+                    [1e-8, 1e-10, 1e-6, 1e-2],
+                    [1, 200, 1, 2, 2, 0, -1, 0, 0],
+                ),
+                (
+                    "precision",
+                    [1e-8, 1e-10, 1e-6, 1e-2],
+                    [1, 200, 1, 2, 2, 2000, 2, 0, 0],
+                ),
+                (
+                    "gpu_outer_loop",
+                    [1e-8, 1e-10, 1e-6, 1e-2],
+                    [1, 200, 1, 2, 2, 2000, -1, 3, 0],
+                ),
+                (
+                    "adapter_preference",
+                    [1e-8, 1e-10, 1e-6, 1e-2],
+                    [1, 200, 1, 2, 2, 2000, -1, 0, 3],
+                ),
+            ];
+            for (label, f, i) in cases {
+                let rc = theseus_set_iterative_options(
+                    handle,
+                    i[0] as i32,
+                    f[0],
+                    f[1],
+                    f[2],
+                    f[3],
+                    i[1] as u32,
+                    i[2] as i32,
+                    i[3] as u32,
+                    i[4] as u32,
+                    i[5] as u32,
+                    i[6] as i32,
+                    i[7] as i32,
+                    i[8] as i32,
+                    0,
+                );
+                assert_eq!(rc, THESEUS_ERR_GENERIC, "{label} should be rejected");
+                assert!(
+                    last_error().contains("invalid"),
+                    "{label}: unexpected message {}",
+                    last_error()
+                );
+                assert_eq!(
+                    require_handle(handle).unwrap().problem.solver.iterative,
+                    before,
+                    "{label}: a rejected call must leave the options unchanged"
+                );
+            }
+            // Fixed mode ignores the adaptive fields, adaptive mode ignores `tolerance`.
+            assert_eq!(
+                theseus_set_iterative_options(
+                    handle,
+                    0,
+                    1e-8,
+                    0.0,
+                    f64::NAN,
+                    -1.0,
+                    200,
+                    1,
+                    2,
+                    2,
+                    2000,
+                    -1,
+                    0,
+                    0,
+                    0
+                ),
+                0
+            );
+            assert_eq!(
+                theseus_set_iterative_options(
+                    handle,
+                    1,
+                    f64::NAN,
+                    1e-10,
+                    1e-6,
+                    1e-2,
+                    200,
+                    1,
+                    2,
+                    2,
+                    2000,
+                    -1,
+                    0,
+                    0,
+                    0
+                ),
+                0
+            );
+            theseus_free(handle);
+        }
+    }
+
+    #[test]
+    fn gpu_probe_reports_size_and_writes_well_formed_json() {
+        unsafe {
+            let expected = crate::backend::probe_gpu().to_json();
+            let expected = expected.as_str();
+            let required = theseus_gpu_probe(std::ptr::null_mut(), 0);
+            assert_eq!(required as usize, expected.len() + 1);
+
+            let mut small = vec![0xffu8; 8];
+            assert_eq!(
+                theseus_gpu_probe(small.as_mut_ptr() as *mut c_char, small.len()),
+                required
+            );
+            assert!(
+                small.iter().all(|&b| b == 0xff),
+                "too-small buffer must be untouched"
+            );
+
+            let mut buf = vec![0xffu8; required as usize];
+            assert_eq!(
+                theseus_gpu_probe(buf.as_mut_ptr() as *mut c_char, buf.len()),
+                required
+            );
+            assert_eq!(buf[required as usize - 1], 0, "NUL terminated");
+            let json = std::str::from_utf8(&buf[..required as usize - 1]).unwrap();
+            assert_eq!(json, expected);
+            let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+            assert!(parsed["available"].is_boolean());
+            assert!(parsed["adapters"].is_array());
+            if !cfg!(feature = "gpu") {
+                assert_eq!(parsed["available"], false);
+                assert!(parsed["chosen"].is_null());
+                assert!(parsed["reason"].as_str().unwrap().contains("gpu"));
+            }
+        }
+    }
+
+    #[test]
+    fn stats_export_matches_the_repr_c_layout_and_totals() {
+        // i32 + pad, u64, u64, u32 + pad, f64, f64, i32 + pad — the C layout
+        // mirrored by `[StructLayout(LayoutKind.Sequential)]` on the C# side.
+        assert_eq!(std::mem::size_of::<TheseusLinearSolverStats>(), 56);
+        assert_eq!(std::mem::align_of::<TheseusLinearSolverStats>(), 8);
+        let mut totals = LinearSolverTotals::new(LinearSolverKind::IterativeCpu);
+        totals.record(&crate::linear_solver::SolveStats {
+            iterations: [4, 6, 5],
+            relative_residual: [1e-9; 3],
+            converged: false,
+            setup_ms: 2.0,
+            solve_ms: 3.0,
+            backend: LinearSolverKind::IterativeCpu,
+        });
+        assert_eq!(
+            TheseusLinearSolverStats::from(&totals),
+            TheseusLinearSolverStats {
+                backend_kind: 1,
+                solves: 1,
+                iterations_total: 6,
+                iterations_max: 6,
+                solve_ms_total: 3.0,
+                setup_ms_total: 2.0,
+                converged_all: 0,
+            }
+        );
+
+        unsafe {
+            let handle = tiny_handle();
+            let mut out = TheseusLinearSolverStats {
+                backend_kind: 99,
+                ..Default::default()
+            };
+            assert_eq!(theseus_get_linear_solver_stats(handle, &mut out), 0);
+            assert_eq!(
+                out,
+                TheseusLinearSolverStats {
+                    backend_kind: 0,
+                    converged_all: 1,
+                    ..Default::default()
+                }
+            );
+            assert_eq!(
+                theseus_get_linear_solver_stats(handle, std::ptr::null_mut()),
+                THESEUS_ERR_GENERIC
+            );
+            assert_eq!(
+                theseus_get_linear_solver_stats(std::ptr::null_mut(), &mut out),
+                THESEUS_ERR_GENERIC
+            );
+
+            assert_eq!(forward(handle), 0, "{}", last_error());
+            assert_eq!(theseus_get_linear_solver_stats(handle, &mut out), 0);
+            assert_eq!(out.backend_kind, LinearSolverKind::Direct.as_i32());
+            assert_eq!(out.converged_all, 1);
+            // The direct dispatch records its solves; its iteration counters
+            // stay at zero (exact solves).
+            assert_eq!(out.solves, 1, "one forward solve");
+            assert_eq!(out.iterations_total, 0);
+            assert_eq!(out.iterations_max, 0);
+            assert!(out.solve_ms_total >= 0.0 && out.setup_ms_total >= 0.0);
+
+            let node = [0usize];
+            let target = [0.0, 0.0, -0.5];
+            assert_eq!(
+                theseus_add_target_xyz(handle, 1.0, node.as_ptr(), 1, target.as_ptr(), 0),
+                0
+            );
+            assert_eq!(
+                theseus_set_solver_options(handle, 20, 1e-6, 1e-6, 10.0, 10.0, 1.0),
+                0
+            );
+            assert_eq!(optimize(handle), 0, "{}", last_error());
+            assert_eq!(theseus_get_linear_solver_stats(handle, &mut out), 0);
+            assert_eq!(out.backend_kind, 0);
+            assert_eq!(out.converged_all, 1);
+            let evaluations = theseus_get_loss_trace_len(handle) as u64;
+            assert!(evaluations >= 1);
+            assert!(
+                out.solves >= 2 * evaluations,
+                "each evaluation is at least a forward and an adjoint solve: solves = {}, \
+                 evaluations = {evaluations}",
+                out.solves
+            );
+            assert_eq!(out.iterations_total, 0);
+
+            assert_eq!(theseus_set_linear_solver(handle, 2), 0);
+            assert_eq!(theseus_get_linear_solver_stats(handle, &mut out), 0);
+            assert_eq!(out.backend_kind, 2);
+            assert_eq!(out.solves, 0);
+            theseus_free(handle);
+        }
+    }
+
+    #[test]
+    fn iterative_cpu_solves_through_the_ffi_and_reports_iterations() {
+        unsafe {
+            let handle = tiny_handle();
+            assert_eq!(
+                theseus_set_linear_solver(handle, LinearSolverKind::IterativeCpu.as_i32()),
+                0
+            );
+            assert_eq!(forward(handle), 0, "{}", last_error());
+            let mut out = TheseusLinearSolverStats::default();
+            assert_eq!(theseus_get_linear_solver_stats(handle, &mut out), 0);
+            assert_eq!(out.backend_kind, LinearSolverKind::IterativeCpu.as_i32());
+            assert!(out.solves >= 1, "solves = {}", out.solves);
+            assert!(
+                out.iterations_total >= 1,
+                "iterative solves report iterations"
+            );
+            assert_eq!(out.converged_all, 1);
+
+            assert_eq!(optimize(handle), 0, "{}", last_error());
+            assert_eq!(theseus_get_linear_solver_stats(handle, &mut out), 0);
+            assert!(
+                out.solves >= 2,
+                "forward + adjoint per evaluation: {}",
+                out.solves
+            );
+            assert_eq!(out.converged_all, 1);
+            theseus_free(handle);
+        }
+    }
+
+    #[test]
+    fn unbuilt_iterative_kinds_fail_loudly_before_solving_and_direct_still_works() {
+        unsafe {
+            let handle = tiny_handle();
+            for kind in [LinearSolverKind::IterativeGpu] {
+                assert_eq!(theseus_set_linear_solver(handle, kind.as_i32()), 0);
+
+                assert_eq!(forward(handle), THESEUS_ERR_ITERATIVE_UNSUPPORTED);
+                let msg = last_error();
+                assert!(
+                    msg.contains("not yet available")
+                        && msg.contains(&kind.to_string())
+                        && msg.contains("Direct"),
+                    "{msg}"
+                );
+
+                assert_eq!(optimize(handle), THESEUS_ERR_ITERATIVE_UNSUPPORTED);
+                let msg = last_error();
+                assert!(
+                    msg.contains("not yet available") && msg.contains(&kind.to_string()),
+                    "{msg}"
+                );
+
+                let mut out = TheseusLinearSolverStats::default();
+                assert_eq!(theseus_get_linear_solver_stats(handle, &mut out), 0);
+                assert_eq!(out.backend_kind, kind.as_i32());
+                assert_eq!(out.solves, 0);
+            }
+
+            // The failed attempts must not have poisoned the handle.
+            assert_eq!(theseus_set_linear_solver(handle, 0), 0);
+            assert_eq!(forward(handle), 0, "{}", last_error());
+            let node = [0usize];
+            let target = [0.0, 0.0, -0.5];
+            assert_eq!(
+                theseus_add_target_xyz(handle, 1.0, node.as_ptr(), 1, target.as_ptr(), 0),
+                0
+            );
+            assert_eq!(
+                theseus_set_solver_options(handle, 20, 1e-6, 1e-6, 10.0, 10.0, 1.0),
+                0
+            );
+            assert_eq!(optimize(handle), 0, "{}", last_error());
+            let mut out = TheseusLinearSolverStats::default();
+            assert_eq!(theseus_get_linear_solver_stats(handle, &mut out), 0);
+            assert_eq!(out.backend_kind, 0);
             theseus_free(handle);
         }
     }
