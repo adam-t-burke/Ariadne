@@ -85,10 +85,12 @@ and pick a kind. The choice is saved with the definition (key
 optional **Iterative Options** input; feed it from the **Iterative Solver
 Options** component to change the tolerance schedule, iteration budget,
 multigrid cycle, smoother degree, aggregation passes, coarsest level size,
-preconditioner precision or GPU adapter preference. Leave it empty for the
-defaults (adaptive tolerance `clamp(1e-2 × projected-gradient ratio, 1e-10,
-1e-6)`, 200 iterations, K-cycle, degree-2 Chebyshev smoother, two aggregation
-passes, coarsest level of 2000 nodes, backend-default precision). The same
+preconditioner precision, GPU outer-loop placement, GPU adapter preference or
+the GPU device-memory cap (**Max Device MB**; 0/empty = adapter limit). Leave
+it empty for the defaults (adaptive tolerance `clamp(1e-2 × projected-gradient
+ratio, 1e-10, 1e-6)`, 200 iterations, K-cycle, degree-2 Chebyshev smoother,
+two aggregation passes, coarsest level of 2000 nodes, backend-default
+precision, adapter memory limit). The same
 knobs are exposed to C# through `TheseusSolver.SetLinearSolver` and
 `TheseusSolver.SetIterativeOptions`, and to the config record through
 `OptimizationConfig.LinearSolver` / `.IterativeOptions` (default `Direct`,

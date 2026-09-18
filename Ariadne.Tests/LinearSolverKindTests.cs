@@ -121,6 +121,23 @@ public sealed class LinearSolverKindTests
         Assert.Equal(-1, o.NativePreconditionPrecision);
         Assert.Equal(GpuOuterLoop.Auto, o.GpuOuterLoop);
         Assert.Equal(GpuAdapterPreference.Discrete, o.AdapterPreference);
+        Assert.Null(o.MaxDeviceBytes);
+        Assert.Equal(0UL, o.NativeMaxDeviceBytes);
+    }
+
+    [Fact]
+    public void MaxDeviceBytesMapsToNativeAndFromMegabytes()
+    {
+        Assert.Equal(6UL << 30, new IterativeSolverOptions { MaxDeviceBytes = 6UL << 30 }.NativeMaxDeviceBytes);
+
+        Assert.Null(IterativeSolverOptionsInput.MegabytesToDeviceBytes(0));
+        Assert.Null(IterativeSolverOptionsInput.MegabytesToDeviceBytes(-5));
+        Assert.Equal(1UL << 20, IterativeSolverOptionsInput.MegabytesToDeviceBytes(1));
+        Assert.Equal(4096UL << 20, IterativeSolverOptionsInput.MegabytesToDeviceBytes(4096));
+
+        Assert.NotNull(IterativeSolverOptionsInput.Validate(false, 0, 1e-10, 1e-6, 1e-2, 200, 2, 2, 2000, -1));
+        Assert.Null(IterativeSolverOptionsInput.Validate(false, 0, 1e-10, 1e-6, 1e-2, 200, 2, 2, 2000, 0));
+        Assert.Null(IterativeSolverOptionsInput.Validate(false, 0, 1e-10, 1e-6, 1e-2, 200, 2, 2, 2000, 2048));
     }
 
     [Fact]
@@ -137,10 +154,12 @@ public sealed class LinearSolverKindTests
         var b = new IterativeSolverOptions();
         var c = new IterativeSolverOptions { MaxIterations = 201 };
         var d = new IterativeSolverOptions { PreconditionPrecision = PreconditionerPrecision.F32 };
+        var e = new IterativeSolverOptions { MaxDeviceBytes = 1UL << 30 };
 
         Assert.Equal(a.GetContentHashCode(), b.GetContentHashCode());
         Assert.NotEqual(a.GetContentHashCode(), c.GetContentHashCode());
         Assert.NotEqual(a.GetContentHashCode(), d.GetContentHashCode());
+        Assert.NotEqual(a.GetContentHashCode(), e.GetContentHashCode());
     }
 
     [Fact]
@@ -285,6 +304,8 @@ public sealed class LinearSolverKindTests
         using var solver = CreateForwardSolver();
         solver.SetLinearSolver(kind);
         solver.SetIterativeOptions(new IterativeSolverOptions());
+        solver.SetIterativeOptions(new IterativeSolverOptions { MaxDeviceBytes = 2UL << 30 });
+        solver.SetIterativeOptions(new IterativeSolverOptions { MaxDeviceBytes = ulong.MaxValue });
 
         var forward = Assert.Throws<TheseusException>(() => solver.SolveForward());
         Assert.Equal(-4, forward.NativeCode);

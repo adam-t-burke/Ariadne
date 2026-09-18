@@ -259,7 +259,8 @@ internal static class TheseusInterop
         uint coarsest_size,
         int precondition_precision,
         int gpu_outer_loop,
-        int adapter_preference);
+        int adapter_preference,
+        ulong max_device_bytes);
 
     /// <summary>
     /// Writes a NUL-terminated JSON document into <paramref name="out_json"/> when

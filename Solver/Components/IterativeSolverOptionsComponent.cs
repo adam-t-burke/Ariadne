@@ -63,7 +63,11 @@ public class IterativeSolverOptionsComponent : GH_Component
         pManager.AddIntegerParameter("Coarsest Size", "Coarse",
             "Stop coarsening once a level has fewer nodes than this.",
             GH_ParamAccess.item, (int)IterativeSolverOptions.DefaultCoarsestSize);
+        pManager.AddIntegerParameter("Max Device MB", "DevMB",
+            "GPU only: cap on device memory the solver may allocate, in megabytes. Leave empty or 0 for the adapter's own limit.",
+            GH_ParamAccess.item);
         pManager[0].Optional = true;
+        pManager[8].Optional = true;
     }
 
     protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -90,8 +94,10 @@ public class IterativeSolverOptionsComponent : GH_Component
         DA.GetData(5, ref smoother);
         DA.GetData(6, ref aggPasses);
         DA.GetData(7, ref coarsest);
+        int maxDeviceMb = 0;
+        DA.GetData(8, ref maxDeviceMb);
 
-        string? error = IterativeSolverOptionsInput.Validate(hasFixedTolerance, fixedTolerance, floor, ceiling, factor, maxIter, smoother, aggPasses, coarsest);
+        string? error = IterativeSolverOptionsInput.Validate(hasFixedTolerance, fixedTolerance, floor, ceiling, factor, maxIter, smoother, aggPasses, coarsest, maxDeviceMb);
         if (error is not null)
         {
             AddRuntimeMessage(GH_RuntimeMessageLevel.Error, error);
@@ -113,6 +119,7 @@ public class IterativeSolverOptionsComponent : GH_Component
             PreconditionPrecision = _precision,
             GpuOuterLoop = _gpuOuterLoop,
             AdapterPreference = _adapterPreference,
+            MaxDeviceBytes = IterativeSolverOptionsInput.MegabytesToDeviceBytes(maxDeviceMb),
         };
 
         DA.SetData(0, options);

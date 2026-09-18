@@ -143,9 +143,14 @@ public sealed record IterativeSolverOptions
     public GpuOuterLoop GpuOuterLoop { get; init; } = GpuOuterLoop.Auto;
     /// <summary>Adapter class to prefer on the GPU backend.</summary>
     public GpuAdapterPreference AdapterPreference { get; init; } = GpuAdapterPreference.Discrete;
+    /// <summary>Cap on device memory the GPU solver may allocate, in bytes; null = adapter limit.</summary>
+    public ulong? MaxDeviceBytes { get; init; }
 
     /// <summary>The native encoding of <see cref="PreconditionPrecision"/> (-1 = default).</summary>
     public int NativePreconditionPrecision => PreconditionPrecision is { } p ? (int)p : -1;
+
+    /// <summary>The native encoding of <see cref="MaxDeviceBytes"/> (0 = adapter limit).</summary>
+    public ulong NativeMaxDeviceBytes => MaxDeviceBytes ?? 0;
 
     public int GetContentHashCode()
     {
@@ -163,6 +168,7 @@ public sealed record IterativeSolverOptions
         h.Add(NativePreconditionPrecision);
         h.Add(GpuOuterLoop);
         h.Add(AdapterPreference);
+        h.Add(NativeMaxDeviceBytes);
         return h.ToHashCode();
     }
 }
@@ -869,7 +875,8 @@ public sealed class TheseusSolver : IDisposable
             options.CoarsestSize,
             options.NativePreconditionPrecision,
             (int)options.GpuOuterLoop,
-            (int)options.AdapterPreference));
+            (int)options.AdapterPreference,
+            options.NativeMaxDeviceBytes));
     }
 
     /// <summary>Probe GPU adapters. Needs no handle; see <see cref="GpuProbe.Query"/>.</summary>

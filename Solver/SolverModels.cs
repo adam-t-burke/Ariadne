@@ -69,7 +69,8 @@ public static class IterativeSolverOptionsInput
     public static string? Validate(
         bool hasFixedTolerance, double fixedTolerance,
         double floor, double ceiling, double factor,
-        int maxIter, int smoother, int aggPasses, int coarsest)
+        int maxIter, int smoother, int aggPasses, int coarsest,
+        int maxDeviceMb = 0)
     {
         static bool Positive(double v) => double.IsFinite(v) && v > 0.0;
 
@@ -90,8 +91,17 @@ public static class IterativeSolverOptionsInput
             return "Aggregation Passes must be in 1–255.";
         if (coarsest < 1)
             return "Coarsest Size must be >= 1.";
+        if (maxDeviceMb < 0)
+            return "Max Device MB must be >= 0 (0 = adapter default).";
         return null;
     }
+
+    /// <summary>
+    /// Convert the component's "Max Device MB" input to the option value:
+    /// 0 (or empty) means the adapter's own limit (<c>null</c>).
+    /// </summary>
+    public static ulong? MegabytesToDeviceBytes(int megabytes) =>
+        megabytes > 0 ? (ulong)megabytes << 20 : null;
 }
 
 /// <summary>

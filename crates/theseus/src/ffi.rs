@@ -1781,10 +1781,12 @@ pub unsafe extern "C" fn theseus_set_linear_solver(handle: *mut TheseusHandle, k
 ///   precondition_precision: -1 = backend default (F64 on CPU, F32 on GPU), 0 = F64, 1 = F32
 ///   gpu_outer_loop:          0 = Auto, 1 = Device, 2 = Host
 ///   adapter_preference:      0 = Discrete, 1 = Integrated, 2 = Any
+///   max_device_bytes:        cap on device memory the GPU solver may allocate;
+///                            0 = adapter limit (`None`), any other value = `Some(bytes)`
 ///
 /// Defaults (Rust `IterativeSolverOptions::default()`): Adaptive
 /// (1e-10, 1e-6, 1e-2), 200 iterations, K-cycle, degree 2, 2 passes,
-/// coarsest 2000, default precision, Auto, Discrete.
+/// coarsest 2000, default precision, Auto, Discrete, adapter memory limit.
 ///
 /// # Safety
 /// Valid handle.
@@ -1805,6 +1807,7 @@ pub unsafe extern "C" fn theseus_set_iterative_options(
     precondition_precision: i32,
     gpu_outer_loop: i32,
     adapter_preference: i32,
+    max_device_bytes: u64,
 ) -> i32 {
     ffi_guard(AssertUnwindSafe(|| {
         let mut h = require_handle(handle)?;
@@ -1822,6 +1825,7 @@ pub unsafe extern "C" fn theseus_set_iterative_options(
             precondition_precision,
             gpu_outer_loop,
             adapter_preference,
+            max_device_bytes,
         )?;
         h.problem.solver.iterative = options;
         Ok(())
@@ -1844,6 +1848,7 @@ fn build_iterative_options(
     precondition_precision: i32,
     gpu_outer_loop: i32,
     adapter_preference: i32,
+    max_device_bytes: u64,
 ) -> Result<IterativeSolverOptions, TheseusError> {
     fn positive(value: f64, label: &str) -> Result<f64, TheseusError> {
         if value.is_finite() && value > 0.0 {
@@ -1914,6 +1919,7 @@ fn build_iterative_options(
     };
     options.gpu.outer_loop = GpuOuterLoop::try_from(gpu_outer_loop)?;
     options.gpu.adapter_preference = AdapterPreference::try_from(adapter_preference)?;
+    options.gpu.max_device_bytes = (max_device_bytes != 0).then_some(max_device_bytes);
     Ok(options)
 }
 
@@ -3878,7 +3884,7 @@ mod linear_solver_ffi_tests {
 
     unsafe fn set_default_iterative_options(handle: *mut TheseusHandle) -> i32 {
         theseus_set_iterative_options(
-            handle, 1, 1e-8, 1e-10, 1e-6, 1e-2, 200, 1, 2, 2, 2000, -1, 0, 0,
+            handle, 1, 1e-8, 1e-10, 1e-6, 1e-2, 200, 1, 2, 2, 2000, -1, 0, 0, 0,
         )
     }
 
@@ -3985,7 +3991,7 @@ mod linear_solver_ffi_tests {
 
             assert_eq!(
                 theseus_set_iterative_options(
-                    handle, 0, 1e-9, 0.0, 0.0, 0.0, 50, 0, 3, 1, 500, 1, 2, 1
+                    handle, 0, 1e-9, 0.0, 0.0, 0.0, 50, 0, 3, 1, 500, 1, 2, 1, 0
                 ),
                 0,
                 "{}",
@@ -4007,7 +4013,21 @@ mod linear_solver_ffi_tests {
 
             assert_eq!(
                 theseus_set_iterative_options(
-                    handle, 1, 0.0, 1e-12, 1e-4, 0.5, 7, 1, 1, 3, 1, 0, 1, 2
+                    handle,
+                    1,
+                    0.0,
+                    1e-12,
+                    1e-4,
+                    0.5,
+                    7,
+                    1,
+                    1,
+                    3,
+                    1,
+                    0,
+                    1,
+                    2,
+                    6 << 30
                 ),
                 0,
                 "{}",
@@ -4031,7 +4051,51 @@ mod linear_solver_ffi_tests {
             assert_eq!(o.precondition_precision, Some(Precision::F64));
             assert_eq!(o.gpu.outer_loop, GpuOuterLoop::Device);
             assert_eq!(o.gpu.adapter_preference, AdapterPreference::Any);
+            assert_eq!(o.gpu.max_device_bytes, Some(6 << 30));
             drop(h);
+
+            // 0 maps back to the adapter default (None), and u64::MAX is valid.
+            assert_eq!(
+                theseus_set_iterative_options(
+                    handle,
+                    1,
+                    0.0,
+                    1e-10,
+                    1e-6,
+                    1e-2,
+                    200,
+                    1,
+                    2,
+                    2,
+                    2000,
+                    -1,
+                    0,
+                    0,
+                    u64::MAX
+                ),
+                0
+            );
+            assert_eq!(
+                require_handle(handle)
+                    .unwrap()
+                    .problem
+                    .solver
+                    .iterative
+                    .gpu
+                    .max_device_bytes,
+                Some(u64::MAX)
+            );
+            assert_eq!(set_default_iterative_options(handle), 0);
+            assert_eq!(
+                require_handle(handle)
+                    .unwrap()
+                    .problem
+                    .solver
+                    .iterative
+                    .gpu
+                    .max_device_bytes,
+                None
+            );
             theseus_free(handle);
         }
     }
@@ -4146,6 +4210,7 @@ mod linear_solver_ffi_tests {
                     i[6] as i32,
                     i[7] as i32,
                     i[8] as i32,
+                    0,
                 );
                 assert_eq!(rc, THESEUS_ERR_GENERIC, "{label} should be rejected");
                 assert!(
@@ -4175,6 +4240,7 @@ mod linear_solver_ffi_tests {
                     2000,
                     -1,
                     0,
+                    0,
                     0
                 ),
                 0
@@ -4193,6 +4259,7 @@ mod linear_solver_ffi_tests {
                     2,
                     2000,
                     -1,
+                    0,
                     0,
                     0
                 ),
