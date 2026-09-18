@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using Ariadne.Solver;
 
@@ -28,6 +30,299 @@ public sealed class SolverResult
     /// target. NaN when not applicable or when the Laplacian was singular.
     /// </summary>
     public double GeometricError { get; init; } = double.NaN;
+
+    /// <summary>
+    /// Linear-solver totals of this run (backend used, solves, iterations, time).
+    /// Null for inverse solves, which do not go through the toggle.
+    /// </summary>
+    public LinearSolverStats? LinearSolver { get; init; }
+}
+
+// ── Linear solver selection ──────────────────────────────────
+
+/// <summary>
+/// Which linear solver evaluates the FDM system and its adjoint. Values are
+/// the stable native discriminants (<c>theseus_set_linear_solver</c>).
+/// <see cref="Direct"/> is the default at every layer and is never changed
+/// automatically.
+/// </summary>
+public enum LinearSolverKind
+{
+    /// <summary>Sparse Cholesky / LDLᵀ factorization (default).</summary>
+    Direct = 0,
+    /// <summary>Matrix-free flexible CG with an aggregation-AMG preconditioner on the CPU.</summary>
+    IterativeCpu = 1,
+    /// <summary>Same algorithm with the preconditioner on a wgpu device.</summary>
+    IterativeGpu = 2,
+}
+
+/// <summary>How the relative-residual tolerance of each iterative solve is chosen.</summary>
+public enum IterativeToleranceMode
+{
+    /// <summary>The same relative residual for every solve (<see cref="IterativeSolverOptions.Tolerance"/>).</summary>
+    Fixed = 0,
+    /// <summary>
+    /// <c>tol_k = clamp(Factor · ‖g⁺_k‖/‖g⁺_0‖, Floor, Ceiling)</c> from the optimizer's
+    /// projected-gradient ratio; the first evaluation uses the ceiling.
+    /// </summary>
+    Adaptive = 1,
+}
+
+/// <summary>Multigrid cycle used as the preconditioner.</summary>
+public enum MultigridCycle
+{
+    V = 0,
+    K = 1,
+}
+
+/// <summary>Floating-point precision of the preconditioner.</summary>
+public enum PreconditionerPrecision
+{
+    F64 = 0,
+    F32 = 1,
+}
+
+/// <summary>Where the f64 outer iteration runs for <see cref="LinearSolverKind.IterativeGpu"/>.</summary>
+public enum GpuOuterLoop
+{
+    /// <summary>On the device when it reports SHADER_F64, otherwise on the host.</summary>
+    Auto = 0,
+    /// <summary>Force the device; fails without SHADER_F64.</summary>
+    Device = 1,
+    /// <summary>Force the host (the f32 preconditioner stays on the device).</summary>
+    Host = 2,
+}
+
+/// <summary>Which adapter class to prefer when several GPUs are present.</summary>
+public enum GpuAdapterPreference
+{
+    Discrete = 0,
+    Integrated = 1,
+    Any = 2,
+}
+
+/// <summary>
+/// Parameters of the iterative linear solvers. Defaults match the Rust
+/// <c>IterativeSolverOptions::default()</c>. Ignored when the kind is
+/// <see cref="LinearSolverKind.Direct"/>.
+/// </summary>
+public sealed record IterativeSolverOptions
+{
+    public const uint DefaultMaxIterations = 200;
+    public const uint DefaultSmootherDegree = 2;
+    public const uint DefaultAggregationPasses = 2;
+    public const uint DefaultCoarsestSize = 2000;
+    public const double DefaultToleranceFloor = 1e-10;
+    public const double DefaultToleranceCeiling = 1e-6;
+    public const double DefaultToleranceFactor = 1e-2;
+    public const double DefaultFixedTolerance = 1e-8;
+
+    /// <summary>Tolerance schedule; adaptive by default.</summary>
+    public IterativeToleranceMode ToleranceMode { get; init; } = IterativeToleranceMode.Adaptive;
+    /// <summary>Relative residual of every solve in <see cref="IterativeToleranceMode.Fixed"/> mode.</summary>
+    public double Tolerance { get; init; } = DefaultFixedTolerance;
+    /// <summary>Adaptive schedule floor.</summary>
+    public double ToleranceFloor { get; init; } = DefaultToleranceFloor;
+    /// <summary>Adaptive schedule ceiling (also the first evaluation's tolerance).</summary>
+    public double ToleranceCeiling { get; init; } = DefaultToleranceCeiling;
+    /// <summary>Adaptive schedule factor applied to the projected-gradient ratio.</summary>
+    public double ToleranceFactor { get; init; } = DefaultToleranceFactor;
+    /// <summary>Iteration budget per solve.</summary>
+    public uint MaxIterations { get; init; } = DefaultMaxIterations;
+    /// <summary>Multigrid cycle used as the preconditioner.</summary>
+    public MultigridCycle Cycle { get; init; } = MultigridCycle.K;
+    /// <summary>Chebyshev smoother degree (1..255).</summary>
+    public uint SmootherDegree { get; init; } = DefaultSmootherDegree;
+    /// <summary>Pairwise matching passes per level (1..255).</summary>
+    public uint AggregationPasses { get; init; } = DefaultAggregationPasses;
+    /// <summary>Stop coarsening once a level has fewer nodes than this.</summary>
+    public uint CoarsestSize { get; init; } = DefaultCoarsestSize;
+    /// <summary>Preconditioner precision; null = backend default (F64 on CPU, F32 on GPU).</summary>
+    public PreconditionerPrecision? PreconditionPrecision { get; init; }
+    /// <summary>Placement of the f64 outer iteration on the GPU backend.</summary>
+    public GpuOuterLoop GpuOuterLoop { get; init; } = GpuOuterLoop.Auto;
+    /// <summary>Adapter class to prefer on the GPU backend.</summary>
+    public GpuAdapterPreference AdapterPreference { get; init; } = GpuAdapterPreference.Discrete;
+
+    /// <summary>The native encoding of <see cref="PreconditionPrecision"/> (-1 = default).</summary>
+    public int NativePreconditionPrecision => PreconditionPrecision is { } p ? (int)p : -1;
+
+    public int GetContentHashCode()
+    {
+        var h = new HashCode();
+        h.Add(ToleranceMode);
+        h.Add(Tolerance);
+        h.Add(ToleranceFloor);
+        h.Add(ToleranceCeiling);
+        h.Add(ToleranceFactor);
+        h.Add(MaxIterations);
+        h.Add(Cycle);
+        h.Add(SmootherDegree);
+        h.Add(AggregationPasses);
+        h.Add(CoarsestSize);
+        h.Add(NativePreconditionPrecision);
+        h.Add(GpuOuterLoop);
+        h.Add(AdapterPreference);
+        return h.ToHashCode();
+    }
+}
+
+/// <summary>One GPU adapter reported by <see cref="GpuProbe"/>.</summary>
+public sealed record GpuAdapterInfo
+{
+    public string Name { get; init; } = "";
+    /// <summary>Graphics API ("vulkan", "dx12", "metal", ...).</summary>
+    public string Backend { get; init; } = "";
+    /// <summary>"discrete", "integrated", "cpu" (software) or "other".</summary>
+    public string DeviceType { get; init; } = "";
+    /// <summary>Whether shaders can use 64-bit floats.</summary>
+    public bool ShaderF64 { get; init; }
+    /// <summary>Largest storage-buffer binding, in bytes.</summary>
+    public ulong MaxStorageBufferBindingSize { get; init; }
+}
+
+/// <summary>
+/// Result of the native GPU adapter probe (<c>theseus_gpu_probe</c>).
+/// </summary>
+public sealed class GpuProbe
+{
+    /// <summary>A usable adapter exists.</summary>
+    public bool Available { get; init; }
+    /// <summary>Every adapter seen, in enumeration order.</summary>
+    public IReadOnlyList<GpuAdapterInfo> Adapters { get; init; } = [];
+    /// <summary>Index into <see cref="Adapters"/> of the adapter the solver would use.</summary>
+    public int? ChosenIndex { get; init; }
+    /// <summary>Why no adapter is usable, when <see cref="Available"/> is false.</summary>
+    public string? Reason { get; init; }
+    /// <summary>The raw JSON document returned by the native library.</summary>
+    public string Json { get; init; } = "";
+
+    /// <summary>The adapter the solver would use, if any.</summary>
+    public GpuAdapterInfo? ChosenAdapter =>
+        ChosenIndex is { } i && i >= 0 && i < Adapters.Count ? Adapters[i] : null;
+
+    /// <summary>Human-readable summary for component messages and errors.</summary>
+    public string Describe()
+    {
+        if (Available && ChosenAdapter is { } chosen)
+            return $"{chosen.Name} ({chosen.Backend}, {chosen.DeviceType}{(chosen.ShaderF64 ? ", f64" : "")})";
+        var seen = Adapters.Count == 0
+            ? "no adapters seen"
+            : "adapters seen: " + string.Join("; ", Adapters.Select(a => $"{a.Name} ({a.Backend}, {a.DeviceType})"));
+        return string.IsNullOrEmpty(Reason) ? seen : $"{Reason} ({seen})";
+    }
+
+    /// <summary>Run the native probe. Needs no solver handle.</summary>
+    public static GpuProbe Query()
+    {
+        int required = TheseusInterop.theseus_gpu_probe(null, 0);
+        if (required < 0)
+            throw new TheseusException(TheseusSolver.GetLastError(), required);
+        var buf = new byte[required];
+        int written = TheseusInterop.theseus_gpu_probe(buf, (nuint)buf.Length);
+        if (written < 0)
+            throw new TheseusException(TheseusSolver.GetLastError(), written);
+        if (written > buf.Length)
+            throw new TheseusException($"GPU probe size changed between calls ({required} -> {written}).", -1);
+        int len = Array.IndexOf(buf, (byte)0);
+        if (len < 0) len = buf.Length;
+        return Parse(Encoding.UTF8.GetString(buf, 0, len));
+    }
+
+    /// <summary>Parse the JSON document produced by <c>theseus_gpu_probe</c>.</summary>
+    public static GpuProbe Parse(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        if (root.ValueKind != JsonValueKind.Object)
+            throw new FormatException("GPU probe JSON must be an object.");
+
+        bool available = root.TryGetProperty("available", out var av) && av.ValueKind == JsonValueKind.True;
+
+        var adapters = new List<GpuAdapterInfo>();
+        if (root.TryGetProperty("adapters", out var arr) && arr.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var a in arr.EnumerateArray())
+            {
+                adapters.Add(new GpuAdapterInfo
+                {
+                    Name = GetString(a, "name"),
+                    Backend = GetString(a, "backend"),
+                    DeviceType = GetString(a, "device_type"),
+                    ShaderF64 = a.TryGetProperty("shader_f64", out var f64) && f64.ValueKind == JsonValueKind.True,
+                    MaxStorageBufferBindingSize =
+                        a.TryGetProperty("max_storage_buffer_binding_size", out var mx)
+                        && mx.ValueKind == JsonValueKind.Number
+                        && mx.TryGetUInt64(out ulong size)
+                            ? size
+                            : 0,
+                });
+            }
+        }
+
+        int? chosen = null;
+        if (root.TryGetProperty("chosen", out var ch) && ch.ValueKind == JsonValueKind.Number && ch.TryGetInt32(out int idx))
+            chosen = idx;
+
+        string? reason = null;
+        if (root.TryGetProperty("reason", out var rs) && rs.ValueKind == JsonValueKind.String)
+            reason = rs.GetString();
+
+        return new GpuProbe
+        {
+            Available = available,
+            Adapters = adapters,
+            ChosenIndex = chosen,
+            Reason = reason,
+            Json = json,
+        };
+    }
+
+    private static string GetString(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String
+            ? v.GetString() ?? ""
+            : "";
+}
+
+/// <summary>
+/// Linear-solver totals of one optimisation or forward solve
+/// (<c>theseus_get_linear_solver_stats</c>).
+/// </summary>
+public sealed record LinearSolverStats
+{
+    /// <summary>Solver kind that ran (or was configured when nothing ran).</summary>
+    public LinearSolverKind Backend { get; init; } = LinearSolverKind.Direct;
+    /// <summary>Number of linear solves recorded.</summary>
+    public ulong Solves { get; init; }
+    /// <summary>Sum over solves of the largest per-column iteration count (0 for Direct).</summary>
+    public ulong IterationsTotal { get; init; }
+    /// <summary>Largest per-column iteration count of any single solve.</summary>
+    public uint IterationsMax { get; init; }
+    /// <summary>Sum of solve wall time, milliseconds.</summary>
+    public double SolveMsTotal { get; init; }
+    /// <summary>Sum of setup (factorization / hierarchy update) time, milliseconds.</summary>
+    public double SetupMsTotal { get; init; }
+    /// <summary>Every recorded solve converged (true when none was recorded).</summary>
+    public bool ConvergedAll { get; init; } = true;
+
+    /// <summary>Short display string for component messages.</summary>
+    public string Describe() =>
+        $"Linear solver: {Backend}, {Solves} solve(s), {IterationsTotal} iteration(s)"
+        + (Solves > 0 ? $", {SolveMsTotal + SetupMsTotal:F1} ms" : "")
+        + (ConvergedAll ? "" : ", NOT all converged");
+
+    internal static LinearSolverStats FromNative(in TheseusInterop.TheseusLinearSolverStats s) => new()
+    {
+        Backend = Enum.IsDefined(typeof(LinearSolverKind), s.backend_kind)
+            ? (LinearSolverKind)s.backend_kind
+            : LinearSolverKind.Direct,
+        Solves = s.solves,
+        IterationsTotal = s.iterations_total,
+        IterationsMax = s.iterations_max,
+        SolveMsTotal = s.solve_ms_total,
+        SetupMsTotal = s.setup_ms_total,
+        ConvergedAll = s.converged_all != 0,
+    };
 }
 
 public enum RigidityMethod
@@ -538,6 +833,56 @@ public sealed class TheseusSolver : IDisposable
         Check(TheseusInterop.theseus_set_q_parameterization_mode(_handle, mode));
     }
 
+    // ── Linear solver selection ──────────────────────────────
+
+    /// <summary>
+    /// Select the linear solver for the forward and adjoint systems. The
+    /// default is <see cref="LinearSolverKind.Direct"/>; the iterative kinds
+    /// are not available in this build and make the next solve throw a
+    /// <see cref="TheseusException"/> with native code -4 rather than fall
+    /// back to the direct solver.
+    /// </summary>
+    public void SetLinearSolver(LinearSolverKind kind)
+    {
+        ThrowIfDisposed();
+        if (!Enum.IsDefined(typeof(LinearSolverKind), kind))
+            throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unknown linear solver kind.");
+        Check(TheseusInterop.theseus_set_linear_solver(_handle, (int)kind));
+    }
+
+    /// <summary>Configure the iterative linear solvers (ignored while the kind is Direct).</summary>
+    public void SetIterativeOptions(IterativeSolverOptions options)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(options);
+        Check(TheseusInterop.theseus_set_iterative_options(
+            _handle,
+            (int)options.ToleranceMode,
+            options.Tolerance,
+            options.ToleranceFloor,
+            options.ToleranceCeiling,
+            options.ToleranceFactor,
+            options.MaxIterations,
+            (int)options.Cycle,
+            options.SmootherDegree,
+            options.AggregationPasses,
+            options.CoarsestSize,
+            options.NativePreconditionPrecision,
+            (int)options.GpuOuterLoop,
+            (int)options.AdapterPreference));
+    }
+
+    /// <summary>Probe GPU adapters. Needs no handle; see <see cref="GpuProbe.Query"/>.</summary>
+    public static GpuProbe ProbeGpu() => GpuProbe.Query();
+
+    /// <summary>Linear-solver totals of the most recent optimisation or forward solve.</summary>
+    public LinearSolverStats GetLinearSolverStats()
+    {
+        ThrowIfDisposed();
+        Check(TheseusInterop.theseus_get_linear_solver_stats(_handle, out var native));
+        return LinearSolverStats.FromNative(native);
+    }
+
     // ── Progress callback ─────────────────────────────────────
 
     /// <summary>
@@ -688,7 +1033,14 @@ public sealed class TheseusSolver : IDisposable
             Iterations = (int)iterations,
             Converged = converged != 0,
             TerminationReason = GetTerminationReason(),
+            LinearSolver = TryGetLinearSolverStats(),
         };
+    }
+
+    private LinearSolverStats? TryGetLinearSolverStats()
+    {
+        int rc = TheseusInterop.theseus_get_linear_solver_stats(_handle, out var native);
+        return rc == 0 ? LinearSolverStats.FromNative(native) : null;
     }
 
     private double[] GetLossTrace()
@@ -777,6 +1129,7 @@ public sealed class TheseusSolver : IDisposable
             Reactions = reactions,
             Iterations = 1,
             Converged = true,
+            LinearSolver = TryGetLinearSolverStats(),
         };
     }
 

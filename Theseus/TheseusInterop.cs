@@ -231,6 +231,65 @@ internal static class TheseusInterop
         IntPtr handle,
         int mode);
 
+    // ── Linear solver selection ──────────────────────────────
+
+    /// <summary>kind: 0 = Direct, 1 = IterativeCpu, 2 = IterativeGpu.</summary>
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_set_linear_solver(
+        IntPtr handle,
+        int kind);
+
+    /// <summary>
+    /// tolerance_mode: 0 = Fixed (uses <c>tolerance</c>), 1 = Adaptive (uses floor/ceiling/factor).
+    /// cycle: 0 = V, 1 = K. precondition_precision: -1 = backend default, 0 = F64, 1 = F32.
+    /// gpu_outer_loop: 0 = Auto, 1 = Device, 2 = Host. adapter_preference: 0 = Discrete, 1 = Integrated, 2 = Any.
+    /// </summary>
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_set_iterative_options(
+        IntPtr handle,
+        int tolerance_mode,
+        double tolerance,
+        double tolerance_floor,
+        double tolerance_ceiling,
+        double tolerance_factor,
+        uint max_iterations,
+        int cycle,
+        uint smoother_degree,
+        uint aggregation_passes,
+        uint coarsest_size,
+        int precondition_precision,
+        int gpu_outer_loop,
+        int adapter_preference);
+
+    /// <summary>
+    /// Writes a NUL-terminated JSON document into <paramref name="out_json"/> when
+    /// <paramref name="cap"/> is large enough. Returns the required size in bytes
+    /// including the terminator (negative on internal panic); the document was
+    /// written only when the return value is &lt;= <paramref name="cap"/>.
+    /// </summary>
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_gpu_probe(
+        byte[]? out_json,
+        nuint cap);
+
+    /// <summary>Mirror of the Rust <c>#[repr(C)] TheseusLinearSolverStats</c>.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct TheseusLinearSolverStats
+    {
+        public int backend_kind;
+        public ulong solves;
+        public ulong iterations_total;
+        public uint iterations_max;
+        public double solve_ms_total;
+        public double setup_ms_total;
+        public int converged_all;
+    }
+
+    [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int theseus_get_linear_solver_stats(
+        IntPtr handle,
+        out TheseusLinearSolverStats out_stats);
+
     // ── Self-weight configuration ────────────────────────────
 
     [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
