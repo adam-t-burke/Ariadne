@@ -1246,7 +1246,7 @@ impl FdmCache {
                 .lower
                 .iter()
                 .enumerate()
-                .find(|(_, &lb)| !(lb > 0.0))
+                .find(|(_, &lb)| lb <= 0.0 || lb.is_nan())
             {
                 return Err(TheseusError::IterativeSolverUnsupported(format!(
                     "q may be non-positive under these bounds (edge {k} has lower bound {lb}), so \
