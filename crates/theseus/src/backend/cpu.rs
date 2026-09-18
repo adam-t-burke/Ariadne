@@ -42,15 +42,26 @@ pub const PAR_MIN_LEN: usize = 16_384;
 //  Chunked loops and fixed-order reductions
 // ─────────────────────────────────────────────────────────────
 
+/// Whether a loop over `len` elements should run on the calling thread:
+/// below [`PAR_MIN_LEN`] elements, or when the current rayon pool has a
+/// single thread (there is nothing to gain and the scheduling round trip
+/// costs more than the work). The chunked computation is the same either
+/// way, so this never changes a result.
+#[inline]
+pub fn run_sequential(len: usize) -> bool {
+    len < PAR_MIN_LEN || rayon::current_num_threads() == 1
+}
+
 /// Run `f(start, chunk)` over consecutive `chunk`-element pieces of `data`
 /// (the last one may be shorter); `start` is the index of `chunk[0]` in
-/// `data`. Parallel when `data.len() >= PAR_MIN_LEN`.
+/// `data`. Parallel when `data.len() >= PAR_MIN_LEN` and the pool has more
+/// than one thread.
 pub fn for_each_chunk_mut<T: Send>(
     data: &mut [T],
     chunk: usize,
     f: impl Fn(usize, &mut [T]) + Sync,
 ) {
-    if data.len() < PAR_MIN_LEN {
+    if run_sequential(data.len()) {
         for (c, piece) in data.chunks_mut(chunk).enumerate() {
             f(c * chunk, piece);
         }
@@ -81,7 +92,7 @@ pub fn for_each_chunk_mut2<A: Send, B: Send>(
         b.len().div_ceil(chunk_b),
         "for_each_chunk_mut2: slices yield different chunk counts"
     );
-    if a.len() < PAR_MIN_LEN {
+    if run_sequential(a.len()) {
         for (c, (pa, pb)) in a.chunks_mut(chunk_a).zip(b.chunks_mut(chunk_b)).enumerate() {
             f(c * chunk_a, pa, pb);
         }
@@ -100,7 +111,7 @@ pub fn for_each_chunk_mut2<A: Send, B: Send>(
 pub fn deterministic_sum(len: usize, f: impl Fn(Range<usize>) -> f64 + Sync) -> f64 {
     let chunk_range = |c: usize| c * CHUNK..((c + 1) * CHUNK).min(len);
     let n_chunks = len.div_ceil(CHUNK);
-    if len < PAR_MIN_LEN {
+    if run_sequential(len) {
         let mut total = 0.0;
         for c in 0..n_chunks {
             total += f(chunk_range(c));
@@ -507,7 +518,7 @@ fn dot3_t<T: CpuScalar>(partials: &Mutex<Vec<[f64; 3]>>, a: &[T], b: &[T]) -> [f
     let chunk = CHUNK * 3;
     let n_chunks = a.len().div_ceil(chunk);
     let mut total = [0.0f64; 3];
-    if a.len() < PAR_MIN_LEN {
+    if run_sequential(a.len()) {
         for (ca, cb) in a.chunks(chunk).zip(b.chunks(chunk)) {
             let p = dot_chunk(ca, cb);
             total[0] += p[0];

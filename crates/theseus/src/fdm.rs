@@ -1,6 +1,6 @@
 //! Forward FDM solver: assemble A(q), build RHS, factorise, triangular solve.
 
-use crate::backend::cpu::{for_each_chunk_mut, for_each_chunk_mut2, CHUNK};
+use crate::backend::cpu::{for_each_chunk_mut, for_each_chunk_mut2, run_sequential, CHUNK};
 use crate::linear_solver::direct;
 use crate::types::{FdmCache, PressureParams, Problem, SelfWeightParams, TheseusError};
 use ndarray::Array2;
@@ -264,24 +264,58 @@ fn solve_fdm_cancellable(
 /// Compute member lengths, forces, and reactions from current positions and q.
 /// Uses max(0, …) before sqrt to avoid NaN from floating-point negative squared length.
 ///
-/// Two chunked passes (parallel above [`PAR_MIN_LEN`] elements): one over
-/// the edges for lengths and forces, one over the nodes gathering the
-/// reactions `R_u = Σ_{e ∋ u} q_e (x_other − x_u)` from the CSR adjacency.
-/// Incident edges are listed in ascending edge order, so each node's sum is
-/// accumulated in exactly the order of the sequential edge-scatter loop;
-/// results are bitwise identical to it for any thread count.
+/// Parallel form (more than [`PAR_MIN_LEN`] elements and a pool of more than
+/// one thread): two chunked passes, one over the edges for lengths and
+/// forces, one over the nodes gathering the reactions
+/// `R_u = Σ_{e ∋ u} q_e (x_other − x_u)` from the CSR adjacency. Incident
+/// edges are listed in ascending edge order, so each node's sum is
+/// accumulated in exactly the order of the sequential edge-scatter loop.
+///
+/// Sequential form (small problems, or a single-thread pool): one fused
+/// pass over the edges scattering the reactions to both endpoints, which
+/// touches each edge once instead of three times. Both forms are bitwise
+/// identical (`tests/graph_loops_determinism.rs`).
 ///
 /// [`PAR_MIN_LEN`]: crate::backend::cpu::PAR_MIN_LEN
 pub fn compute_geometry(cache: &mut FdmCache, problem: &Problem) {
     let _ = problem;
+    let ne = cache.member_lengths.len();
     let nf = cache
         .nf
         .as_slice()
         .expect("node positions must be contiguous row-major");
     let q = &cache.q;
-
     let starts = &cache.edge_starts;
     let ends = &cache.edge_ends;
+    let reactions = cache
+        .reactions
+        .as_slice_mut()
+        .expect("reactions must be contiguous row-major");
+
+    if run_sequential(reactions.len()) {
+        reactions.fill(0.0);
+        for i in 0..ne {
+            let s = starts[i] * 3;
+            let e = ends[i] * 3;
+            let qi = q[i];
+            let dx = nf[e] - nf[s];
+            let dy = nf[e + 1] - nf[s + 1];
+            let dz = nf[e + 2] - nf[s + 2];
+            let len_sq = dx * dx + dy * dy + dz * dz;
+            let len = len_sq.max(0.0).sqrt();
+            cache.member_lengths[i] = len;
+            cache.member_forces[i] = qi * len;
+            let (rx, ry, rz) = (dx * qi, dy * qi, dz * qi);
+            reactions[s] += rx;
+            reactions[s + 1] += ry;
+            reactions[s + 2] += rz;
+            reactions[e] -= rx;
+            reactions[e + 1] -= ry;
+            reactions[e + 2] -= rz;
+        }
+        return;
+    }
+
     for_each_chunk_mut2(
         &mut cache.member_lengths,
         CHUNK,
@@ -308,10 +342,6 @@ pub fn compute_geometry(cache: &mut FdmCache, problem: &Problem) {
     // at node `u`, and since IEEE negation is exact the branch-free form is
     // bitwise identical to the scatter.
     let adjacency = &cache.adjacency;
-    let reactions = cache
-        .reactions
-        .as_slice_mut()
-        .expect("reactions must be contiguous row-major");
     for_each_chunk_mut(reactions, CHUNK * 3, |start, chunk| {
         for (j, row) in chunk.chunks_exact_mut(3).enumerate() {
             let u = start / 3 + j;

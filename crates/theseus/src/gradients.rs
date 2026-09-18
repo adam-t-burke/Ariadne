@@ -614,6 +614,35 @@ pub fn accumulate_explicit_gradients(cache: &mut FdmCache, problem: &Problem) {
 //  Per-objective gradient implementations
 // ─────────────────────────────────────────────────────────────
 
+/// Chunked gather over the rows of `grad_x` (free nodes): `entry_of_row(row)`
+/// is the list entry of that row's node, if listed, and `grad(i, position)`
+/// its contribution; components `d < dims` are added. Parallel above
+/// `PAR_MIN_LEN` elements on pools with more than one thread.
+fn gather_node_position_grads(
+    grad_x: &mut [f64],
+    nf: &[f64],
+    free_node_indices: &[usize],
+    dims: usize,
+    grad: &(impl Fn(usize, &[f64; 3]) -> [f64; 3] + Sync),
+    entry_of_row: impl Fn(usize) -> Option<usize> + Sync,
+) {
+    for_each_chunk_mut(grad_x, CHUNK * 3, |start, chunk| {
+        for (j, row) in chunk.chunks_exact_mut(3).enumerate() {
+            let free_row = start / 3 + j;
+            if let Some(i) = entry_of_row(free_row) {
+                let node = free_node_indices[free_row];
+                let pos: &[f64; 3] = nf[node * 3..node * 3 + 3]
+                    .try_into()
+                    .expect("3 coordinates");
+                let g = grad(i, pos);
+                for (out, &value) in row.iter_mut().zip(&g).take(dims) {
+                    *out += value;
+                }
+            }
+        }
+    });
+}
+
 /// Add per-node position gradients for a list of target nodes.
 ///
 /// `grad(i, position)` returns the contribution of list entry `i` (node
@@ -621,7 +650,9 @@ pub fn accumulate_explicit_gradients(cache: &mut FdmCache, problem: &Problem) {
 /// `grad_x` (free node) or `grad_nf` (fixed node).
 ///
 /// When the list is long (`3 · len ≥ PAR_MIN_LEN`) and its nodes are
-/// distinct, the free-node part runs as a chunked parallel gather over the
+/// distinct, the free-node part runs as a chunked gather (parallel when the
+/// pool has more than one thread; the gather is also the cheaper form on
+/// one thread, as it skips the per-node free-index lookups) over the
 /// rows of `grad_x` through an inverse node → entry map, and the fixed-node
 /// part sequentially. Every `(node, d)` receives exactly one addition in
 /// either form, so the result is bitwise identical to the sequential loop,
@@ -641,33 +672,13 @@ fn accumulate_node_position_grads(
             .nf
             .as_slice()
             .expect("node positions must be contiguous row-major");
-        // Chunked gather over the free rows; `entry_of_row(row)` is the list
-        // entry of that row's node, if listed.
-        let gather = |grad_x: &mut [f64],
-                      entry_of_row: &(dyn Fn(usize) -> Option<usize> + Sync)| {
-            for_each_chunk_mut(grad_x, CHUNK * 3, |start, chunk| {
-                for (j, row) in chunk.chunks_exact_mut(3).enumerate() {
-                    let free_row = start / 3 + j;
-                    if let Some(i) = entry_of_row(free_row) {
-                        let node = free_node_indices[free_row];
-                        let pos: &[f64; 3] = nf[node * 3..node * 3 + 3]
-                            .try_into()
-                            .expect("3 coordinates");
-                        let g = grad(i, pos);
-                        for d in 0..dims {
-                            row[d] += g[d];
-                        }
-                    }
-                }
-            });
-        };
         let grad_x = cache
             .grad_x
             .as_slice_mut()
             .expect("grad_x must be contiguous row-major");
         if node_indices == free_node_indices {
             // The common "every free node" list: entry i is free row i.
-            gather(grad_x, &Some);
+            gather_node_position_grads(grad_x, nf, free_node_indices, dims, &grad, Some);
             return;
         }
         let mut entry_of_node = vec![u32::MAX; nn];
@@ -684,7 +695,7 @@ fn accumulate_node_position_grads(
             }
         }
         if distinct {
-            gather(grad_x, &|free_row| {
+            gather_node_position_grads(grad_x, nf, free_node_indices, dims, &grad, |free_row| {
                 let i = entry_of_node[free_node_indices[free_row]];
                 (i != u32::MAX).then_some(i as usize)
             });
