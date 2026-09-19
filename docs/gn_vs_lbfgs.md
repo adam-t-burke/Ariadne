@@ -200,60 +200,188 @@ Cases: the presentation showcase plus the easy hanging quad `quad21c`
 
 ## 4. Results
 
-*Filled in after `warm_start_bench tradeoff` on this branch. Numbers are
-`geom/L` unless noted.*
+Release run of `warm_start_bench tradeoff` on this branch (12 cases, 5.4 s).
+Full residual tables (force, max/RMS nodal, projected gradient, active
+bounds, factorisations, eval traces) are in
+[`bench/figures/data/tradeoff.txt`](../bench/figures/data/tradeoff.txt).
+Numbers below are `geom/L` unless noted.
+
+![geometric error bars](figures/tradeoff_geom_bars.png)
 
 ### 4.1 Cross-case geometric error
 
-<!-- TRADEOFF_SUMMARY -->
+| case | s1 | frozen1 | gn2 | pipe | s1+lb10 | fr+lb10 | (s1+lb10)/fr | (s1+lb10)/pipe |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| quad21c jit loose | 116.7 | 0.484 | 28.4 | 0.180 | 0.881 | 0.156 | 1.82 | 4.90 |
+| cabledome jit loose | 4.35 | 0.303 | 1.98 | 0.115 | 1.17 | 0.101 | 3.85 | 10.2 |
+| cabledome bump snug | 0.239 | 0.043 | 0.016 | 0.0079 | 0.084 | 0.0092 | 1.95 | 10.6 |
+| hypar21m jit loose | 51.7 | 0.074 | 12.8 | 0.061 | 21.8 | 0.069 | **295** | **356** |
+| cabletruss16 jit loose | 1.87 | 0.016 | 0.340 | 0.012 | 0.878 | 0.013 | **55** | **76** |
+| quad21c_d1 jit loose | 219 | 129 | 72.3 | 77.1 | **0.965** | 8.96 | 0.007 | 0.013 |
+| holes21c jit loose | 148 | 0.876 | 36.1 | 0.726 | 0.750 | 0.179 | 0.86 | 1.03 |
+| crease21 jit loose | 5.45 | 0.070 | 0.685 | 0.043 | 2.99 | 0.051 | **43** | **70** |
+| barrel16x12 jit loose | 1.85 | 0.037 | 0.138 | 0.031 | 0.224 | 0.036 | 6.0 | 7.3 |
+| wheel24a4 jit loose | 0.091 | 0.013 | 0.013 | 0.013 | 0.037 | 0.013 | 2.9 | 2.9 |
+| tiedarch16 jit loose | 0.532 | 0.019 | 0.059 | 0.0089 | 0.229 | 0.012 | 12.2 | 25.6 |
+| oculus21h7 bump loose | 0.019 | 0.0049 | 0.0048 | 0.0048 | 0.0073 | 0.0049 | 1.5 | 1.5 |
 
-*(table inserted after the run)*
+**H1 holds on the mixed-sign / self-stressed seeds.** Ten accepted
+L-BFGS-B steps from `q*` (history saturated) do not match one frozen CWLS
+step: 295× worse on the hypar, 55× on the cable truss, 43× on the crease,
+12× on the tied arch, 4× on the jittered dome. Twenty L-BFGS-B steps still
+leave the hypar at 6.33 versus frozen's 0.074.
 
-### 4.2 Residual anatomy on a well-behaved net and a collapsed one
+**H2 is only weakly supported.** The shallow hanging quad is *not* a small
+residual problem — Stage 1 sits at `e/L = 117` — but the missing correction
+is closer to a global scale. One L-BFGS-B step already drops it to 2.77;
+ten reach 0.88, twenty match the frozen step (0.48). Ten steps are not
+enough to *beat* one CWLS solve, but they get within a factor of two.
 
-<!-- TRADEOFF_DETAIL -->
+**The deep-quad exception (quad21c_d1) refutes a blanket “always linearise
+first”.** Stage 1 is 219 L off. Frozen CWLS with `D` held at that `q*`
+clips 325 edges and only reaches 129; two GN steps without the guard end
+at 72–77. A single L-BFGS-B line search on the *exact* `f` drops to 2.98,
+and ten steps to 0.97 — better than the un-guarded pipeline. The seed
+guard is what saves the production path (`pipe_guard = 0.66`, racing the
+uniform seed). So: when the frozen linearisation itself fails (terrible
+`D(q*)`, box eats the step), skipping it and taking exact-`f` L-BFGS-B
+*is* the better move. That is a different failure mode from the
+mixed-sign nets, where frozen succeeds and L-BFGS-B from `q*` does not.
 
-*(per-case residual tables inserted after the run)*
+**H3 holds.** Pure GN from `q*` (no frozen) is a poor first linearisation
+when `x(q*)` is collapsed: `gn2` is 12.8 on the hypar versus frozen 0.074,
+1.98 versus 0.30 on the dome, 0.34 versus 0.016 on the truss. Once the
+seed is already close (snug dome, oculus, wheel) GN without frozen matches
+or beats frozen, as expected — `E(x(q*)) ≈ E(x*)`.
+
+**H4 holds.** Trading the two GN steps for ten L-BFGS-B steps *after* one
+frozen CWLS is a close contest: `frozen1+lb10` is within 20 % of `pipe` on
+the dome, hypar, truss, barrel, wheel, arch and oculus, and *better* than
+`pipe` on the jittered dome (0.101 vs 0.115) and the hanging quad (0.156
+vs 0.180). That is the fair “GN is heavier, give the budget to
+quasi-Newton” comparison — and it only works *after* the metric has been
+changed.
+
+![10 L-BFGS from q* vs linearised starts](figures/tradeoff_lb10_ratio.png)
+
+### 4.2 Residual anatomy
+
+Two cases, in full. `‖r‖` is `‖E(x*)q − p‖`; `‖∇f‖∞` is the projected
+gradient of the SSE.
+
+**Hypar (mixed-sign, Stage 1 collapsed).** Frozen changes the metric in
+one saddle solve; L-BFGS-B from `q*` never finds the hoop/strut balance
+in 20 steps.
+
+| method | ms | fac | geom/L | max/L | ‖r‖ | ‖r‖/‖p‖ | ‖∇f‖∞ | active |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| s1 | 19 | — | 51.7 | 4.79 | 1.06 | 1.02 | 2.4e6 | 10 |
+| frozen1 | 56 | 7 | 0.074 | 0.012 | 31.4 | 30.0 | 0.27 | 9 |
+| gn2 | 97 | 16 | 12.8 | 1.18 | 1.79 | 1.72 | 4.1e4 | 35 |
+| pipe | 100 | 16 | 0.061 | 0.008 | 32.6 | 31.2 | 1.46 | 6 |
+| s1+lb1 | 2.5 | — | 43.9 | 5.48 | 1.07 | 1.03 | 1.3e6 | 9 |
+| s1+lb10 | 4.4 | — | 21.8 | 3.70 | 1.43 | 1.37 | 1.9e5 | 79 |
+| s1+lb20 | 7.0 | — | 6.33 | 0.83 | 12.7 | 12.1 | 1.1e4 | 58 |
+| frozen1+lb10 | 3.0 | — | 0.069 | 0.007 | 31.5 | 30.1 | 0.16 | 2 |
+
+Force residual *rises* from 1.06 to 31 when geometry drops 700×. Stage 1
+was near-optimal for `‖r‖` and useless for `e(q)`. Ten L-BFGS-B steps
+from `q*` still have `‖∇f‖∞ = 1.9×10⁵`; after one frozen step it is 0.27.
+
+**Cable dome, jittered, loose.** Same pattern, smaller numbers.
+
+| method | ms | fac | geom/L | max/L | ‖r‖ | ‖r‖/‖p‖ | ‖∇f‖∞ |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| s1 | 4.4 | — | 4.35 | 1.23 | 7.06 | 0.53 | 2.1e5 |
+| frozen1 | 9.6 | 5 | 0.303 | 0.190 | 26.2 | 1.97 | 1.5e3 |
+| gn2 | 10 | 5 | 1.98 | 0.699 | 31.7 | 2.38 | 5.9e4 |
+| pipe | 15 | 10 | 0.115 | 0.064 | 27.8 | 2.09 | 276 |
+| s1+lb10 | 1.5 | — | 1.17 | 0.188 | 12.0 | 0.90 | 136 |
+| s1+lb20 | 2.6 | — | 1.00 | 0.150 | 14.3 | 1.07 | 67 |
+| frozen1+lb10 | 1.6 | — | 0.101 | 0.063 | 26.3 | 1.98 | 21 |
+
+Ten L-BFGS-B steps cost 1.5 ms versus 9.6 ms for the frozen step — about
+6× cheaper — and land 4× further from the target. After the frozen step,
+ten L-BFGS-B steps (1.6 ms) beat two GN steps (the rest of `pipe`, ~5 ms
+on top of frozen) on this case.
+
+![force residual vs geometric error](figures/tradeoff_force_vs_geom.png)
+
+Orange Stage-1 points sit at *small* `‖r‖/‖p‖` and *large* `e/L`. Green
+frozen points sit the other way around. That is the metric change in one
+scatter.
 
 ### 4.3 Direction cosine of the first step
 
-The cosine between `q_frozen − q*` and `q_{L-BFGS,1} − q*` tests §1.4: if
-the first L-BFGS step were a damped CWLS step the cosine would be near 1.
+`Δ` is the `q`-space move from `q*`. Cosine 1 would mean the first
+L-BFGS-B step is a damped CWLS / GN step.
 
-<!-- TRADEOFF_COSINE -->
+| case | ⟨fr, lb1⟩ | ⟨fr, gn1⟩ | ⟨gn1, lb1⟩ | ‖Δfr‖ | ‖Δgn‖ | ‖Δlb1‖ |
+|---|---:|---:|---:|---:|---:|---:|
+| quad21c | 0.57 | 0.32 | 0.30 | 69 | 3.6 | 66 |
+| cabledome jit | **0.026** | 0.985 | 0.020 | 151 | 37 | 2.9 |
+| cabledome snug | **0.013** | 0.993 | 0.015 | 185 | 104 | 0.12 |
+| hypar21m | 0.15 | 0.977 | 0.15 | 202 | **1.8** | 0.17 |
+| cabletruss16 | 0.55 | 0.89 | 0.50 | 26 | 5.0 | 0.11 |
+| quad21c_d1 | 0.32 | 0.12 | 0.17 | 125 | 15 | 22 |
+| crease21 | 0.18 | 0.72 | 0.20 | 56 | 17 | 794 |
+| wheel24a4 | **0.034** | 0.995 | 0.037 | 18 | 15 | 0.35 |
+| oculus21h7 | **0.007** | 1.00 | 0.007 | 3.5 | 3.5 | 0.041 |
+
+On mixed-sign nets the frozen and GN *directions* agree (cosine 0.98–1.00)
+but GN takes a much *shorter* step (hypar: 1.8 versus 202) because
+`E(x(q*))` is a bad Jacobian and the merit line search cuts the step.
+The first L-BFGS-B step is nearly orthogonal to both (cosine 0.01–0.15)
+and tiny. That is §1.4 in numbers: saturating a rank-10 history later
+cannot recover a first step that pointed the wrong way.
+
+On the hanging quad the first L-BFGS-B step *is* a rough scale correction
+(cosine 0.57, comparable length to frozen). That is why H2 is only
+“weakly” true — the useful subspace is low-dimensional enough for a
+gradient step plus nine BFGS updates to get close, not to replace the
+CWLS solve.
+
+![L-BFGS evaluation traces](figures/tradeoff_lbfgs_traces.png)
+
+Red (`s1+lb*`) stays an order of magnitude above the green frozen level
+on the dome, hypar and truss; it *crosses below* the frozen/pipe levels
+only on the deep quad, where those linearisations failed.
 
 ---
 
 ## 5. Reading the tradeoff
 
-Cost, qualitatively, on these 400–800-edge nets:
+![cost vs error](figures/tradeoff_cost_vs_error.png)
 
-* one frozen / GN step: a few numeric LDLs of the weighted saddle, typically
-  a handful of milliseconds, but the constant is the *larger* KKT and the
-  active-set passes
-* one L-BFGS-B iteration: one `D`-factor + adjoint + 0–few line-search
-  forwards, typically cheaper per iteration, 10–20 of them to fill history
+On these 50–840-edge nets a frozen / GN step is 5–20× more expensive than
+ten L-BFGS-B iterations (hypar: 56 ms vs 4.4 ms; hanging quad: 67 ms vs
+4.6 ms). The cost question is real. The quality question is not close
+once the seed is mixed-sign or self-stressed:
 
-The question is not “is L-BFGS cheaper per iteration” — it is — but whether
-ten of those iterations substitute for the change of metric that one CWLS
-step performs in closed form.
+1. **Skipping the linearisation and taking 10 L-BFGS-B steps from `q*` is
+   not a substitute for one frozen CWLS step** on the nets the pipeline
+   was built for (dome, hypar, truss, crease, arch). History saturation
+   does not invert `D⁻²` and does not see `E(x*)`.
+2. **Skipping the frozen Jacobian and going straight to GN is worse**,
+   not better, while `x(q*)` is collapsed. GN and L-BFGS both use
+   `E(x(q*))`; frozen uses `E(x*)`. That is the whole point of the first
+   linearisation.
+3. **The honest place to spend L-BFGS-B instead of GN is after one
+   frozen step.** `frozen1+lb10` matches `pipe` on almost every case at a
+   fraction of the saddle-LDL cost of the two GN steps. That is the
+   tradeoff that the numbers support.
+4. **When the frozen step itself fails** (deep hanging quad, 325 bounds
+   active, `D(q*)` a terrible metric), exact-`f` L-BFGS-B from `q*` wins
+   and the seed guard — not more GN — is the right Stage-2 fix.
+5. **Force residual is the wrong stopping test.** Geometric methods
+   routinely raise `‖r‖` by 10–30× while cutting `e(q)` by 10–700×.
 
-Predicted outcome, to be confirmed or refuted by §4:
-
-1. Skipping the linearisation and taking 10 L-BFGS-B steps from `q*` is
-   **not** a substitute for one frozen CWLS step on mixed-sign / collapsed
-   seeds. The gradient at a bad `x(q*)` does not invert `D⁻²` and does not
-   see `E(x*)`.
-2. On a shallow hanging quad, 10 L-BFGS-B steps from `q*` can land close to
-   a frozen or GN warm start, because the missing correction is
-   low-dimensional.
-3. Two GN steps after a frozen step still win on the hardest seeds (cable
-   dome, hypar, truss). Ten L-BFGS-B steps *after* the frozen step are the
-   fair “trade the remaining GN budget for quasi-Newton” comparison, and
-   that comparison can go either way once the geometry is no longer
-   collapsed.
-4. Force residual at `q*` is the wrong stopping test. Geometric methods
-   routinely raise `‖r‖` while cutting `e(q)` by 10–100×.
+So: a few GN steps are computationally heavier than ten L-BFGS-B steps,
+and they are worth it only as a *continuation of a frozen CWLS step*,
+not as a replacement for handing `q*` to the nonlinear optimiser. Ten
+L-BFGS-B steps without that first linearisation do not get just as
+close, except on the one case where the linearisation itself did
+nothing.
 
 ---
 
