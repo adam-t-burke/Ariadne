@@ -104,6 +104,14 @@ target x*, loads p, box [lo,hi]
 
 Default budget: one frozen step, two Gauss--Newton steps (`max_frozen_outer =
 1`, `max_outer = 2`), i.e. three sparse least-squares solves plus the probes.
+Do not drop the frozen step; it is the metric change. Do not generally drop
+the Gauss--Newton steps either — they are already skipped when the frozen
+step has solved a reachable target, and on Pastrana's creased-shell designer
+surface the first frozen point is a bad Euclidean L-BFGS seed (the first
+trial explodes; the run stays at `e/L = 0.17`). Another CWLS / GN step is
+what moves (see [`gn_vs_lbfgs.md`](gn_vs_lbfgs.md) §7). The honest place to
+spend L-BFGS-B instead of more linearisations is *after* that short
+Stage-2 budget.
 
 ![pipeline block diagram](figures/pipeline.png)
 
@@ -625,6 +633,14 @@ What the trend says:
 | Geometric least squares by Gauss–Newton / L-BFGS on `‖x(q) − x*‖²` (Van Mele & Block 2014 algebraic graph statics for the 2-D case; JAX FDM, Pastrana et al. 2023, for the general differentiable case) | the right objective | box via projection or `L-BFGS-B` | yes, given a start | 1 forward solve + adjoint per evaluation | this is the downstream optimiser; from a cold start it needs 100s–1000s of evaluations |
 | Length-ratio update `q ← q·ℓ(q)/ℓ*` (practitioner heuristic, iterative TNA horizontal equilibrium) | a fixed-point form of the geometric problem | clip | no (diverges with compression) | 1 forward solve | 5× the optimum on shallow tension nets; diverges on the barrel, the tied arch, the dome |
 | **Compliance-weighted LS + active set (this work)** | the geometric objective, linearised with its own metric | exact, active set on the sparse saddle | yes | 3–5 numeric LDLs per step (one symbolic) | within 2 % of the optimum on 64/64 before L-BFGS-B; 19 s at 16 k edges (two seeds raced) vs 52 s for the interior-point variant |
+
+A controlled comparison of those three-to-five saddle solves against a
+short L-BFGS-B run on the exact geometric objective — starting from the
+same Stage-1 `q*`, with the seed guard off — is in
+[`gn_vs_lbfgs.md`](gn_vs_lbfgs.md). Ten accepted L-BFGS-B steps saturate
+the compact history (`m = 10`) but do not invert the compliance-weighted
+Gramian; the experiment reports force, geometric and gradient residuals
+at every budget.
 
 Two remarks for the paper:
 

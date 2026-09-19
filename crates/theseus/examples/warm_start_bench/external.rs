@@ -531,3 +531,47 @@ pub fn cmd_external(args: &[String], max_iters: usize, results_dir: Option<&Path
         }
     }
 }
+
+/// A JSON case ready to be handed to the tradeoff runner (or any other
+/// consumer that wants the `Net` plus the exact / designer targets).
+pub struct LoadedCase {
+    pub net: Net,
+    pub lo: Vec<f64>,
+    pub hi: Vec<f64>,
+    pub box_name: &'static str,
+    pub exact: Array2<f64>,
+    pub designer: Option<Array2<f64>>,
+    pub description: String,
+}
+
+/// Load one `bench/external/cases/*.json` file into a [`LoadedCase`].
+pub fn load_case_file(path: &Path) -> Result<LoadedCase, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let case: Case =
+        serde_json::from_str(&text).map_err(|e| format!("{}: parse error: {e}", path.display()))?;
+    case.validate()
+        .map_err(|e| format!("{}: invalid case: {e}", path.display()))?;
+    let description = case.description.clone();
+    let (net, case) = case.into_net();
+    let (lo, hi, box_name) = case.box_(&net);
+    let exact = case.free_target(&net, &case.target);
+    let designer = case.target_original.as_ref().and_then(|t| {
+        let complete = net.free.iter().all(|&i| t[i].is_some());
+        if !complete {
+            return None;
+        }
+        let full: Vec<[f64; 3]> = (0..net.n_nodes())
+            .map(|i| t[i].unwrap_or(case.nodes[i]))
+            .collect();
+        Some(case.free_target(&net, &full))
+    });
+    Ok(LoadedCase {
+        net,
+        lo,
+        hi,
+        box_name,
+        exact,
+        designer,
+        description,
+    })
+}
