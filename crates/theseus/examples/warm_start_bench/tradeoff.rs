@@ -524,13 +524,24 @@ fn geom_l(rows: &[Scored], label: &str, l: f64) -> f64 {
 fn run_case(net: &Net, target_kind: &str, box_kind: &str) -> Value {
     let target = target_for(net, target_kind);
     let (lo, hi) = box_for(net, box_kind);
+    run_prepared(net, &target, &lo, &hi, target_kind, box_kind)
+}
+
+fn run_prepared(
+    net: &Net,
+    target: &Array2<f64>,
+    lo: &[f64],
+    hi: &[f64],
+    target_kind: &str,
+    box_kind: &str,
+) -> Value {
     let fixed = net.fixed_positions();
-    let problem = net.problem(&fixed, Vec::new(), &lo, &hi, SolverOptions::default());
+    let problem = net.problem(&fixed, Vec::new(), lo, hi, SolverOptions::default());
     let obj_problem = net.problem(
         &fixed,
-        vec![target_objective(net, &target)],
-        &lo,
-        &hi,
+        vec![target_objective(net, target)],
+        lo,
+        hi,
         SolverOptions {
             absolute_tolerance: 1e-8,
             relative_tolerance: 1e-12,
@@ -644,9 +655,15 @@ fn run_case(net: &Net, target_kind: &str, box_kind: &str) -> Value {
         .map(|s| s.q.clone())
         .unwrap_or_default();
     let q_gn1 = find_row(&rows, "gn1").map(|s| s.q.clone()).unwrap_or_default();
+    let q_pipe = find_row(&rows, "pipe").map(|s| s.q.clone()).unwrap_or_default();
 
     // L-BFGS-B from each seed at the requested accepted-iteration budgets.
-    for (seed, q0) in [("s1", q_s1.as_slice()), ("frozen1", q_fr.as_slice()), ("gn1", q_gn1.as_slice())]
+    for (seed, q0) in [
+        ("s1", q_s1.as_slice()),
+        ("frozen1", q_fr.as_slice()),
+        ("gn1", q_gn1.as_slice()),
+        ("pipe", q_pipe.as_slice()),
+    ]
     {
         if q0.is_empty() {
             continue;
@@ -670,6 +687,7 @@ fn run_case(net: &Net, target_kind: &str, box_kind: &str) -> Value {
     }
 
     // Direction comparison: frozen CWLS step vs first L-BFGS step vs first GN step.
+    let mut step_json = json!({});
     if let (Some(s1), Some(fr), Some(gn1), Some(lb1)) = (
         find_row(&rows, "s1"),
         find_row(&rows, "frozen1"),
@@ -692,6 +710,14 @@ fn run_case(net: &Net, target_kind: &str, box_kind: &str) -> Value {
                 fmt_e(l2(&d_gn)),
                 fmt_e(l2(&d_lb))
             );
+            step_json = json!({
+                "cos_frozen_lb1": nan_none(cos_fr_lb),
+                "cos_frozen_gn1": nan_none(cos_fr_gn),
+                "cos_gn1_lb1": nan_none(cos_gn_lb),
+                "delta_frozen": nan_none(l2(&d_fr)),
+                "delta_gn1": nan_none(l2(&d_gn)),
+                "delta_lb1": nan_none(l2(&d_lb)),
+            });
         }
     }
 
@@ -707,7 +733,7 @@ fn run_case(net: &Net, target_kind: &str, box_kind: &str) -> Value {
     }
 
     // Per-evaluation traces for the 10-step runs (history saturation).
-    for label in ["s1+lb10", "frozen1+lb10", "gn1+lb10"] {
+    for label in ["s1+lb10", "frozen1+lb10", "gn1+lb10", "pipe+lb10"] {
         if let Some(s) = find_row(&rows, label) {
             if !s.trace_geom.is_empty() {
                 let vals: Vec<String> = s
@@ -750,19 +776,26 @@ fn run_case(net: &Net, target_kind: &str, box_kind: &str) -> Value {
             "s1_lb20": nan_none(geom_l(&rows, "s1+lb20", l)),
             "frozen1_lb10": nan_none(geom_l(&rows, "frozen1+lb10", l)),
             "gn1_lb10": nan_none(geom_l(&rows, "gn1+lb10", l)),
-        }
+            "pipe_lb10": nan_none(geom_l(&rows, "pipe+lb10", l)),
+            "pipe_guard": nan_none(geom_l(&rows, "pipe_guard", l)),
+        },
+        "steps": step_json,
     })
 }
 
+fn want_net(name: &str) -> bool {
+    match std::env::var("BENCH_NETS") {
+        Ok(s) if !s.trim().is_empty() => s.split(',').any(|n| n.trim() == name),
+        _ => true,
+    }
+}
+
 fn selected_cases() -> Vec<(Net, &'static str, &'static str)> {
-    let filter = std::env::var("BENCH_NETS").ok().filter(|s| !s.trim().is_empty());
     let nets = suite_nets();
     let mut out = Vec::new();
     for &(name, target, box_kind) in CASES {
-        if let Some(ref f) = filter {
-            if !f.split(',').any(|n| n.trim() == name) {
-                continue;
-            }
+        if !want_net(name) {
+            continue;
         }
         if let Some(net) = nets.iter().find(|n| n.name == name) {
             out.push((net.clone(), target, box_kind));
@@ -771,6 +804,16 @@ fn selected_cases() -> Vec<(Net, &'static str, &'static str)> {
         }
     }
     out
+}
+
+fn creased_shell_json() -> Option<std::path::PathBuf> {
+    let rel = std::path::PathBuf::from("bench/external/cases/jaxfdm_creased_shell.json");
+    if rel.is_file() {
+        return Some(rel);
+    }
+    let from_manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../bench/external/cases/jaxfdm_creased_shell.json");
+    from_manifest.is_file().then_some(from_manifest)
 }
 
 fn print_cross_case_summary(cases: &[Value]) {
@@ -821,7 +864,8 @@ fn print_cross_case_summary(cases: &[Value]) {
 /// go to stdout.
 pub fn cmd_tradeoff(out_dir: Option<&str>) {
     let cases = selected_cases();
-    if cases.is_empty() {
+    let want_creased = want_net("jaxfdm_creased_shell");
+    if cases.is_empty() && !want_creased {
         eprintln!("nothing to run (check BENCH_NETS)");
         return;
     }
@@ -839,6 +883,46 @@ pub fn cmd_tradeoff(out_dir: Option<&str>) {
     let mut json_cases = Vec::new();
     for (net, target, box_kind) in &cases {
         json_cases.push(run_case(net, target, box_kind));
+    }
+    if want_creased {
+        match creased_shell_json() {
+            Some(path) => match crate::external::load_case_file(&path) {
+                Ok(loaded) => {
+                    println!(
+                        "# jax-fdm creased_shell from {}  (ne={}, nfree={}, box={})",
+                        path.display(),
+                        loaded.net.edges.len(),
+                        loaded.net.free.len(),
+                        loaded.box_name
+                    );
+                    if !loaded.description.is_empty() {
+                        println!("# {}", loaded.description);
+                    }
+                    json_cases.push(run_prepared(
+                        &loaded.net,
+                        &loaded.exact,
+                        &loaded.lo,
+                        &loaded.hi,
+                        "exact",
+                        loaded.box_name,
+                    ));
+                    if let Some(designer) = &loaded.designer {
+                        json_cases.push(run_prepared(
+                            &loaded.net,
+                            designer,
+                            &loaded.lo,
+                            &loaded.hi,
+                            "designer",
+                            loaded.box_name,
+                        ));
+                    } else {
+                        println!("# creased_shell has no complete designer target");
+                    }
+                }
+                Err(e) => eprintln!("creased_shell: {e}"),
+            },
+            None => eprintln!("creased_shell JSON not found; skip jax-fdm case"),
+        }
     }
     print_cross_case_summary(&json_cases);
     println!(

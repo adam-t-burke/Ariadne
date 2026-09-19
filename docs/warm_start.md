@@ -104,6 +104,12 @@ target x*, loads p, box [lo,hi]
 
 Default budget: one frozen step, two Gauss--Newton steps (`max_frozen_outer =
 1`, `max_outer = 2`), i.e. three sparse least-squares solves plus the probes.
+Do not drop the frozen step; it is the metric change. Do not generally drop
+the Gauss--Newton steps either — they are already skipped when the frozen
+step has solved a reachable target, and on Pastrana's creased-shell designer
+surface they are what leaves the frozen CWLS basin (see
+[`gn_vs_lbfgs.md`](gn_vs_lbfgs.md) §7). The honest place to spend L-BFGS-B
+instead of more linearisations is *after* that short Stage-2 budget.
 
 ![pipeline block diagram](figures/pipeline.png)
 

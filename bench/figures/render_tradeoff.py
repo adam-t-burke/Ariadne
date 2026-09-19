@@ -41,6 +41,17 @@ def case_label(c: dict) -> str:
     return f"{c['net']}\n{c['target']} {c['box']}"
 
 
+def is_jaxfdm(c: dict) -> bool:
+    return str(c.get("net", "")).startswith("jaxfdm")
+
+
+def split_cases(data: dict) -> tuple[list, list]:
+    cases = data.get("cases") or []
+    syn = [c for c in cases if not is_jaxfdm(c)]
+    jax = [c for c in cases if is_jaxfdm(c)]
+    return syn, jax
+
+
 def row_map(c: dict) -> dict:
     return {r["label"]: r for r in c.get("rows", [])}
 
@@ -65,8 +76,10 @@ def setup_style() -> None:
     )
 
 
-def fig_summary_bars(data: dict, out: Path) -> None:
-    cases = data["cases"]
+def fig_summary_bars(data: dict, out: Path, cases: list | None = None) -> None:
+    cases = data["cases"] if cases is None else cases
+    if not cases:
+        return
     labels = [case_label(c) for c in cases]
     series = [
         ("s1", "Stage 1", "#ff7f0e"),
@@ -132,11 +145,16 @@ def fig_traces(data: dict, out: Path) -> None:
         "cabletruss16",
         "quad21c_d1",
         "barrel16x12",
+        "jaxfdm_creased_shell",
     ]
     picked = []
     for name in interesting:
-        for c in data["cases"]:
-            if c["net"] == name and c not in picked:
+        candidates = [c for c in data["cases"] if c["net"] == name]
+        if name == "jaxfdm_creased_shell":
+            preferred = [c for c in candidates if c.get("target") == "designer"]
+            candidates = preferred or candidates
+        for c in candidates:
+            if c not in picked:
                 picked.append(c)
                 break
     n = len(picked)
@@ -151,6 +169,7 @@ def fig_traces(data: dict, out: Path) -> None:
             ("s1+lb20", "#d62728", ":"),
             ("frozen1+lb10", "#17becf", "-"),
             ("gn1+lb10", "#e377c2", "--"),
+            ("pipe+lb10", "#1f5fbf", ":"),
         ]:
             r = rm.get(key)
             if not r:
@@ -199,16 +218,19 @@ def fig_force_vs_geom(data: dict, out: Path) -> None:
     plt.close(fig)
 
 
-def fig_ratio(data: dict, out: Path) -> None:
+def fig_ratio(data: dict, out: Path, cases: list | None = None) -> None:
+    cases = data["cases"] if cases is None else cases
+    if not cases:
+        return
     labels, r_fr, r_gn, r_pipe = [], [], [], []
-    for c in data["cases"]:
+    for c in cases:
         s = c.get("summary") or {}
         def ratio(a, b):
             va, vb = s.get(a), s.get(b)
             if va and vb and vb > 0:
                 return va / vb
             return np.nan
-        labels.append(f"{c['net']} {c['box']}")
+        labels.append(f"{c['net']} {c['target']} {c['box']}")
         r_fr.append(ratio("s1_lb10", "frozen1"))
         r_gn.append(ratio("s1_lb10", "gn2"))
         r_pipe.append(ratio("s1_lb10", "pipe"))
@@ -236,11 +258,15 @@ def main() -> None:
     data = load(args.data)
     args.out.mkdir(parents=True, exist_ok=True)
     setup_style()
-    fig_summary_bars(data, args.out / "tradeoff_geom_bars.png")
+    syn, jax = split_cases(data)
+    fig_summary_bars(data, args.out / "tradeoff_geom_bars.png", cases=syn or None)
     fig_pareto(data, args.out / "tradeoff_cost_vs_error.png")
     fig_traces(data, args.out / "tradeoff_lbfgs_traces.png")
     fig_force_vs_geom(data, args.out / "tradeoff_force_vs_geom.png")
-    fig_ratio(data, args.out / "tradeoff_lb10_ratio.png")
+    fig_ratio(data, args.out / "tradeoff_lb10_ratio.png", cases=syn or None)
+    if jax:
+        fig_summary_bars(data, args.out / "tradeoff_creased_shell_bars.png", cases=jax)
+        fig_ratio(data, args.out / "tradeoff_creased_shell_ratio.png", cases=jax)
     print(f"wrote figures to {args.out}")
 
 

@@ -15,9 +15,11 @@ cd bench/figures && uv run render_tradeoff.py
 ```
 
 and lives in [`bench/figures/data/tradeoff.json`](../bench/figures/data/tradeoff.json).
-Figures are under [`figures/`](figures/). Seed guard is **off** for every
-controlled linearisation so every method starts from the same `q*`; the
-production pipeline with the guard is reported as `pipe_guard` only.
+Figures are under [`figures/`](figures/). The run also includes jax-fdm's
+creased-shell case (exact + designer) when the exported JSON is present.
+Seed guard is **off** for every controlled linearisation so every method
+starts from the same `q*`; the production pipeline with the guard is
+reported as `pipe_guard` only.
 
 ---
 
@@ -367,9 +369,12 @@ once the seed is mixed-sign or self-stressed:
    `E(x(q*))`; frozen uses `E(x*)`. That is the whole point of the first
    linearisation.
 3. **The honest place to spend L-BFGS-B instead of GN is after one
-   frozen step.** `frozen1+lb10` matches `pipe` on almost every case at a
-   fraction of the saddle-LDL cost of the two GN steps. That is the
-   tradeoff that the numbers support.
+   frozen step — on the synthetic mixed-sign nets.** `frozen1+lb10`
+   matches `pipe` there at a fraction of the saddle-LDL cost of the two
+   GN steps. Pastrana's creased-shell designer surface is the
+   counter-example: frozen lands in a local min of the exact objective
+   and L-BFGS-B stays there (§7). Do not generalise "drop GN" from the
+   synthetic suite alone.
 4. **When the frozen step itself fails** (deep hanging quad, 325 bounds
    active, `D(q*)` a terrible metric), exact-`f` L-BFGS-B from `q*` wins
    and the seed guard — not more GN — is the right Stage-2 fix.
@@ -394,4 +399,98 @@ $B tradeoff bench/figures/data          # writes tradeoff.json, prints residual 
 cd bench/figures && uv run render_tradeoff.py
 ```
 
-`BENCH_NETS=cabledome4x16,hypar21m` restricts the run.
+`BENCH_NETS=cabledome4x16,hypar21m` restricts the synthetic run;
+`BENCH_NETS=jaxfdm_creased_shell` runs only Pastrana's creased shell
+(exact + designer targets).
+
+---
+
+## 7. Creased shell, and whether to drop Gauss–Newton
+
+jax-fdm's published shape-match is `examples/creased_shell/creased_shell.py`
+(historically `vault` / `creased_vault` / `butt`): 193 nodes, 37 leaf
+supports, 324 compression-only edges, uniform vertical loads, box
+`q ∈ [−20, 0]`. Every free node has a `NodePointGoal` onto the designer's
+creased mesh stored in the input JSON. That mesh is **not** an FDM
+equilibrium — jax-fdm's own L-BFGS-B best-fit (`q_ref`) still sits at
+`e/L ≈ 0.0687`. The inverse problem therefore has two useful targets:
+
+* **exact** — the exported `q_ref` equilibrium (reachable, inside the box)
+* **designer** — the unreachable creased surface (the example as published)
+
+The suite already measured the long-horizon finish (`external` subcommand,
+1000 L-BFGS-B iterations). The tradeoff subcommand now reports the same
+short-budget residual table as the synthetic nets.
+
+### 7.1 What the long-horizon table already says
+
+| target | s1 warm | frozen warm | pipe warm | s1 + 1000 L-BFGS | frozen + L-BFGS | pipe + 1000 L-BFGS | oracle |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| exact | 3.1e-6 | **2.3e-12** | **2.3e-12** (GN skipped) | 1.4e-7 (24 its) | 2.3e-12 (0) | 2.3e-12 (0) | 2.8e-15 |
+| designer | 0.670 | 0.170 | **0.078** | 0.0687 (1000) | **0.170 (1 it, stuck)** | 0.0687 (1000) | 0.0687 |
+
+On the reachable target the pipeline is already done after the frozen
+step (`fr1 gn0`): Stage 1 recovered the pattern and one CWLS step
+cleaned the metric. The two Gauss–Newton slots are idle. jax-fdm's
+cold-start L-BFGS-B from the same median seed needs 1000 iterations to
+reach 3e-5 — SciPy's `ftol` floor, not the geometry.
+
+On the designer surface the picture flips.
+
+1. **Stage 1 is the wrong metric**, as usual: `e/L = 0.67` at a small
+   force residual. A thousand L-BFGS-B steps from `q*` do eventually
+   walk to the 0.0687 basin, but that is the long-horizon finish, not a
+   warm start.
+2. **One frozen CWLS step is a real metric change** (0.67 → 0.17) and
+   is *not* a substitute for the rest of the pipeline. Handing that
+   point to L-BFGS-B is worse than leaving it: the exact-`f` optimiser
+   takes one iteration and stops at 0.170. The frozen linearisation has
+   parked `q` at a stationary point of `½‖x−x*‖²` that is more than
+   twice as far from the designer mesh as jax-fdm's own best fit.
+   Quasi-Newton from a local min stays there.
+3. **The two Gauss–Newton steps are what leave that basin.** Rebuilding
+   `E` at `x(q)` after the frozen step drops the warm start to 0.078 —
+   within 13 % of the 0.0687 floor — and L-BFGS-B can then finish.
+   `legacy` (Clarabel Stage 2, no guard) does the same. Frozen-only
+   cannot.
+
+That is the opposite of the synthetic mixed-sign story, where
+`frozen1+lb10` matched `pipe` and the two GN steps looked optional.
+Creased shell is an unreachable designer surface sitting next to a
+spurious CWLS local min; the current-geometry Jacobian is the jump
+that L-BFGS-B will not take.
+
+### 7.2 Recommended pipeline
+
+Keep the default. Do not generally drop the Gauss–Newton steps.
+
+```
+(1) Stage 1          boxed min ‖E(x*)q − p‖²     → pattern of q, including self-stress
+(2) seed guard       race Stage-1 vs scaled uniform when Stage 1 collapsed
+(3) 1 frozen CWLS    Jacobian at x*              → change the metric; do not skip
+(4) 1–2 GN steps     Jacobian at x(q_k)          → leave a frozen-only basin; free if already tight
+(5) L-BFGS-B         exact ½‖x(q)−x*‖²           → finish, not replace, Stage 2
+```
+
+When each piece earns its keep:
+
+| piece | drop it? | why |
+|---|---|---|
+| Stage 1 | no | only cheap place the self-stress / sign *ratios* are recovered |
+| seed guard | no | the deep-quad failure mode: frozen at a collapsed `q*` clips the box |
+| 1 frozen CWLS | **no** | the metric change. 10 L-BFGS-B steps from `q*` do not invert `D⁻²` |
+| 2 GN after frozen | **not as a default** | already skipped on reachable targets; required on creased-shell designer; optional only on mixed-sign jitter where `frozen+lb10 ≈ pipe` |
+| L-BFGS-B after Stage 2 | no | the exact objective; this is the finish, not the warm start |
+
+A reasonable *narrower* default, if the extra saddle LDLs ever dominate,
+is **Stage 1 → guard → 1 frozen → L-BFGS-B**, and turn GN back on when
+the target is a designer surface that is not itself an FDM equilibrium.
+That is a per-problem switch, not a general recommendation. On creased
+shell it would leave you at 0.17 instead of 0.078. The two GN steps
+cost one extra sparse factorisation family (14 vs 6 on this 324-edge
+net) and are already a no-op when frozen has solved the problem.
+
+So: do not drop Gauss–Newton as policy. Drop it automatically when the
+frozen merit is already under tolerance (the code already does this).
+Keep the slots for the case the synthetic suite under-represents —
+best-fitting a designer mesh that FDM cannot hit exactly.

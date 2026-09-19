@@ -35,8 +35,12 @@
 //!                        by `bench/figures/render.py`. `BENCH_ITERS` and
 //!                        `BENCH_NETS` apply.
 //! - `tradeoff [dir]`     Frozen CWLS / Gauss–Newton versus short L-BFGS-B
-//!                        from the Stage-1 `q*` (docs/gn_vs_lbfgs.md). Writes
-//!                        `tradeoff.json` when a directory is given.
+//!                        from the Stage-1 `q*` (docs/gn_vs_lbfgs.md). Also
+//!                        runs jax-fdm `creased_shell` (exact + designer)
+//!                        when `bench/external/cases/jaxfdm_creased_shell.json`
+//!                        is present. Writes `tradeoff.json` when a directory
+//!                        is given. `BENCH_NETS=jaxfdm_creased_shell` runs
+//!                        only that case.
 
 mod external;
 mod figures;
