@@ -6,74 +6,84 @@
   q-space step cosine from s1:  <frozen, lb1>=5.709e-1  <frozen, gn1>=3.202e-1  <gn1, lb1>=3.029e-1   ||Δfr||=6.867e1  ||Δgn||=3.649e0  ||Δlb1||=6.615e1
 -- linearised CWLS / Gauss–Newton from q* (seed guard off except pipe_guard) --
 method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
-s1                  19.6     -   0   0     -     -    1.167e2   1.047e1   5.582e0   7.330e-1  9.676e-1   2.380e7       0  lib_err=2.33e3
-frozen1             66.8     8   1   0     -     -   4.842e-1  2.769e-1  2.316e-2    1.014e1   1.338e1   6.350e3     117  s1e=2.33e3 fr1 gn0 fac=8
-frozen2             95.2    15   2   0     -     -   2.325e-1  1.295e-1  1.112e-2    1.011e1   1.334e1   9.164e2      66  s1e=2.33e3 fr2 gn0 fac=15
-gn1                 93.1    14   0   1     -     -    5.758e1   5.175e0   2.754e0    1.274e0   1.681e0   2.997e6     221  s1e=2.33e3 fr0 gn1 fac=14
-gn2                162.0    29   0   2     -     -    2.835e1   2.543e0   1.356e0    5.182e0   6.841e0   3.587e5     206  s1e=2.33e3 fr0 gn2 fac=29
-gn3                217.4    41   0   3     -     -    1.396e1   1.237e0  6.677e-1    7.826e1   1.033e2   6.311e4     207  s1e=2.33e3 fr0 gn3 fac=41
-pipe               123.5    21   1   2     -     -   1.798e-1  8.957e-2  8.599e-3    9.106e0   1.202e1   2.458e2      48  s1e=2.33e3 fr1 gn2 fac=21
-pipe_guard         221.2    39   1   2     -     -   1.073e-1  4.938e-2  5.133e-3    8.448e0   1.115e1   2.010e1      35  s1e=2.33e3 fr1 gn2 fac=39 guard→u
+s1                  19.7     -   0   0     -     -    1.167e2   1.047e1   5.582e0   7.330e-1  9.676e-1   2.380e7       0  lib_err=2.33e3
+frozen1             63.4     8   1   0     -     -   4.842e-1  2.769e-1  2.316e-2    1.014e1   1.338e1   6.350e3     117  s1e=2.33e3 fr1 gn0 fac=8
+frozen2             99.1    15   2   0     -     -   2.325e-1  1.295e-1  1.112e-2    1.011e1   1.334e1   9.164e2      66  s1e=2.33e3 fr2 gn0 fac=15
+gn1                 91.1    14   0   1     -     -    5.758e1   5.175e0   2.754e0    1.274e0   1.681e0   2.997e6     221  s1e=2.33e3 fr0 gn1 fac=14
+gn2                163.5    29   0   2     -     -    2.835e1   2.543e0   1.356e0    5.182e0   6.841e0   3.587e5     206  s1e=2.33e3 fr0 gn2 fac=29
+gn3                221.8    41   0   3     -     -    1.396e1   1.237e0  6.677e-1    7.827e1   1.033e2   6.311e4     207  s1e=2.33e3 fr0 gn3 fac=41
+pipe               123.2    21   1   2     -     -   1.798e-1  8.957e-2  8.599e-3    9.106e0   1.202e1   2.458e2      48  s1e=2.33e3 fr1 gn2 fac=21
+pipe_guard         247.1    39   1   2     -     -   1.073e-1  4.938e-2  5.133e-3    8.448e0   1.115e1   2.010e1      35  s1e=2.33e3 fr1 gn2 fac=39 guard→u
 -- L-BFGS-B on ‖x(q)−x*‖² from those seeds (history m=10) --
 method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
-s1+lb1               1.9     -   -   -     1     7    2.771e0  1.925e-1  1.325e-1    6.751e1   8.913e1   2.680e2       0  accepted=1 evals≈7
-s1+lb3               2.5     -   -   -     3    10    2.200e0  2.323e-1  1.053e-1    6.293e1   8.308e1   7.550e1       5  accepted=3 evals≈10
-s1+lb10              4.6     -   -   -    10    22   8.805e-1  1.663e-1  4.212e-2    4.835e1   6.382e1   4.785e1       4  accepted=10 evals≈22
-s1+lb20              7.1     -   -   -    20    32   4.769e-1  1.170e-1  2.281e-2    4.257e1   5.620e1   3.618e1       0  accepted=20 evals≈32
-frozen1+lb1          1.9     -   -   -     1     8   2.642e-1  6.022e-2  1.264e-2    1.042e1   1.376e1   5.545e1       7  accepted=1 evals≈8
-frozen1+lb3          2.3     -   -   -     3    10   2.402e-1  5.636e-2  1.149e-2    1.041e1   1.374e1   1.622e1       8  accepted=3 evals≈10
+s1+lb1               1.6     -   -   -     1     7    2.771e0  1.925e-1  1.325e-1    6.751e1   8.913e1   2.680e2       0  accepted=1 evals≈7
+s1+lb3               2.3     -   -   -     3    10    2.200e0  2.323e-1  1.053e-1    6.293e1   8.308e1   7.550e1       5  accepted=3 evals≈10
+s1+lb10              5.3     -   -   -    10    22   8.805e-1  1.663e-1  4.212e-2    4.835e1   6.382e1   4.785e1       4  accepted=10 evals≈22
+s1+lb20              7.8     -   -   -    20    32   4.769e-1  1.170e-1  2.281e-2    4.257e1   5.620e1   3.618e1       0  accepted=20 evals≈32
+frozen1+lb1          1.8     -   -   -     1     8   2.642e-1  6.022e-2  1.264e-2    1.042e1   1.376e1   5.545e1       7  accepted=1 evals≈8
+frozen1+lb3          2.2     -   -   -     3    10   2.402e-1  5.636e-2  1.149e-2    1.041e1   1.374e1   1.622e1       8  accepted=3 evals≈10
 frozen1+lb10         3.7     -   -   -    10    17   1.556e-1  3.853e-2  7.442e-3    1.044e1   1.378e1   1.646e1       2  accepted=10 evals≈17
-frozen1+lb20         6.1     -   -   -    20    27   1.290e-1  3.773e-2  6.171e-3    1.034e1   1.365e1   3.237e0       2  accepted=20 evals≈27
-gn1+lb1              1.6     -   -   -     1     6    4.144e0  2.351e-1  1.982e-1    2.038e2   2.690e2   7.766e1       2  accepted=1 evals≈6
-gn1+lb3              3.0     -   -   -     3    14    3.935e0  2.232e-1  1.882e-1    2.006e2   2.647e2   5.296e1       2  accepted=3 evals≈14
-gn1+lb10             5.8     -   -   -    10    29    2.107e0  3.021e-1  1.008e-1    1.737e2   2.292e2   6.382e2       2  accepted=10 evals≈29
-gn1+lb20            10.7     -   -   -    20    53   7.605e-1  2.819e-1  3.638e-2    1.815e2   2.396e2   5.410e1       0  accepted=20 evals≈53
+frozen1+lb20         6.4     -   -   -    20    27   1.290e-1  3.773e-2  6.171e-3    1.034e1   1.365e1   3.237e0       2  accepted=20 evals≈27
+gn1+lb1              1.5     -   -   -     1     6    4.144e0  2.351e-1  1.982e-1    2.038e2   2.690e2   7.766e1       2  accepted=1 evals≈6
+gn1+lb3              3.1     -   -   -     3    14    3.935e0  2.232e-1  1.882e-1    2.006e2   2.647e2   5.296e1       2  accepted=3 evals≈14
+gn1+lb10             5.6     -   -   -    10    29    2.107e0  3.021e-1  1.008e-1    1.737e2   2.293e2   6.384e2       2  accepted=10 evals≈29
+gn1+lb20            10.2     -   -   -    20    53   7.594e-1  2.810e-1  3.632e-2    1.816e2   2.397e2   7.127e1       0  accepted=20 evals≈53
+pipe+lb1             1.7     -   -   -     1     7   1.351e-1  3.024e-2  6.461e-3    9.184e0   1.212e1   4.379e1       3  accepted=1 evals≈7
+pipe+lb3             2.3     -   -   -     3    10   1.213e-1  2.965e-2  5.803e-3    9.172e0   1.211e1   6.819e0       3  accepted=3 evals≈10
+pipe+lb10            4.0     -   -   -    10    18   9.065e-2  1.590e-2  4.336e-3    9.156e0   1.209e1   1.656e0       5  accepted=10 evals≈18
+pipe+lb20            6.2     -   -   -    20    28   7.863e-2  1.088e-2  3.761e-3    9.145e0   1.207e1   2.310e0       4  accepted=20 evals≈28
   trace s1+lb10 geom/L per eval: 1.167e2 4.901e0 4.882e0 4.824e0 4.653e0 4.150e0 2.771e0 2.771e0 1.414e1 2.200e0 2.554e0 2.146e0 2.142e0 2.100e0 2.185e0 1.951e0 2.222e0 1.723e0 1.309e1 1.526e0 1.130e0 8.805e-1
   trace frozen1+lb10 geom/L per eval: 4.842e-1 4.070e0 3.315e0 2.492e0 1.594e0 8.216e-1 3.836e-1 2.642e-1 2.571e-1 2.402e-1 2.340e-1 2.120e-1 1.798e-1 1.774e-1 1.706e-1 1.661e-1 1.556e-1
-  trace gn1+lb10 geom/L per eval: 5.758e1 4.894e0 4.874e0 4.816e0 4.644e0 4.144e0 4.144e0 4.144e0 4.143e0 4.138e0 4.121e0 4.055e0 5.816e0 3.935e0 5.768e0 3.910e0 3.904e0 3.887e0 3.811e0 3.824e0 1.817e1 3.705e0 2.808e3 3.361e0 2.456e0 6.737e0 2.338e0 4.735e0 2.107e0
+  trace gn1+lb10 geom/L per eval: 5.758e1 4.894e0 4.874e0 4.816e0 4.644e0 4.144e0 4.144e0 4.144e0 4.143e0 4.138e0 4.121e0 4.055e0 5.816e0 3.935e0 5.768e0 3.910e0 3.904e0 3.887e0 3.811e0 3.824e0 1.817e1 3.705e0 2.808e3 3.361e0 2.456e0 6.737e0 2.338e0 4.738e0 2.107e0
+  trace pipe+lb10 geom/L per eval: 1.798e-1 2.935e0 2.028e0 1.117e0 5.051e-1 2.241e-1 1.351e-1 3.128e-1 1.240e-1 1.213e-1 1.142e-1 1.111e-1 9.794e-2 1.032e-1 9.622e-2 9.352e-2 9.221e-2 9.065e-2
   identity check s1: forward ‖x−x*‖=2.334e3  scored geom=2.334e3  (should match)
 
 === cabledome4x16 jit2%d box=loose (ne=272, nfree=128)  L=20.0000 ===
   q-space step cosine from s1:  <frozen, lb1>=2.608e-2  <frozen, gn1>=9.852e-1  <gn1, lb1>=2.041e-2   ||Δfr||=1.507e2  ||Δgn||=3.657e1  ||Δlb1||=2.898e0
 -- linearised CWLS / Gauss–Newton from q* (seed guard off except pipe_guard) --
 method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
-s1                   4.4     -   0   0     -     -    4.353e0   1.225e0  3.848e-1    7.063e0  5.314e-1   2.124e5       0  lib_err=8.71e1
-frozen1              9.6     5   1   0     -     -   3.033e-1  1.901e-1  2.681e-2    2.617e1   1.969e0   1.516e3       4  s1e=8.71e1 fr1 gn0 fac=5
+s1                   4.3     -   0   0     -     -    4.353e0   1.225e0  3.848e-1    7.063e0  5.314e-1   2.124e5       0  lib_err=8.71e1
+frozen1              9.5     5   1   0     -     -   3.033e-1  1.901e-1  2.681e-2    2.617e1   1.969e0   1.516e3       4  s1e=8.71e1 fr1 gn0 fac=5
 frozen2             12.3     8   2   0     -     -   9.557e-2  6.601e-2  8.447e-3    2.683e1   2.019e0   1.194e3       2  s1e=8.71e1 fr2 gn0 fac=8
-gn1                  8.1     3   0   1     -     -    2.406e0  7.354e-1  2.126e-1    1.445e1   1.087e0   1.989e4      10  s1e=8.71e1 fr0 gn1 fac=3
-gn2                 10.0     5   0   2     -     -    1.978e0  6.993e-1  1.748e-1    3.169e1   2.384e0   5.928e4      11  s1e=8.71e1 fr0 gn2 fac=5
+gn1                  7.8     3   0   1     -     -    2.406e0  7.354e-1  2.126e-1    1.445e1   1.087e0   1.989e4      10  s1e=8.71e1 fr0 gn1 fac=3
+gn2                  9.9     5   0   2     -     -    1.978e0  6.993e-1  1.748e-1    3.169e1   2.384e0   5.928e4      11  s1e=8.71e1 fr0 gn2 fac=5
 gn3                 12.7     8   0   3     -     -    1.590e0  5.474e-1  1.406e-1    4.303e1   3.237e0   9.748e3       7  s1e=8.71e1 fr0 gn3 fac=8
 pipe                14.6    10   1   2     -     -   1.145e-1  6.353e-2  1.012e-2    2.776e1   2.088e0   2.761e2       0  s1e=8.71e1 fr1 gn2 fac=10
-pipe_guard          30.7    17   1   2     -     -   1.145e-1  6.353e-2  1.012e-2    2.776e1   2.088e0   2.761e2       0  s1e=8.71e1 fr1 gn2 fac=17
+pipe_guard          30.4    17   1   2     -     -   1.145e-1  6.353e-2  1.012e-2    2.776e1   2.088e0   2.761e2       0  s1e=8.71e1 fr1 gn2 fac=17
 -- L-BFGS-B on ‖x(q)−x*‖² from those seeds (history m=10) --
 method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
-s1+lb1               0.5     -   -   -     1     8    2.242e0  8.864e-1  1.982e-1    1.205e1  9.065e-1   4.529e4       0  accepted=1 evals≈8
+s1+lb1               0.6     -   -   -     1     8    2.242e0  8.864e-1  1.982e-1    1.205e1  9.065e-1   4.529e4       0  accepted=1 evals≈8
 s1+lb3               0.9     -   -   -     3    10    1.786e0  4.660e-1  1.579e-1    1.209e1  9.099e-1   1.882e3       3  accepted=3 evals≈10
 s1+lb10              1.5     -   -   -    10    17    1.168e0  1.880e-1  1.032e-1    1.195e1  8.993e-1   1.360e2       5  accepted=10 evals≈17
 s1+lb20              2.6     -   -   -    20    30   9.999e-1  1.495e-1  8.838e-2    1.427e1   1.074e0   6.655e1       3  accepted=20 evals≈30
 frozen1+lb1          0.7     -   -   -     1     8   2.308e-1  1.121e-1  2.040e-2    2.623e1   1.974e0   2.255e2       2  accepted=1 evals≈8
-frozen1+lb3          0.9     -   -   -     3    10   1.825e-1  1.026e-1  1.614e-2    2.623e1   1.974e0   5.107e1       0  accepted=3 evals≈10
+frozen1+lb3          0.8     -   -   -     3    10   1.825e-1  1.026e-1  1.614e-2    2.623e1   1.974e0   5.107e1       0  accepted=3 evals≈10
 frozen1+lb10         1.6     -   -   -    10    19   1.011e-1  6.294e-2  8.937e-3    2.627e1   1.976e0   2.093e1       2  accepted=10 evals≈19
 frozen1+lb20         2.6     -   -   -    20    30   5.655e-2  1.547e-2  4.998e-3    2.627e1   1.976e0   5.342e0       1  accepted=20 evals≈30
 gn1+lb1              0.7     -   -   -     1     8    1.463e0  3.026e-1  1.293e-1    1.484e1   1.116e0   4.105e2       4  accepted=1 evals≈8
-gn1+lb3              0.9     -   -   -     3    10    1.105e0  2.886e-1  9.771e-2    1.510e1   1.136e0   2.085e3       1  accepted=3 evals≈10
+gn1+lb3              0.8     -   -   -     3    10    1.105e0  2.886e-1  9.771e-2    1.510e1   1.136e0   2.085e3       1  accepted=3 evals≈10
 gn1+lb10             1.4     -   -   -    10    17   7.825e-1  1.532e-1  6.916e-2    1.599e1   1.203e0   5.305e1       1  accepted=10 evals≈17
-gn1+lb20             2.4     -   -   -    20    27   6.576e-1  1.234e-1  5.812e-2    1.569e1   1.181e0   1.093e2      10  accepted=20 evals≈27
+gn1+lb20             2.3     -   -   -    20    27   6.576e-1  1.234e-1  5.812e-2    1.569e1   1.181e0   1.093e2      10  accepted=20 evals≈27
+pipe+lb1             0.7     -   -   -     1     9   7.563e-2  3.161e-2  6.685e-3    2.775e1   2.088e0   2.683e2       0  accepted=1 evals≈9
+pipe+lb3             1.0     -   -   -     3    12   5.661e-2  2.644e-2  5.004e-3    2.775e1   2.088e0   3.502e1       0  accepted=3 evals≈12
+pipe+lb10            1.5     -   -   -    10    19   3.262e-2  7.092e-3  2.884e-3    2.775e1   2.088e0   2.994e0       0  accepted=10 evals≈19
+pipe+lb20            2.5     -   -   -    20    30   2.965e-2  6.852e-3  2.621e-3    2.775e1   2.088e0   1.568e0       0  accepted=20 evals≈30
   trace s1+lb10 geom/L per eval: 4.353e0 5.786e0 9.370e0 3.959e1 8.373e0 2.846e2 4.178e0 2.242e0 1.838e0 1.786e0 1.750e0 1.577e0 1.420e0 1.333e0 1.272e0 1.223e0 1.168e0
   trace frozen1+lb10 geom/L per eval: 3.033e-1 8.653e0 1.335e1 5.332e0 1.124e0 4.704e-1 2.807e0 2.308e-1 1.939e-1 1.825e-1 1.764e-1 1.538e-1 2.568e-1 1.323e-1 1.143e-1 1.113e-1 1.050e-1 1.033e-1 1.011e-1
   trace gn1+lb10 geom/L per eval: 2.406e0 6.116e0 3.297e0 4.123e0 7.028e1 1.153e1 3.677e0 1.463e0 1.410e0 1.105e0 9.817e-1 9.408e-1 9.100e-1 8.516e-1 8.092e-1 7.971e-1 7.825e-1
+  trace pipe+lb10 geom/L per eval: 1.145e-1 5.534e0 4.375e0 2.814e1 1.437e0 2.558e0 4.693e-1 2.192e-1 7.563e-2 7.854e-2 5.966e-2 5.661e-2 4.638e-2 4.056e-2 3.782e-2 3.695e-2 3.415e-2 3.334e-2 3.262e-2
   identity check s1: forward ‖x−x*‖=8.706e1  scored geom=8.706e1  (should match)
 
 === cabledome4x16 bump10%d box=snug (ne=272, nfree=128)  L=20.0000 ===
   q-space step cosine from s1:  <frozen, lb1>=1.264e-2  <frozen, gn1>=9.931e-1  <gn1, lb1>=1.509e-2   ||Δfr||=1.850e2  ||Δgn||=1.039e2  ||Δlb1||=1.194e-1
 -- linearised CWLS / Gauss–Newton from q* (seed guard off except pipe_guard) --
 method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
-s1                   3.0     -   0   0     -     -   2.392e-1  4.196e-2  2.115e-2    1.719e1   1.293e0   4.761e0      32  lib_err=4.78e0
+s1                   2.9     -   0   0     -     -   2.392e-1  4.196e-2  2.115e-2    1.719e1   1.293e0   4.761e0      32  lib_err=4.78e0
 frozen1              9.1     6   1   0     -     -   4.291e-2  1.011e-2  3.793e-3    3.428e1   2.579e0   6.185e0      13  s1e=4.78e0 fr1 gn0 fac=6
-frozen2             11.0     8   2   0     -     -   8.139e-3  2.731e-3  7.194e-4    3.525e1   2.652e0  1.391e-1      12  s1e=4.78e0 fr2 gn0 fac=8
-gn1                  8.3     5   0   1     -     -   1.010e-1  1.994e-2  8.924e-3    2.105e1   1.584e0   6.307e0      12  s1e=4.78e0 fr0 gn1 fac=5
-gn2                 10.4     7   0   2     -     -   1.581e-2  2.725e-3  1.398e-3    3.263e1   2.455e0  9.328e-1      13  s1e=4.78e0 fr0 gn2 fac=7
-gn3                 13.2    10   0   3     -     -   7.937e-3  2.646e-3  7.015e-4    3.586e1   2.698e0  1.819e-2       8  s1e=4.78e0 fr0 gn3 fac=10
+frozen2             11.2     8   2   0     -     -   8.139e-3  2.731e-3  7.194e-4    3.525e1   2.652e0  1.391e-1      12  s1e=4.78e0 fr2 gn0 fac=8
+gn1                  8.4     5   0   1     -     -   1.010e-1  1.994e-2  8.924e-3    2.105e1   1.584e0   6.307e0      12  s1e=4.78e0 fr0 gn1 fac=5
+gn2                 10.3     7   0   2     -     -   1.581e-2  2.725e-3  1.398e-3    3.263e1   2.455e0  9.328e-1      13  s1e=4.78e0 fr0 gn2 fac=7
+gn3                 13.7    10   0   3     -     -   7.937e-3  2.646e-3  7.015e-4    3.586e1   2.698e0  1.819e-2       8  s1e=4.78e0 fr0 gn3 fac=10
 pipe                14.2    11   1   2     -     -   7.882e-3  2.656e-3  6.967e-4    3.612e1   2.717e0  3.179e-2       7  s1e=4.78e0 fr1 gn2 fac=11
 pipe_guard          22.6    11   1   2     -     -   7.882e-3  2.656e-3  6.967e-4    3.612e1   2.717e0  3.179e-2       7  s1e=4.78e0 fr1 gn2 fac=11
 -- L-BFGS-B on ‖x(q)−x*‖² from those seeds (history m=10) --
@@ -81,49 +91,59 @@ method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/
 s1+lb1               0.3     -   -   -     1     3   2.282e-1  3.951e-2  2.017e-2    1.724e1   1.297e0   4.639e0      16  accepted=1 evals≈3
 s1+lb3               0.5     -   -   -     3     5   1.195e-1  2.838e-2  1.056e-2    1.958e1   1.473e0   2.380e0       0  accepted=3 evals≈5
 s1+lb10              1.1     -   -   -    10    12   8.382e-2  1.716e-2  7.408e-3    1.956e1   1.472e0   1.366e0      16  accepted=10 evals≈12
-s1+lb20              2.2     -   -   -    20    23   5.735e-2  8.071e-3  5.069e-3    2.093e1   1.575e0  2.273e-1      19  accepted=20 evals≈23
-frozen1+lb1          0.5     -   -   -     1     6   2.037e-2  3.351e-3  1.800e-3    3.429e1   2.579e0   1.520e0      13  accepted=1 evals≈6
+s1+lb20              2.1     -   -   -    20    23   5.735e-2  8.071e-3  5.069e-3    2.093e1   1.575e0  2.273e-1      19  accepted=20 evals≈23
+frozen1+lb1          0.6     -   -   -     1     6   2.037e-2  3.351e-3  1.800e-3    3.429e1   2.579e0   1.520e0      13  accepted=1 evals≈6
 frozen1+lb3          0.7     -   -   -     3     8   1.688e-2  3.124e-3  1.492e-3    3.429e1   2.579e0  4.989e-1       8  accepted=3 evals≈8
 frozen1+lb10         1.3     -   -   -    10    15   9.201e-3  2.850e-3  8.132e-4    3.428e1   2.579e0  9.610e-2       2  accepted=10 evals≈15
-frozen1+lb20         2.2     -   -   -    20    25   8.877e-3  2.869e-3  7.846e-4    3.428e1   2.579e0  2.148e-2       7  accepted=20 evals≈25
+frozen1+lb20         2.1     -   -   -    20    25   8.877e-3  2.869e-3  7.846e-4    3.428e1   2.579e0  2.148e-2       7  accepted=20 evals≈25
 gn1+lb1              0.4     -   -   -     1     4   9.226e-2  1.703e-2  8.154e-3    2.108e1   1.586e0   5.684e0       0  accepted=1 evals≈4
 gn1+lb3              0.6     -   -   -     3     7   6.574e-2  1.492e-2  5.811e-3    2.127e1   1.600e0   2.703e0       1  accepted=3 evals≈7
-gn1+lb10             1.3     -   -   -    10    14   4.856e-2  1.201e-2  4.292e-3    2.132e1   1.604e0  3.184e-1       4  accepted=10 evals≈14
-gn1+lb20             2.2     -   -   -    20    25   2.795e-2  5.902e-3  2.470e-3    2.213e1   1.665e0  8.217e-2       9  accepted=20 evals≈25
+gn1+lb10             1.2     -   -   -    10    14   4.856e-2  1.201e-2  4.292e-3    2.132e1   1.604e0  3.184e-1       4  accepted=10 evals≈14
+gn1+lb20             2.3     -   -   -    20    25   2.795e-2  5.902e-3  2.470e-3    2.213e1   1.665e0  8.217e-2       9  accepted=20 evals≈25
+pipe+lb1             0.4     -   -   -     1     4   7.879e-3  2.656e-3  6.964e-4    3.612e1   2.717e0  5.063e-3       0  accepted=1 evals≈4
+pipe+lb3             0.5     -   -   -     3     6   7.879e-3  2.656e-3  6.964e-4    3.612e1   2.717e0  1.273e-3       2  accepted=3 evals≈6
+pipe+lb10            1.2     -   -   -    10    14   7.879e-3  2.656e-3  6.964e-4    3.612e1   2.717e0  1.538e-3       7  accepted=10 evals≈14
+pipe+lb20            2.2     -   -   -    20    25   7.879e-3  2.656e-3  6.964e-4    3.612e1   2.717e0  1.003e-4       7  accepted=20 evals≈25
   trace s1+lb10 geom/L per eval: 2.392e-1 1.810e0 2.282e-1 1.378e-1 1.195e-1 1.128e-1 1.029e-1 9.992e-2 9.811e-2 9.461e-2 8.879e-2 8.382e-2
   trace frozen1+lb10 geom/L per eval: 4.291e-2 2.582e0 1.288e0 3.790e-1 1.243e-1 2.037e-2 1.842e-2 1.688e-2 1.474e-2 1.211e-2 1.117e-2 1.071e-2 1.036e-2 9.779e-3 9.201e-3
   trace gn1+lb10 geom/L per eval: 1.010e-1 7.373e-1 8.178e-1 9.226e-2 9.218e-2 6.929e-2 6.574e-2 6.294e-2 6.249e-2 5.945e-2 5.754e-2 5.339e-2 5.048e-2 4.856e-2
+  trace pipe+lb10 geom/L per eval: 7.882e-3 1.939e-1 7.892e-3 7.879e-3 7.879e-3 7.879e-3 7.879e-3 7.879e-3 7.879e-3 7.879e-3 7.879e-3 7.879e-3 7.879e-3 7.879e-3
   identity check s1: forward ‖x−x*‖=4.785e0  scored geom=4.785e0  (should match)
 
 === hypar21m jit2%d box=loose (ne=840, nfree=437)  L=20.0000 ===
   q-space step cosine from s1:  <frozen, lb1>=1.458e-1  <frozen, gn1>=9.772e-1  <gn1, lb1>=1.500e-1   ||Δfr||=2.015e2  ||Δgn||=1.769e0  ||Δlb1||=1.701e-1
 -- linearised CWLS / Gauss–Newton from q* (seed guard off except pipe_guard) --
 method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
-s1                  18.5     -   0   0     -     -    5.169e1   4.793e0   2.472e0    1.060e0   1.015e0   2.441e6      10  lib_err=1.03e3
-frozen1             55.5     7   1   0     -     -   7.410e-2  1.210e-2  3.545e-3    3.138e1   3.002e1  2.728e-1       9  s1e=1.03e3 fr1 gn0 fac=7
-frozen2             74.9    11   2   0     -     -   7.331e-2  1.043e-2  3.507e-3    3.303e1   3.160e1  4.856e-1       8  s1e=1.03e3 fr2 gn0 fac=11
-gn1                 69.7    10   0   1     -     -    2.573e1   2.385e0   1.231e0    1.192e0   1.140e0   3.202e5      32  s1e=1.03e3 fr0 gn1 fac=10
-gn2                 97.4    16   0   2     -     -    1.275e1   1.180e0  6.099e-1    1.794e0   1.716e0   4.129e4      35  s1e=1.03e3 fr0 gn2 fac=16
-gn3                117.4    20   0   3     -     -    6.265e0  5.776e-1  2.997e-1    3.295e0   3.153e0   5.245e3      24  s1e=1.03e3 fr0 gn3 fac=20
-pipe                99.8    16   1   2     -     -   6.140e-2  8.368e-3  2.937e-3    3.258e1   3.117e1   1.459e0       6  s1e=1.03e3 fr1 gn2 fac=16
-pipe_guard         142.6    16   1   2     -     -   6.140e-2  8.368e-3  2.937e-3    3.258e1   3.117e1   1.459e0       6  s1e=1.03e3 fr1 gn2 fac=16
+s1                  18.2     -   0   0     -     -    5.169e1   4.793e0   2.472e0    1.060e0   1.015e0   2.441e6      10  lib_err=1.03e3
+frozen1             55.6     7   1   0     -     -   7.410e-2  1.210e-2  3.545e-3    3.138e1   3.002e1  2.728e-1       9  s1e=1.03e3 fr1 gn0 fac=7
+frozen2             75.6    11   2   0     -     -   7.331e-2  1.043e-2  3.507e-3    3.303e1   3.160e1  4.856e-1       8  s1e=1.03e3 fr2 gn0 fac=11
+gn1                 69.5    10   0   1     -     -    2.573e1   2.385e0   1.231e0    1.192e0   1.140e0   3.202e5      32  s1e=1.03e3 fr0 gn1 fac=10
+gn2                 99.2    16   0   2     -     -    1.275e1   1.180e0  6.099e-1    1.794e0   1.716e0   4.129e4      35  s1e=1.03e3 fr0 gn2 fac=16
+gn3                118.6    20   0   3     -     -    6.265e0  5.776e-1  2.997e-1    3.295e0   3.153e0   5.245e3      24  s1e=1.03e3 fr0 gn3 fac=20
+pipe                99.0    16   1   2     -     -   6.140e-2  8.368e-3  2.937e-3    3.258e1   3.117e1   1.459e0       6  s1e=1.03e3 fr1 gn2 fac=16
+pipe_guard         143.0    16   1   2     -     -   6.140e-2  8.368e-3  2.937e-3    3.258e1   3.117e1   1.459e0       6  s1e=1.03e3 fr1 gn2 fac=16
 -- L-BFGS-B on ‖x(q)−x*‖² from those seeds (history m=10) --
 method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
-s1+lb1               2.5     -   -   -     1    11    4.389e1   5.484e0   2.099e0    1.072e0   1.025e0   1.326e6       9  accepted=1 evals≈11
-s1+lb3               2.8     -   -   -     3    13    3.717e1   4.692e0   1.778e0    1.069e0   1.023e0   5.116e5      38  accepted=3 evals≈13
+s1+lb1               2.4     -   -   -     1    11    4.389e1   5.484e0   2.099e0    1.072e0   1.025e0   1.326e6       9  accepted=1 evals≈11
+s1+lb3               2.7     -   -   -     3    13    3.717e1   4.692e0   1.778e0    1.069e0   1.023e0   5.116e5      38  accepted=3 evals≈13
 s1+lb10              4.4     -   -   -    10    20    2.183e1   3.701e0   1.044e0    1.433e0   1.371e0   1.933e5      79  accepted=10 evals≈20
-s1+lb20              7.0     -   -   -    20    30    6.333e0  8.319e-1  3.029e-1    1.269e1   1.214e1   1.121e4      58  accepted=20 evals≈30
+s1+lb20              6.8     -   -   -    20    30    6.333e0  8.319e-1  3.029e-1    1.269e1   1.214e1   1.121e4      58  accepted=20 evals≈30
 frozen1+lb1          1.0     -   -   -     1     3   7.346e-2  1.186e-2  3.514e-3    3.138e1   3.003e1  2.298e-1       6  accepted=1 evals≈3
 frozen1+lb3          1.5     -   -   -     3     5   7.193e-2  1.041e-2  3.441e-3    3.140e1   3.004e1  2.568e-1       5  accepted=3 evals≈5
-frozen1+lb10         3.0     -   -   -    10    12   6.930e-2  7.380e-3  3.315e-3    3.146e1   3.009e1  1.573e-1       2  accepted=10 evals≈12
-frozen1+lb20         5.7     -   -   -    20    22   6.748e-2  7.191e-3  3.228e-3    3.149e1   3.012e1  4.502e-2       2  accepted=20 evals≈22
-gn1+lb1              2.1     -   -   -     1     8    2.128e1   2.606e0   1.018e0    1.218e0   1.166e0   1.380e5       4  accepted=1 evals≈8
-gn1+lb3              2.7     -   -   -     3    11    1.863e1   2.363e0  8.914e-1    1.215e0   1.162e0   6.880e4       4  accepted=3 evals≈11
-gn1+lb10             4.1     -   -   -    10    19    1.304e1   1.935e0  6.236e-1    1.640e0   1.569e0   1.147e5      61  accepted=10 evals≈19
-gn1+lb20             6.5     -   -   -    20    29    8.881e0   1.364e0  4.248e-1    5.055e0   4.837e0   9.756e4      55  accepted=20 evals≈29
+frozen1+lb10         2.9     -   -   -    10    12   6.930e-2  7.380e-3  3.315e-3    3.146e1   3.009e1  1.573e-1       2  accepted=10 evals≈12
+frozen1+lb20         5.4     -   -   -    20    22   6.748e-2  7.191e-3  3.228e-3    3.149e1   3.012e1  4.502e-2       2  accepted=20 evals≈22
+gn1+lb1              1.9     -   -   -     1     8    2.130e1   2.608e0   1.019e0    1.219e0   1.166e0   1.387e5       4  accepted=1 evals≈8
+gn1+lb3              2.5     -   -   -     3    11    1.863e1   2.363e0  8.911e-1    1.215e0   1.162e0   6.937e4       4  accepted=3 evals≈11
+gn1+lb10             4.3     -   -   -    10    19    1.319e1   1.977e0  6.308e-1    1.605e0   1.535e0   1.158e5      61  accepted=10 evals≈19
+gn1+lb20             6.7     -   -   -    20    29    8.474e0   1.257e0  4.054e-1    5.764e0   5.515e0   6.917e4      54  accepted=20 evals≈29
+pipe+lb1             1.3     -   -   -     1     5   6.112e-2  6.057e-3  2.924e-3    3.258e1   3.117e1  2.480e-1       5  accepted=1 evals≈5
+pipe+lb3             1.8     -   -   -     3     7   6.097e-2  5.839e-3  2.917e-3    3.258e1   3.117e1  9.454e-2       5  accepted=3 evals≈7
+pipe+lb10            7.0     -   -   -    10    14   6.077e-2  5.805e-3  2.907e-3    3.258e1   3.117e1  9.005e-2       1  accepted=10 evals≈14
+pipe+lb20            5.5     -   -   -    20    24   6.068e-2  5.784e-3  2.903e-3    3.258e1   3.117e1  1.667e-2       3  accepted=20 evals≈24
   trace s1+lb10 geom/L per eval: 5.169e1 3.348e1 2.792e1 2.602e1 2.389e1 6.746e1 4.791e1 4.718e2 1.033e2 4.238e2 4.389e1 4.075e1 3.717e1 3.626e1 3.420e1 3.150e1 2.922e1 2.706e1 2.551e1 2.183e1
   trace frozen1+lb10 geom/L per eval: 7.410e-2 2.715e-1 7.346e-2 7.305e-2 7.193e-2 7.183e-2 7.125e-2 7.098e-2 7.062e-2 7.025e-2 6.973e-2 6.930e-2
-  trace gn1+lb10 geom/L per eval: 2.573e1 3.952e1 2.064e1 1.796e1 1.628e1 5.197e2 8.394e1 2.128e1 2.009e1 2.012e1 1.863e1 1.940e1 1.834e1 1.780e1 1.656e1 1.523e1 1.454e1 1.410e1 1.304e1
+  trace gn1+lb10 geom/L per eval: 2.573e1 3.952e1 2.064e1 1.796e1 1.628e1 5.197e2 8.370e1 2.130e1 2.010e1 2.012e1 1.863e1 1.940e1 1.833e1 1.780e1 1.657e1 1.523e1 1.457e1 1.415e1 1.319e1
+  trace pipe+lb10 geom/L per eval: 6.140e-2 1.013e-1 7.279e-2 6.150e-2 6.112e-2 6.109e-2 6.097e-2 6.092e-2 6.087e-2 6.083e-2 6.082e-2 6.080e-2 6.079e-2 6.077e-2
   identity check s1: forward ‖x−x*‖=1.034e3  scored geom=1.034e3  (should match)
 
 === cabletruss16 jit2%d box=loose (ne=47, nfree=30)  L=20.0000 ===
@@ -131,19 +151,19 @@ gn1+lb20             6.5     -   -   -    20    29    8.881e0   1.364e0  4.248e-
 -- linearised CWLS / Gauss–Newton from q* (seed guard off except pipe_guard) --
 method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
 s1                   0.7     -   0   0     -     -    1.870e0  4.938e-1  3.414e-1    1.509e0  6.317e-1   2.455e3       0  lib_err=3.74e1
-frozen1              1.1     3   1   0     -     -   1.607e-2  5.290e-3  2.934e-3    4.535e0   1.899e0   3.070e0       1  s1e=3.74e1 fr1 gn0 fac=3
+frozen1              1.0     3   1   0     -     -   1.607e-2  5.290e-3  2.934e-3    4.535e0   1.899e0   3.070e0       1  s1e=3.74e1 fr1 gn0 fac=3
 frozen2              1.2     5   2   0     -     -   1.203e-2  4.986e-3  2.196e-3    4.282e0   1.793e0  5.023e-1       2  s1e=3.74e1 fr2 gn0 fac=5
 gn1                  1.0     2   0   1     -     -   8.536e-1  2.340e-1  1.559e-1    2.915e0   1.220e0   2.984e2       0  s1e=3.74e1 fr0 gn1 fac=2
 gn2                  1.1     4   0   2     -     -   3.400e-1  9.355e-2  6.208e-2    1.440e1   6.031e0   9.805e1       1  s1e=3.74e1 fr0 gn2 fac=4
 gn3                  1.3     7   0   3     -     -   1.469e-1  4.542e-2  2.682e-2    2.973e1   1.245e1   8.086e1       2  s1e=3.74e1 fr0 gn3 fac=7
 pipe                 1.2     6   1   2     -     -   1.151e-2  5.520e-3  2.102e-3    4.462e0   1.868e0  6.136e-2       2  s1e=3.74e1 fr1 gn2 fac=6
-pipe_guard           3.2    11   1   2     -     -   1.151e-2  5.520e-3  2.102e-3    4.462e0   1.868e0  6.136e-2       2  s1e=3.74e1 fr1 gn2 fac=11
+pipe_guard           3.3    11   1   2     -     -   1.151e-2  5.520e-3  2.102e-3    4.462e0   1.868e0  6.136e-2       2  s1e=3.74e1 fr1 gn2 fac=11
 -- L-BFGS-B on ‖x(q)−x*‖² from those seeds (history m=10) --
 method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
-s1+lb1               0.3     -   -   -     1     6    1.793e0  4.797e-1  3.273e-1    1.517e0  6.352e-1   9.429e2       0  accepted=1 evals≈6
+s1+lb1               0.2     -   -   -     1     6    1.793e0  4.797e-1  3.273e-1    1.517e0  6.352e-1   9.429e2       0  accepted=1 evals≈6
 s1+lb3               0.4     -   -   -     3    10    1.610e0  4.779e-1  2.939e-1    1.626e0  6.808e-1   5.935e2       0  accepted=3 evals≈10
 s1+lb10              0.7     -   -   -    10    19   8.783e-1  2.740e-1  1.604e-1    6.414e0   2.685e0   2.475e2       5  accepted=10 evals≈19
-s1+lb20              1.2     -   -   -    20    29   4.686e-1  1.877e-1  8.555e-2    2.291e1   9.593e0   1.711e1       6  accepted=20 evals≈29
+s1+lb20              1.1     -   -   -    20    29   4.686e-1  1.877e-1  8.555e-2    2.291e1   9.593e0   1.711e1       6  accepted=20 evals≈29
 frozen1+lb1          0.2     -   -   -     1     4   1.535e-2  5.401e-3  2.803e-3    4.535e0   1.899e0   2.705e0       1  accepted=1 evals≈4
 frozen1+lb3          0.2     -   -   -     3     6   1.419e-2  5.747e-3  2.591e-3    4.536e0   1.899e0  3.685e-1       1  accepted=3 evals≈6
 frozen1+lb10         0.5     -   -   -    10    13   1.292e-2  5.576e-3  2.359e-3    4.530e0   1.897e0  2.648e-1       1  accepted=10 evals≈13
@@ -151,144 +171,169 @@ frozen1+lb20         1.0     -   -   -    20    25   1.257e-2  5.738e-3  2.295e-
 gn1+lb1              0.1     -   -   -     1     3   8.353e-1  2.230e-1  1.525e-1    2.918e0   1.222e0   2.923e2       0  accepted=1 evals≈3
 gn1+lb3              0.4     -   -   -     3    11   7.536e-1  2.014e-1  1.376e-1    2.984e0   1.249e0   2.153e2       0  accepted=3 evals≈11
 gn1+lb10             0.7     -   -   -    10    19   5.299e-1  1.379e-1  9.675e-2    5.250e0   2.198e0   1.520e2       1  accepted=10 evals≈19
-gn1+lb20             1.1     -   -   -    20    30   4.015e-1  1.090e-1  7.331e-2    7.050e0   2.951e0   4.784e1       0  accepted=20 evals≈30
+gn1+lb20             1.2     -   -   -    20    30   4.015e-1  1.090e-1  7.331e-2    7.050e0   2.951e0   4.784e1       0  accepted=20 evals≈30
+pipe+lb1             0.2     -   -   -     1     4   1.151e-2  5.507e-3  2.102e-3    4.462e0   1.868e0  7.588e-3       2  accepted=1 evals≈4
+pipe+lb3             0.2     -   -   -     3     6   1.151e-2  5.513e-3  2.102e-3    4.462e0   1.868e0  2.990e-3       2  accepted=3 evals≈6
+pipe+lb10            0.5     -   -   -    10    13   1.151e-2  5.507e-3  2.102e-3    4.460e0   1.867e0  4.663e-3       2  accepted=10 evals≈13
+pipe+lb20            1.0     -   -   -    20    24   1.151e-2  5.495e-3  2.102e-3    4.455e0   1.865e0  1.337e-3       2  accepted=20 evals≈24
   trace s1+lb10 geom/L per eval: 1.870e0 1.093e0 1.445e0 1.832e2 1.862e0 1.793e0 1.691e0 5.635e0 1.943e0 1.610e0 1.541e0 1.531e0 1.112e1 1.462e0 1.385e0 1.168e0 1.094e0 9.857e-1 8.783e-1
   trace frozen1+lb10 geom/L per eval: 1.607e-2 9.278e-1 3.236e-1 1.535e-2 1.424e-2 1.419e-2 1.414e-2 1.395e-2 1.366e-2 1.330e-2 1.303e-2 1.295e-2 1.292e-2
   trace gn1+lb10 geom/L per eval: 8.536e-1 4.468e1 8.353e-1 1.425e0 8.284e-1 1.194e0 7.820e-1 1.272e0 7.801e-1 8.409e-1 7.536e-1 8.739e-1 7.458e-1 7.344e-1 6.936e-1 6.468e-1 5.905e-1 5.511e-1 5.299e-1
+  trace pipe+lb10 geom/L per eval: 1.151e-2 2.542e-1 1.152e-2 1.151e-2 1.151e-2 1.151e-2 1.151e-2 1.151e-2 1.151e-2 1.151e-2 1.151e-2 1.151e-2 1.151e-2
   identity check s1: forward ‖x−x*‖=3.740e1  scored geom=3.740e1  (should match)
 
 === quad21c_d1 jit2%d box=loose (ne=840, nfree=437)  L=20.0000 ===
   q-space step cosine from s1:  <frozen, lb1>=3.216e-1  <frozen, gn1>=1.204e-1  <gn1, lb1>=1.745e-1   ||Δfr||=1.253e2  ||Δgn||=1.533e1  ||Δlb1||=2.192e1
 -- linearised CWLS / Gauss–Newton from q* (seed guard off except pipe_guard) --
 method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
-s1                  17.8     -   0   0     -     -    2.187e2   2.906e1   1.046e1    2.667e0  8.801e-1   2.675e8       0  lib_err=4.37e3
-frozen1             67.5    10   1   0     -     -    1.288e2   1.013e1   6.159e0    6.997e1   2.309e1   6.312e7     325  s1e=4.37e3 fr1 gn0 fac=10
-frozen2            153.4    26   2   0     -     -    5.518e1   9.136e0   2.640e0    2.932e2   9.675e1   2.066e7     416  s1e=4.37e3 fr2 gn0 fac=26
-gn1                100.2    16   0   1     -     -    1.237e2   1.518e1   5.916e0    1.077e1   3.555e0   4.658e7     342  s1e=4.37e3 fr0 gn1 fac=16
-gn2                176.8    32   0   2     -     -    7.229e1   7.771e0   3.458e0    3.972e1   1.311e1   2.381e7     292  s1e=4.37e3 fr0 gn2 fac=32
-gn3                244.9    46   0   3     -     -    4.284e1   5.517e0   2.049e0    2.552e2   8.423e1   1.022e7     259  s1e=4.37e3 fr0 gn3 fac=46
-pipe               254.8    47   1   2     -     -    7.706e1   6.511e0   3.686e0    1.108e3   3.657e2   1.232e7     348  s1e=4.37e3 fr1 gn2 fac=47
-pipe_guard         369.6    68   1   2     -     -   6.600e-1  2.496e-1  3.157e-2    2.197e1   7.251e0   9.705e2      56  s1e=4.37e3 fr1 gn2 fac=68 guard→u
+s1                  17.3     -   0   0     -     -    2.187e2   2.906e1   1.046e1    2.667e0  8.801e-1   2.675e8       0  lib_err=4.37e3
+frozen1             67.7    10   1   0     -     -    1.288e2   1.013e1   6.159e0    6.997e1   2.309e1   6.312e7     325  s1e=4.37e3 fr1 gn0 fac=10
+frozen2            156.9    26   2   0     -     -    5.518e1   9.136e0   2.640e0    2.932e2   9.675e1   2.066e7     416  s1e=4.37e3 fr2 gn0 fac=26
+gn1                103.9    16   0   1     -     -    1.237e2   1.518e1   5.916e0    1.077e1   3.555e0   4.658e7     342  s1e=4.37e3 fr0 gn1 fac=16
+gn2                194.2    32   0   2     -     -    7.229e1   7.771e0   3.458e0    3.972e1   1.311e1   2.381e7     292  s1e=4.37e3 fr0 gn2 fac=32
+gn3                243.9    46   0   3     -     -    4.284e1   5.517e0   2.049e0    2.552e2   8.423e1   1.022e7     259  s1e=4.37e3 fr0 gn3 fac=46
+pipe               258.3    47   1   2     -     -    7.706e1   6.511e0   3.686e0    1.108e3   3.657e2   1.232e7     348  s1e=4.37e3 fr1 gn2 fac=47
+pipe_guard         368.8    68   1   2     -     -   6.600e-1  2.496e-1  3.157e-2    2.197e1   7.251e0   9.705e2      56  s1e=4.37e3 fr1 gn2 fac=68 guard→u
 -- L-BFGS-B on ‖x(q)−x*‖² from those seeds (history m=10) --
 method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
 s1+lb1               1.9     -   -   -     1     8    2.978e0  3.229e-1  1.424e-1    4.020e1   1.327e1   2.387e3       0  accepted=1 evals≈8
-s1+lb3               3.1     -   -   -     3    15    1.728e0  2.771e-1  8.266e-2    4.385e1   1.447e1   6.864e2       0  accepted=3 evals≈15
-s1+lb10              4.9     -   -   -    10    23   9.647e-1  2.570e-1  4.615e-2    4.522e1   1.492e1   3.126e2       2  accepted=10 evals≈23
-s1+lb20              7.1     -   -   -    20    33   6.079e-1  1.154e-1  2.908e-2    4.074e1   1.345e1   2.268e1       1  accepted=20 evals≈33
-frozen1+lb1          1.8     -   -   -     1     7    1.098e1  6.604e-1  5.252e-1    1.273e2   4.201e1   2.181e3       4  accepted=1 evals≈7
-frozen1+lb3          3.0     -   -   -     3    14    1.079e1  6.500e-1  5.160e-1    1.254e2   4.139e1   3.223e3       5  accepted=3 evals≈14
-frozen1+lb10         7.2     -   -   -    10    38    8.960e0  5.487e-1  4.286e-1    1.097e2   3.621e1   2.734e3       8  accepted=10 evals≈38
-frozen1+lb20        13.3     -   -   -    20    74    2.113e0  4.122e-1  1.011e-1    6.980e1   2.304e1   2.464e3       6  accepted=20 evals≈74
+s1+lb3               4.9     -   -   -     3    15    1.728e0  2.771e-1  8.266e-2    4.385e1   1.447e1   6.864e2       0  accepted=3 evals≈15
+s1+lb10              4.7     -   -   -    10    23   9.647e-1  2.570e-1  4.615e-2    4.522e1   1.492e1   3.126e2       2  accepted=10 evals≈23
+s1+lb20              7.0     -   -   -    20    33   6.079e-1  1.154e-1  2.908e-2    4.074e1   1.345e1   2.268e1       1  accepted=20 evals≈33
+frozen1+lb1          1.7     -   -   -     1     7    1.098e1  6.604e-1  5.252e-1    1.273e2   4.201e1   2.181e3       4  accepted=1 evals≈7
+frozen1+lb3          2.8     -   -   -     3    14    1.079e1  6.500e-1  5.160e-1    1.254e2   4.139e1   3.223e3       5  accepted=3 evals≈14
+frozen1+lb10         6.9     -   -   -    10    38    8.960e0  5.487e-1  4.286e-1    1.097e2   3.621e1   2.734e3       8  accepted=10 evals≈38
+frozen1+lb20        13.2     -   -   -    20    74    2.113e0  4.122e-1  1.011e-1    6.980e1   2.304e1   2.464e3       6  accepted=20 evals≈74
 gn1+lb1              1.7     -   -   -     1     7    1.097e1  6.507e-1  5.246e-1    1.227e2   4.049e1   1.359e3       8  accepted=1 evals≈7
-gn1+lb3              2.6     -   -   -     3    12    1.094e1  6.495e-1  5.236e-1    1.224e2   4.040e1   1.374e3       9  accepted=3 evals≈12
-gn1+lb10             7.0     -   -   -    10    37    3.841e0  4.693e-1  1.837e-1    9.144e1   3.018e1   5.764e3      12  accepted=10 evals≈37
-gn1+lb20             9.6     -   -   -    20    49    1.517e0  3.954e-1  7.256e-2    5.611e1   1.852e1   3.863e2      15  accepted=20 evals≈49
+gn1+lb3              2.5     -   -   -     3    12    1.094e1  6.495e-1  5.236e-1    1.224e2   4.040e1   1.374e3       9  accepted=3 evals≈12
+gn1+lb10             6.9     -   -   -    10    37    3.841e0  4.693e-1  1.837e-1    9.144e1   3.018e1   5.764e3      12  accepted=10 evals≈37
+gn1+lb20             9.3     -   -   -    20    49    1.517e0  3.954e-1  7.256e-2    5.611e1   1.852e1   3.863e2      15  accepted=20 evals≈49
+pipe+lb1             1.7     -   -   -     1     7    1.187e1  7.029e-1  5.679e-1    1.105e3   3.645e2   1.241e3       5  accepted=1 evals≈7
+pipe+lb3             3.7     -   -   -     3    19    7.941e0  6.290e-1  3.799e-1    1.105e3   3.647e2   5.693e3       7  accepted=3 evals≈19
+pipe+lb10            6.1     -   -   -    10    32    2.527e0  5.341e-1  1.209e-1    1.107e3   3.653e2   2.344e3       6  accepted=10 evals≈32
+pipe+lb20            8.8     -   -   -    20    44   9.979e-1  2.853e-1  4.774e-2    1.108e3   3.657e2   5.089e1       6  accepted=20 evals≈44
   trace s1+lb10 geom/L per eval: 2.187e2 1.866e1 1.858e1 1.834e1 1.763e1 1.558e1 1.019e1 2.978e0 2.977e0 2.977e0 2.974e0 2.961e0 2.913e0 2.727e0 1.728e0 1.371e0 1.214e0 1.155e0 1.059e0 1.035e0 1.025e0 9.992e-1 9.647e-1
   trace frozen1+lb10 geom/L per eval: 1.288e2 1.932e1 1.900e1 1.841e1 1.730e1 1.510e1 1.098e1 1.098e1 1.098e1 1.098e1 1.097e1 1.096e1 1.089e1 1.079e1 1.079e1 1.079e1 1.079e1 1.078e1 1.077e1 1.070e1 1.043e1 1.012e1 1.012e1 1.012e1 1.012e1 1.011e1 1.009e1 1.001e1 9.648e0 9.370e0 9.369e0 9.369e0 9.367e0 9.360e0 9.329e0 9.205e0 8.960e0 8.960e0
   trace gn1+lb10 geom/L per eval: 1.237e2 1.866e1 1.857e1 1.833e1 1.762e1 1.569e1 1.097e1 1.097e1 1.097e1 1.097e1 1.096e1 1.094e1 1.094e1 1.094e1 1.094e1 1.092e1 1.084e1 1.077e1 1.077e1 1.077e1 1.077e1 1.076e1 1.074e1 1.065e1 1.025e1 8.548e0 8.546e0 8.545e0 8.539e0 8.517e0 8.426e0 8.024e0 5.506e0 5.194e0 4.952e0 8.454e0 3.841e0
+  trace pipe+lb10 geom/L per eval: 7.706e1 1.862e1 1.852e1 1.825e1 1.754e1 1.578e1 1.187e1 1.187e1 1.187e1 1.186e1 1.181e1 1.165e1 1.165e1 1.165e1 1.163e1 1.158e1 1.136e1 1.014e1 7.941e0 7.938e0 2.250e1 6.782e0 6.048e1 5.729e0 2.100e1 4.683e0 7.575e0 3.293e0 3.325e0 2.911e0 2.790e0 2.527e0
   identity check s1: forward ‖x−x*‖=4.375e3  scored geom=4.375e3  (should match)
 
 === holes21c jit2%d box=loose (ne=771, nfree=437)  L=20.0000 ===
   q-space step cosine from s1:  <frozen, lb1>=5.763e-1  <frozen, gn1>=2.657e-1  <gn1, lb1>=3.267e-1   ||Δfr||=6.183e1  ||Δgn||=2.252e0  ||Δlb1||=6.369e1
 -- linearised CWLS / Gauss–Newton from q* (seed guard off except pipe_guard) --
 method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
-s1                  17.1     -   0   0     -     -    1.480e2   1.235e1   7.080e0   4.821e-1  9.744e-1   3.850e7       0  lib_err=2.96e3
-frozen1             45.5     7   1   0     -     -   8.757e-1  3.328e-1  4.189e-2    8.675e0   1.753e1   1.988e4     108  s1e=2.96e3 fr1 gn0 fac=7
-frozen2             75.6    15   2   0     -     -   2.773e-1  1.265e-1  1.327e-2    8.344e0   1.686e1   1.430e3      58  s1e=2.96e3 fr2 gn0 fac=15
-gn1                 75.7    15   0   1     -     -    7.313e1   6.110e0   3.498e0   7.327e-1   1.481e0   4.880e6     215  s1e=2.96e3 fr0 gn1 fac=15
-gn2                132.2    30   0   2     -     -    3.614e1   3.016e0   1.729e0    4.604e0   9.304e0   6.683e5     180  s1e=2.96e3 fr0 gn2 fac=30
-gn3                184.1    44   0   3     -     -    1.790e1   1.496e0  8.561e-1    9.545e1   1.929e2   1.088e5     165  s1e=2.96e3 fr0 gn3 fac=44
-pipe                94.0    20   1   2     -     -   7.256e-1  3.561e-1  3.471e-2    9.363e0   1.892e1   2.955e4      57  s1e=2.96e3 fr1 gn2 fac=20
-pipe_guard         170.2    37   1   2     -     -   1.549e-1  5.157e-2  7.409e-3    6.968e0   1.408e1   6.501e1      34  s1e=2.96e3 fr1 gn2 fac=37 guard→u
+s1                  17.9     -   0   0     -     -    1.480e2   1.235e1   7.080e0   4.821e-1  9.744e-1   3.850e7       0  lib_err=2.96e3
+frozen1             46.1     7   1   0     -     -   8.757e-1  3.328e-1  4.189e-2    8.675e0   1.753e1   1.988e4     108  s1e=2.96e3 fr1 gn0 fac=7
+frozen2             76.8    15   2   0     -     -   2.773e-1  1.265e-1  1.327e-2    8.344e0   1.686e1   1.430e3      58  s1e=2.96e3 fr2 gn0 fac=15
+gn1                 76.1    15   0   1     -     -    7.313e1   6.110e0   3.498e0   7.327e-1   1.481e0   4.880e6     215  s1e=2.96e3 fr0 gn1 fac=15
+gn2                133.5    30   0   2     -     -    3.614e1   3.016e0   1.729e0    4.604e0   9.304e0   6.683e5     180  s1e=2.96e3 fr0 gn2 fac=30
+gn3                187.2    44   0   3     -     -    1.790e1   1.496e0  8.561e-1    9.545e1   1.929e2   1.088e5     165  s1e=2.96e3 fr0 gn3 fac=44
+pipe                99.2    20   1   2     -     -   7.256e-1  3.561e-1  3.471e-2    9.363e0   1.892e1   2.955e4      57  s1e=2.96e3 fr1 gn2 fac=20
+pipe_guard         172.2    37   1   2     -     -   1.549e-1  5.157e-2  7.409e-3    6.968e0   1.408e1   6.501e1      34  s1e=2.96e3 fr1 gn2 fac=37 guard→u
 -- L-BFGS-B on ‖x(q)−x*‖² from those seeds (history m=10) --
 method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
-s1+lb1               1.7     -   -   -     1     7    3.213e0  1.892e-1  1.537e-1    6.214e1   1.256e2   1.802e2       0  accepted=1 evals≈7
+s1+lb1               1.6     -   -   -     1     7    3.213e0  1.892e-1  1.537e-1    6.214e1   1.256e2   1.802e2       0  accepted=1 evals≈7
 s1+lb3               4.4     -   -   -     3    25    2.774e0  2.686e-1  1.327e-1    5.939e1   1.200e2   2.451e2       1  accepted=3 evals≈25
-s1+lb10              7.2     -   -   -    10    39   7.500e-1  2.330e-1  3.588e-2    4.441e1   8.976e1   3.382e2       0  accepted=10 evals≈39
-s1+lb20              9.6     -   -   -    20    52   5.236e-1  1.519e-1  2.505e-2    4.231e1   8.550e1   4.982e1       0  accepted=20 evals≈52
+s1+lb10              7.0     -   -   -    10    39   7.500e-1  2.330e-1  3.588e-2    4.441e1   8.976e1   3.382e2       0  accepted=10 evals≈39
+s1+lb20              9.5     -   -   -    20    52   5.236e-1  1.519e-1  2.505e-2    4.231e1   8.550e1   4.982e1       0  accepted=20 evals≈52
 frozen1+lb1          1.9     -   -   -     1     9   4.956e-1  8.696e-2  2.371e-2    8.916e0   1.802e1   5.211e2      16  accepted=1 evals≈9
 frozen1+lb3          2.6     -   -   -     3    12   2.517e-1  4.908e-2  1.204e-2    8.881e0   1.795e1   7.602e1       7  accepted=3 evals≈12
-frozen1+lb10         4.0     -   -   -    10    19   1.791e-1  3.838e-2  8.566e-3    8.961e0   1.811e1   5.140e1       4  accepted=10 evals≈19
-frozen1+lb20         6.3     -   -   -    20    29   1.324e-1  2.502e-2  6.335e-3    8.802e0   1.779e1   1.009e1       1  accepted=20 evals≈29
-gn1+lb1              1.5     -   -   -     1     6    4.290e0  2.419e-1  2.052e-1    1.868e2   3.776e2   4.649e1       2  accepted=1 evals≈6
-gn1+lb3              2.0     -   -   -     3     9    4.195e0  2.339e-1  2.007e-1    1.811e2   3.661e2   3.369e1       1  accepted=3 evals≈9
-gn1+lb10             6.1     -   -   -    10    32    2.654e0  4.225e-1  1.270e-1    1.456e2   2.942e2   1.598e3       1  accepted=10 evals≈32
-gn1+lb20             9.1     -   -   -    20    49   7.623e-1  2.167e-1  3.647e-2    3.274e2   6.617e2   3.213e1       0  accepted=20 evals≈49
+frozen1+lb10         4.1     -   -   -    10    19   1.791e-1  3.838e-2  8.566e-3    8.961e0   1.811e1   5.140e1       4  accepted=10 evals≈19
+frozen1+lb20         5.9     -   -   -    20    29   1.324e-1  2.502e-2  6.335e-3    8.802e0   1.779e1   1.009e1       1  accepted=20 evals≈29
+gn1+lb1              1.6     -   -   -     1     6    4.290e0  2.419e-1  2.052e-1    1.868e2   3.776e2   4.649e1       2  accepted=1 evals≈6
+gn1+lb3              2.3     -   -   -     3     9    4.195e0  2.339e-1  2.007e-1    1.811e2   3.661e2   3.369e1       1  accepted=3 evals≈9
+gn1+lb10             6.0     -   -   -    10    32    2.654e0  4.225e-1  1.270e-1    1.456e2   2.942e2   1.598e3       1  accepted=10 evals≈32
+gn1+lb20             9.0     -   -   -    20    49   7.623e-1  2.167e-1  3.647e-2    3.274e2   6.617e2   3.213e1       0  accepted=20 evals≈49
+pipe+lb1             1.8     -   -   -     1     8   4.326e-1  1.128e-1  2.069e-2    1.013e1   2.047e1   1.592e2      12  accepted=1 evals≈8
+pipe+lb3             2.4     -   -   -     3    11   2.436e-1  7.562e-2  1.166e-2    1.007e1   2.035e1   2.366e2       1  accepted=3 evals≈11
+pipe+lb10            3.7     -   -   -    10    19   1.533e-1  4.237e-2  7.334e-3    1.016e1   2.052e1   1.240e1       6  accepted=10 evals≈19
+pipe+lb20            6.0     -   -   -    20    29   1.269e-1  3.567e-2  6.070e-3    1.021e1   2.064e1   5.381e0       4  accepted=20 evals≈29
   trace s1+lb10 geom/L per eval: 1.480e2 4.833e0 4.819e0 4.777e0 4.653e0 4.285e0 3.213e0 3.213e0 3.213e0 3.213e0 3.212e0 3.210e0 3.201e0 3.164e0 3.085e0 3.085e0 3.085e0 3.084e0 3.084e0 3.081e0 3.070e0 3.025e0 2.837e0 5.075e0 2.774e0 2.989e0 2.693e0 7.564e2 2.375e0 2.045e3 1.825e0 1.512e1 1.302e0 2.055e0 1.091e0 1.414e0 8.368e-1 1.216e0 7.500e-1
   trace frozen1+lb10 geom/L per eval: 8.757e-1 8.001e0 6.338e0 5.261e0 4.153e0 3.023e0 1.941e0 1.027e0 4.956e-1 4.500e-1 4.950e-1 2.517e-1 2.478e-1 2.436e-1 2.414e-1 2.336e-1 2.238e-1 1.986e-1 1.791e-1
   trace gn1+lb10 geom/L per eval: 7.313e1 4.833e0 4.819e0 4.778e0 4.655e0 4.290e0 4.290e0 6.522e0 4.195e0 6.712e0 4.149e0 4.067e0 7.257e2 3.895e0 3.580e0 3.217e0 3.477e0 3.191e0 3.191e0 5.490e0 3.204e0 3.174e0 1.837e3 2.968e0 1.664e3 4.427e0 4.578e0 4.174e0 3.282e0 2.887e0 3.632e1 2.654e0
+  trace pipe+lb10 geom/L per eval: 7.256e-1 8.430e0 5.596e0 4.357e0 3.187e0 2.021e0 1.032e0 4.326e-1 4.188e-1 5.166e-1 2.436e-1 3.722e-1 2.069e-1 2.052e-1 1.968e-1 1.905e-1 1.724e-1 1.601e-1 1.533e-1
   identity check s1: forward ‖x−x*‖=2.960e3  scored geom=2.960e3  (should match)
 
 === crease21 jit2%d box=loose (ne=840, nfree=361)  L=20.0000 ===
   q-space step cosine from s1:  <frozen, lb1>=1.848e-1  <frozen, gn1>=7.158e-1  <gn1, lb1>=1.959e-1   ||Δfr||=5.628e1  ||Δgn||=1.686e1  ||Δlb1||=7.941e2
 -- linearised CWLS / Gauss–Newton from q* (seed guard off except pipe_guard) --
 method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
-s1                  15.6     -   0   0     -     -    5.451e0  5.696e-1  2.869e-1    2.917e0  7.158e-1   3.697e3       0  lib_err=1.09e2
-frozen1             34.7     4   1   0     -     -   7.001e-2  3.998e-2  3.684e-3    8.241e0   2.022e0   5.897e0      16  s1e=1.09e2 fr1 gn0 fac=4
-frozen2             56.1     9   1   0     -     -   7.001e-2  3.998e-2  3.684e-3    8.241e0   2.022e0   5.897e0      16  s1e=1.09e2 fr1 gn0 fac=9
-gn1                 37.0     5   0   1     -     -    2.174e0  2.394e-1  1.144e-1    4.955e0   1.216e0   5.015e2      26  s1e=1.09e2 fr0 gn1 fac=5
-gn2                 57.0    10   0   2     -     -   6.846e-1  8.592e-2  3.603e-2    7.472e0   1.833e0   7.077e1      15  s1e=1.09e2 fr0 gn2 fac=10
-gn3                 72.6    14   0   3     -     -   1.504e-1  2.483e-2  7.917e-3    8.993e0   2.207e0   9.889e0      12  s1e=1.09e2 fr0 gn3 fac=14
-pipe                69.0    13   1   2     -     -   4.290e-2  1.123e-2  2.258e-3    9.259e0   2.272e0  2.033e-1       5  s1e=1.09e2 fr1 gn2 fac=13
-pipe_guard         130.5    26   1   2     -     -   4.150e-2  5.361e-3  2.184e-3    9.705e0   2.381e0  2.097e-1       6  s1e=1.09e2 fr1 gn2 fac=26 guard→u
+s1                  16.3     -   0   0     -     -    5.451e0  5.696e-1  2.869e-1    2.917e0  7.158e-1   3.697e3       0  lib_err=1.09e2
+frozen1             35.0     4   1   0     -     -   7.001e-2  3.998e-2  3.684e-3    8.241e0   2.022e0   5.897e0      16  s1e=1.09e2 fr1 gn0 fac=4
+frozen2             59.3     9   1   0     -     -   7.001e-2  3.998e-2  3.684e-3    8.241e0   2.022e0   5.897e0      16  s1e=1.09e2 fr1 gn0 fac=9
+gn1                 38.9     5   0   1     -     -    2.174e0  2.394e-1  1.144e-1    4.955e0   1.216e0   5.015e2      26  s1e=1.09e2 fr0 gn1 fac=5
+gn2                 58.9    10   0   2     -     -   6.846e-1  8.592e-2  3.603e-2    7.472e0   1.833e0   7.077e1      15  s1e=1.09e2 fr0 gn2 fac=10
+gn3                 74.2    14   0   3     -     -   1.504e-1  2.483e-2  7.917e-3    8.993e0   2.207e0   9.889e0      12  s1e=1.09e2 fr0 gn3 fac=14
+pipe                71.6    13   1   2     -     -   4.290e-2  1.123e-2  2.258e-3    9.259e0   2.272e0  2.033e-1       5  s1e=1.09e2 fr1 gn2 fac=13
+pipe_guard         137.7    26   1   2     -     -   4.150e-2  5.361e-3  2.184e-3    9.705e0   2.381e0  2.097e-1       6  s1e=1.09e2 fr1 gn2 fac=26 guard→u
 -- L-BFGS-B on ‖x(q)−x*‖² from those seeds (history m=10) --
 method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
 s1+lb1               1.1     -   -   -     1     4    3.362e0  2.973e-1  1.770e-1    2.291e3   5.621e2   8.410e0       0  accepted=1 evals≈4
 s1+lb3               1.5     -   -   -     3     6    3.187e0  2.638e-1  1.678e-1    2.297e3   5.636e2   4.455e0       3  accepted=3 evals≈6
-s1+lb10              3.1     -   -   -    10    15    2.988e0  2.397e-1  1.573e-1    2.347e3   5.759e2   1.364e0      25  accepted=10 evals≈15
-s1+lb20              6.5     -   -   -    20    31    2.585e0  2.883e-1  1.361e-1    2.646e3   6.493e2   3.421e1      67  accepted=20 evals≈31
+s1+lb10              3.7     -   -   -    10    15    2.988e0  2.397e-1  1.573e-1    2.347e3   5.759e2   1.364e0      25  accepted=10 evals≈15
+s1+lb20              6.2     -   -   -    20    31    2.585e0  2.883e-1  1.361e-1    2.646e3   6.493e2   3.421e1      67  accepted=20 evals≈31
 frozen1+lb1          1.0     -   -   -     1     4   5.780e-2  1.732e-2  3.042e-3    8.286e0   2.033e0  5.262e-1      10  accepted=1 evals≈4
-frozen1+lb3          1.7     -   -   -     3     7   5.628e-2  1.601e-2  2.962e-3    8.279e0   2.031e0  4.903e-1       5  accepted=3 evals≈7
-frozen1+lb10         3.0     -   -   -    10    14   5.070e-2  9.378e-3  2.668e-3    8.248e0   2.024e0  1.770e-1       5  accepted=10 evals≈14
-frozen1+lb20         5.4     -   -   -    20    25   4.828e-2  7.342e-3  2.541e-3    8.286e0   2.033e0  9.133e-2       3  accepted=20 evals≈25
-gn1+lb1              1.2     -   -   -     1     5    1.881e0  1.830e-1  9.901e-2    1.245e2   3.054e1   1.948e1       1  accepted=1 evals≈5
-gn1+lb3              2.1     -   -   -     3     9   9.532e-1  1.180e-1  5.017e-2    1.297e2   3.183e1   1.679e1       5  accepted=3 evals≈9
-gn1+lb10             3.4     -   -   -    10    17   5.930e-1  9.973e-2  3.121e-2    1.279e2   3.137e1   5.433e0       1  accepted=10 evals≈17
-gn1+lb20             5.9     -   -   -    20    29   4.265e-1  9.089e-2  2.245e-2    1.135e2   2.784e1   2.932e0       2  accepted=20 evals≈29
+frozen1+lb3          1.5     -   -   -     3     7   5.628e-2  1.601e-2  2.962e-3    8.279e0   2.031e0  4.903e-1       5  accepted=3 evals≈7
+frozen1+lb10         2.8     -   -   -    10    14   5.070e-2  9.378e-3  2.668e-3    8.248e0   2.024e0  1.770e-1       5  accepted=10 evals≈14
+frozen1+lb20         5.3     -   -   -    20    25   4.828e-2  7.342e-3  2.541e-3    8.286e0   2.033e0  9.133e-2       3  accepted=20 evals≈25
+gn1+lb1              1.1     -   -   -     1     5    1.881e0  1.830e-1  9.901e-2    1.245e2   3.054e1   1.948e1       1  accepted=1 evals≈5
+gn1+lb3              1.8     -   -   -     3     9   9.532e-1  1.180e-1  5.017e-2    1.297e2   3.183e1   1.679e1       5  accepted=3 evals≈9
+gn1+lb10             3.6     -   -   -    10    17   5.930e-1  9.973e-2  3.121e-2    1.279e2   3.137e1   5.433e0       1  accepted=10 evals≈17
+gn1+lb20             7.0     -   -   -    20    29   4.265e-1  9.089e-2  2.245e-2    1.135e2   2.784e1   2.932e0       2  accepted=20 evals≈29
+pipe+lb1             0.9     -   -   -     1     3   4.272e-2  1.040e-2  2.248e-3    9.258e0   2.272e0  8.568e-2       3  accepted=1 evals≈3
+pipe+lb3             1.5     -   -   -     3     6   4.267e-2  1.023e-2  2.246e-3    9.259e0   2.272e0  9.821e-2       1  accepted=3 evals≈6
+pipe+lb10            3.4     -   -   -    10    14   4.211e-2  7.580e-3  2.216e-3    9.264e0   2.273e0  7.043e-2       2  accepted=10 evals≈14
+pipe+lb20            5.1     -   -   -    20    25   4.173e-2  5.724e-3  2.196e-3    9.271e0   2.275e0  6.778e-2       2  accepted=20 evals≈25
   trace s1+lb10 geom/L per eval: 5.451e0 3.521e0 3.479e0 3.362e0 3.335e0 3.187e0 3.075e0 3.051e0 3.038e0 3.023e0 3.021e0 3.021e0 3.008e0 2.997e0 2.988e0
   trace frozen1+lb10 geom/L per eval: 7.001e-2 1.351e-1 7.157e-2 5.780e-2 6.466e-2 5.686e-2 5.628e-2 5.393e-2 5.318e-2 5.246e-2 5.191e-2 5.149e-2 5.100e-2 5.070e-2
   trace gn1+lb10 geom/L per eval: 2.174e0 3.361e0 3.128e0 2.650e0 1.881e0 1.569e0 1.453e0 1.407e0 9.532e-1 3.617e0 8.134e-1 7.480e-1 6.947e-1 6.649e-1 6.329e-1 6.037e-1 5.930e-1
+  trace pipe+lb10 geom/L per eval: 4.290e-2 5.109e-2 4.272e-2 4.274e-2 4.269e-2 4.267e-2 4.253e-2 4.246e-2 4.238e-2 4.231e-2 4.226e-2 4.216e-2 4.225e-2 4.211e-2
   identity check s1: forward ‖x−x*‖=1.090e2  scored geom=1.090e2  (should match)
 
 === barrel16x12 jit2%d box=loose (ne=360, nfree=168)  L=15.0000 ===
   q-space step cosine from s1:  <frozen, lb1>=4.559e-1  <frozen, gn1>=6.774e-1  <gn1, lb1>=5.337e-1   ||Δfr||=1.241e1  ||Δgn||=5.138e0  ||Δlb1||=6.241e0
 -- linearised CWLS / Gauss–Newton from q* (seed guard off except pipe_guard) --
 method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
-s1                   5.0     -   0   0     -     -    1.847e0  2.801e-1  1.425e-1    1.197e0  5.504e-1   9.972e1       0  lib_err=2.77e1
+s1                   5.1     -   0   0     -     -    1.847e0  2.801e-1  1.425e-1    1.197e0  5.504e-1   9.972e1       0  lib_err=2.77e1
 frozen1             12.5     5   1   0     -     -   3.735e-2  7.088e-3  2.881e-3    2.102e0  9.663e-1  4.104e-1       9  s1e=2.77e1 fr1 gn0 fac=5
-frozen2             15.2     7   2   0     -     -   3.297e-2  5.681e-3  2.544e-3    2.119e0  9.739e-1  6.409e-2       9  s1e=2.77e1 fr2 gn0 fac=7
-gn1                 10.0     3   0   1     -     -   5.655e-1  1.052e-1  4.363e-2    1.574e0  7.237e-1   1.367e1       0  s1e=2.77e1 fr0 gn1 fac=3
+frozen2             15.0     7   2   0     -     -   3.297e-2  5.681e-3  2.544e-3    2.119e0  9.739e-1  6.409e-2       9  s1e=2.77e1 fr2 gn0 fac=7
+gn1                  9.9     3   0   1     -     -   5.655e-1  1.052e-1  4.363e-2    1.574e0  7.237e-1   1.367e1       0  s1e=2.77e1 fr0 gn1 fac=3
 gn2                 11.5     4   0   2     -     -   1.381e-1  3.354e-2  1.065e-2    1.937e0  8.904e-1   1.478e0       0  s1e=2.77e1 fr0 gn2 fac=4
-gn3                 12.9     5   0   3     -     -   4.200e-2  1.048e-2  3.241e-3    2.038e0  9.366e-1  1.806e-1       0  s1e=2.77e1 fr0 gn3 fac=5
-pipe                19.3    10   1   2     -     -   3.063e-2  4.664e-3  2.363e-3    2.031e0  9.333e-1  1.137e-1       1  s1e=2.77e1 fr1 gn2 fac=10
-pipe_guard          40.8    15   1   2     -     -   3.060e-2  4.674e-3  2.361e-3    2.024e0  9.303e-1  1.897e-2       0  s1e=2.77e1 fr1 gn2 fac=15 guard→u
+gn3                 12.8     5   0   3     -     -   4.200e-2  1.048e-2  3.241e-3    2.038e0  9.366e-1  1.806e-1       0  s1e=2.77e1 fr0 gn3 fac=5
+pipe                19.0    10   1   2     -     -   3.063e-2  4.664e-3  2.363e-3    2.031e0  9.333e-1  1.137e-1       1  s1e=2.77e1 fr1 gn2 fac=10
+pipe_guard          40.7    15   1   2     -     -   3.060e-2  4.674e-3  2.361e-3    2.024e0  9.303e-1  1.897e-2       0  s1e=2.77e1 fr1 gn2 fac=15 guard→u
 -- L-BFGS-B on ‖x(q)−x*‖² from those seeds (history m=10) --
 method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
-s1+lb1               0.8     -   -   -     1     6    1.105e0  1.597e-1  8.525e-2    6.188e0   2.844e0   1.034e2       0  accepted=1 evals≈6
-s1+lb3               0.9     -   -   -     3     8   4.448e-1  6.898e-2  3.431e-2    6.775e0   3.114e0   3.001e1       4  accepted=3 evals≈8
-s1+lb10              1.8     -   -   -    10    17   2.235e-1  5.461e-2  1.724e-2    6.504e0   2.990e0   1.035e1       0  accepted=10 evals≈17
-s1+lb20              2.9     -   -   -    20    27   9.053e-2  2.347e-2  6.985e-3    4.070e0   1.871e0   1.656e0       0  accepted=20 evals≈27
+s1+lb1               0.7     -   -   -     1     6    1.105e0  1.597e-1  8.525e-2    6.188e0   2.844e0   1.034e2       0  accepted=1 evals≈6
+s1+lb3               1.0     -   -   -     3     8   4.448e-1  6.898e-2  3.431e-2    6.775e0   3.114e0   3.001e1       4  accepted=3 evals≈8
+s1+lb10              2.1     -   -   -    10    17   2.235e-1  5.461e-2  1.724e-2    6.504e0   2.990e0   1.035e1       0  accepted=10 evals≈17
+s1+lb20              3.2     -   -   -    20    27   9.053e-2  2.347e-2  6.985e-3    4.070e0   1.871e0   1.656e0       0  accepted=20 evals≈27
 frozen1+lb1          0.4     -   -   -     1     3   3.729e-2  7.070e-3  2.877e-3    2.102e0  9.663e-1  4.602e-1       0  accepted=1 evals≈3
-frozen1+lb3          0.8     -   -   -     3     6   3.677e-2  6.858e-3  2.837e-3    2.099e0  9.650e-1  4.673e-1       0  accepted=3 evals≈6
+frozen1+lb3          0.7     -   -   -     3     6   3.677e-2  6.858e-3  2.837e-3    2.099e0  9.650e-1  4.673e-1       0  accepted=3 evals≈6
 frozen1+lb10         1.5     -   -   -    10    13   3.598e-2  6.637e-3  2.776e-3    2.100e0  9.651e-1  1.788e-1       0  accepted=10 evals≈13
 frozen1+lb20         2.6     -   -   -    20    24   3.537e-2  6.536e-3  2.729e-3    2.099e0  9.650e-1  1.157e-1       0  accepted=20 evals≈24
 gn1+lb1              0.6     -   -   -     1     5   3.925e-1  7.178e-2  3.028e-2    2.002e0  9.201e-1   2.745e1       0  accepted=1 evals≈5
 gn1+lb3              0.8     -   -   -     3     7   3.413e-1  6.220e-2  2.633e-2    3.557e0   1.635e0   2.148e1       0  accepted=3 evals≈7
-gn1+lb10             1.6     -   -   -    10    14   1.629e-1  3.252e-2  1.257e-2    2.884e0   1.325e0   5.240e0       0  accepted=10 evals≈14
+gn1+lb10             1.5     -   -   -    10    14   1.629e-1  3.252e-2  1.257e-2    2.884e0   1.325e0   5.240e0       0  accepted=10 evals≈14
 gn1+lb20             2.6     -   -   -    20    24   7.889e-2  1.501e-2  6.087e-3    2.833e0   1.302e0   2.358e0       0  accepted=20 evals≈24
+pipe+lb1             0.4     -   -   -     1     3   3.063e-2  4.670e-3  2.363e-3    2.031e0  9.333e-1  2.559e-2       0  accepted=1 evals≈3
+pipe+lb3             0.7     -   -   -     3     6   3.062e-2  4.674e-3  2.363e-3    2.030e0  9.333e-1  4.885e-2       0  accepted=3 evals≈6
+pipe+lb10            2.8     -   -   -    10    13   3.061e-2  4.725e-3  2.362e-3    2.031e0  9.336e-1  8.400e-3       0  accepted=10 evals≈13
+pipe+lb20            2.6     -   -   -    20    25   3.060e-2  4.720e-3  2.361e-3    2.032e0  9.341e-1  3.987e-2       0  accepted=20 evals≈25
   trace s1+lb10 geom/L per eval: 1.847e0 3.750e0 3.503e0 2.976e0 2.063e0 1.105e0 8.558e-1 4.448e-1 4.767e-1 4.207e-1 3.982e-1 2.756e-1 3.675e-1 2.562e-1 2.488e-1 2.413e-1 2.235e-1
   trace frozen1+lb10 geom/L per eval: 3.735e-2 2.740e-1 3.729e-2 3.725e-2 3.712e-2 3.677e-2 3.658e-2 3.646e-2 3.635e-2 3.624e-2 3.615e-2 3.611e-2 3.598e-2
   trace gn1+lb10 geom/L per eval: 5.655e-1 2.953e0 1.842e0 5.861e-1 3.925e-1 3.658e-1 3.413e-1 2.959e-1 2.532e-1 2.136e-1 1.814e-1 1.687e-1 1.658e-1 1.629e-1
+  trace pipe+lb10 geom/L per eval: 3.063e-2 2.207e-1 3.063e-2 3.063e-2 3.063e-2 3.062e-2 3.062e-2 3.062e-2 3.062e-2 3.061e-2 3.061e-2 3.061e-2 3.061e-2
   identity check s1: forward ‖x−x*‖=2.771e1  scored geom=2.771e1  (should match)
 
 === wheel24a4 jit2%d box=loose (ne=72, nfree=42)  L=20.0000 ===
   q-space step cosine from s1:  <frozen, lb1>=3.387e-2  <frozen, gn1>=9.945e-1  <gn1, lb1>=3.719e-2   ||Δfr||=1.810e1  ||Δgn||=1.454e1  ||Δlb1||=3.530e-1
 -- linearised CWLS / Gauss–Newton from q* (seed guard off except pipe_guard) --
 method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
-s1                   1.0     -   0   0     -     -   9.085e-2  2.851e-2  1.402e-2    8.241e0  2.927e-1   3.395e0       0  lib_err=1.82e0
+s1                   0.9     -   0   0     -     -   9.085e-2  2.851e-2  1.402e-2    8.241e0  2.927e-1   3.395e0       0  lib_err=1.82e0
 frozen1              1.2     1   1   0     -     -   1.275e-2  4.566e-3  1.968e-3    1.131e1  4.018e-1  5.578e-2       0  s1e=1.82e0 fr1 gn0 fac=1
 frozen2              1.3     2   2   0     -     -   1.263e-2  4.549e-3  1.950e-3    1.145e1  4.066e-1  3.986e-3       0  s1e=1.82e0 fr2 gn0 fac=2
-gn1                  1.2     1   0   1     -     -   1.565e-2  5.638e-3  2.416e-3    1.026e1  3.644e-1  2.544e-1       0  s1e=1.82e0 fr0 gn1 fac=1
+gn1                  1.1     1   0   1     -     -   1.565e-2  5.638e-3  2.416e-3    1.026e1  3.644e-1  2.544e-1       0  s1e=1.82e0 fr0 gn1 fac=1
 gn2                  1.3     2   0   2     -     -   1.260e-2  4.309e-3  1.945e-3    1.145e1  4.067e-1  4.184e-3       0  s1e=1.82e0 fr0 gn2 fac=2
 gn3                  1.4     3   0   3     -     -   1.260e-2  4.279e-3  1.944e-3    1.157e1  4.108e-1  1.147e-4       0  s1e=1.82e0 fr0 gn3 fac=3
 pipe                 1.4     3   1   2     -     -   1.260e-2  4.279e-3  1.944e-3    1.157e1  4.110e-1  7.428e-6       0  s1e=1.82e0 fr1 gn2 fac=3
@@ -299,17 +344,22 @@ s1+lb1               0.2     -   -   -     1     4   5.823e-2  1.420e-2  8.985e-
 s1+lb3               0.3     -   -   -     3     6   5.443e-2  1.545e-2  8.398e-3    8.646e0  3.071e-1  4.517e-1       0  accepted=3 evals≈6
 s1+lb10              0.6     -   -   -    10    14   3.672e-2  1.757e-2  5.666e-3    1.079e1  3.833e-1  3.489e-1       0  accepted=10 evals≈14
 s1+lb20              1.1     -   -   -    20    24   2.766e-2  1.551e-2  4.267e-3    1.105e1  3.925e-1  1.040e-1       0  accepted=20 evals≈24
-frozen1+lb1          0.2     -   -   -     1     3   1.268e-2  4.557e-3  1.956e-3    1.131e1  4.019e-1  1.464e-2       0  accepted=1 evals≈3
-frozen1+lb3          0.3     -   -   -     3     5   1.267e-2  4.543e-3  1.955e-3    1.132e1  4.020e-1  6.188e-3       0  accepted=3 evals≈5
+frozen1+lb1          0.1     -   -   -     1     3   1.268e-2  4.557e-3  1.956e-3    1.131e1  4.019e-1  1.464e-2       0  accepted=1 evals≈3
+frozen1+lb3          0.2     -   -   -     3     5   1.267e-2  4.543e-3  1.955e-3    1.132e1  4.020e-1  6.188e-3       0  accepted=3 evals≈5
 frozen1+lb10         0.6     -   -   -    10    13   1.265e-2  4.514e-3  1.951e-3    1.136e1  4.036e-1  4.980e-3       0  accepted=10 evals≈13
 frozen1+lb20         1.2     -   -   -    20    25   1.263e-2  4.522e-3  1.949e-3    1.143e1  4.061e-1  1.738e-3       0  accepted=20 evals≈25
 gn1+lb1              0.1     -   -   -     1     3   1.453e-2  5.649e-3  2.243e-3    1.027e1  3.648e-1  5.503e-2       0  accepted=1 evals≈3
 gn1+lb3              0.2     -   -   -     3     5   1.430e-2  5.792e-3  2.206e-3    1.031e1  3.662e-1  3.765e-2       0  accepted=3 evals≈5
 gn1+lb10             0.6     -   -   -    10    13   1.380e-2  6.074e-3  2.129e-3    1.075e1  3.818e-1  6.262e-2       0  accepted=10 evals≈13
 gn1+lb20             1.1     -   -   -    20    23   1.358e-2  6.023e-3  2.096e-3    1.088e1  3.864e-1  1.739e-2       0  accepted=20 evals≈23
+pipe+lb1             0.1     -   -   -     1     2   1.260e-2  4.279e-3  1.944e-3    1.157e1  4.110e-1  1.938e-5       0  accepted=1 evals≈2
+pipe+lb3             0.2     -   -   -     3     4   1.260e-2  4.280e-3  1.944e-3    1.157e1  4.110e-1  1.356e-5       0  accepted=3 evals≈4
+pipe+lb10            0.5     -   -   -    10    12   1.260e-2  4.280e-3  1.944e-3    1.157e1  4.110e-1  3.985e-6       0  accepted=10 evals≈12
+pipe+lb20            1.1     -   -   -    20    24   1.260e-2  4.280e-3  1.944e-3    1.157e1  4.110e-1  4.800e-6       0  accepted=20 evals≈24
   trace s1+lb10 geom/L per eval: 9.085e-2 7.707e-1 1.454e-1 5.823e-2 5.731e-2 5.443e-2 5.219e-2 4.718e-2 4.809e-2 4.482e-2 4.311e-2 4.140e-2 3.985e-2 3.672e-2
   trace frozen1+lb10 geom/L per eval: 1.275e-2 3.915e-2 1.268e-2 1.267e-2 1.267e-2 1.266e-2 1.266e-2 1.266e-2 1.265e-2 1.265e-2 1.265e-2 1.265e-2 1.265e-2
   trace gn1+lb10 geom/L per eval: 1.565e-2 1.322e-1 1.453e-2 1.446e-2 1.430e-2 1.422e-2 1.401e-2 1.430e-2 1.398e-2 1.394e-2 1.388e-2 1.380e-2 1.380e-2
+  trace pipe+lb10 geom/L per eval: 1.260e-2 1.260e-2 1.260e-2 1.260e-2 1.260e-2 1.260e-2 1.260e-2 1.260e-2 1.260e-2 1.260e-2 1.260e-2 1.260e-2
   identity check s1: forward ‖x−x*‖=1.817e0  scored geom=1.817e0  (should match)
 
 === tiedarch16 jit2%d box=loose (ne=47, nfree=30)  L=20.0000 ===
@@ -319,60 +369,144 @@ method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/
 s1                   0.8     -   0   0     -     -   5.319e-1  1.575e-1  9.710e-2    1.839e0  4.450e-1   8.517e1       0  lib_err=1.06e1
 frozen1              1.2     6   1   0     -     -   1.874e-2  7.902e-3  3.422e-3    6.386e0   1.545e0  8.541e-1       1  s1e=1.06e1 fr1 gn0 fac=6
 frozen2              1.3     7   2   0     -     -   1.123e-2  5.279e-3  2.051e-3    5.684e0   1.375e0  5.543e-1       1  s1e=1.06e1 fr2 gn0 fac=7
-gn1                  1.1     4   0   1     -     -   1.653e-1  6.612e-2  3.018e-2    2.952e0  7.143e-1   1.291e1       2  s1e=1.06e1 fr0 gn1 fac=4
+gn1                  1.2     4   0   1     -     -   1.653e-1  6.612e-2  3.018e-2    2.952e0  7.143e-1   1.291e1       2  s1e=1.06e1 fr0 gn1 fac=4
 gn2                  1.3     6   0   2     -     -   5.945e-2  5.103e-2  1.085e-2    4.653e0   1.126e0   9.275e0       1  s1e=1.06e1 fr0 gn2 fac=6
-gn3                  1.3     7   0   3     -     -   3.655e-2  2.854e-2  6.674e-3    4.275e0   1.034e0   2.795e0       1  s1e=1.06e1 fr0 gn3 fac=7
+gn3                  1.4     7   0   3     -     -   3.655e-2  2.854e-2  6.674e-3    4.275e0   1.034e0   2.795e0       1  s1e=1.06e1 fr0 gn3 fac=7
 pipe                 1.4     8   1   2     -     -   8.930e-3  4.501e-3  1.630e-3    6.199e0   1.500e0  8.026e-3       1  s1e=1.06e1 fr1 gn2 fac=8
 pipe_guard           2.9     8   1   2     -     -   8.930e-3  4.501e-3  1.630e-3    6.199e0   1.500e0  8.026e-3       1  s1e=1.06e1 fr1 gn2 fac=8
 -- L-BFGS-B on ‖x(q)−x*‖² from those seeds (history m=10) --
 method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
 s1+lb1               0.1     -   -   -     1     3   5.154e-1  1.600e-1  9.409e-2    7.366e1   1.782e1   1.086e2       0  accepted=1 evals≈3
-s1+lb3               0.3     -   -   -     3     6   4.443e-1  1.293e-1  8.112e-2    8.467e1   2.049e1   1.232e1       2  accepted=3 evals≈6
+s1+lb3               0.2     -   -   -     3     6   4.443e-1  1.293e-1  8.112e-2    8.467e1   2.049e1   1.232e1       2  accepted=3 evals≈6
 s1+lb10              0.6     -   -   -    10    16   2.289e-1  1.376e-1  4.180e-2    6.394e1   1.547e1   2.277e0       2  accepted=10 evals≈16
-s1+lb20              1.1     -   -   -    20    26   2.034e-1  1.196e-1  3.714e-2    5.870e1   1.420e1  9.244e-1       1  accepted=20 evals≈26
+s1+lb20              1.0     -   -   -    20    26   2.034e-1  1.196e-1  3.714e-2    5.870e1   1.420e1  9.244e-1       1  accepted=20 evals≈26
 frozen1+lb1          0.2     -   -   -     1     4   1.592e-2  5.990e-3  2.907e-3    6.367e0   1.541e0  1.847e-1       1  accepted=1 evals≈4
 frozen1+lb3          0.2     -   -   -     3     6   1.416e-2  5.433e-3  2.585e-3    6.298e0   1.524e0  5.555e-2       1  accepted=3 evals≈6
-frozen1+lb10         0.6     -   -   -    10    14   1.227e-2  4.826e-3  2.239e-3    5.656e0   1.369e0  3.095e-2       0  accepted=10 evals≈14
-frozen1+lb20         1.0     -   -   -    20    25   1.141e-2  4.133e-3  2.084e-3    5.061e0   1.225e0  1.408e-2       0  accepted=20 evals≈25
+frozen1+lb10         0.5     -   -   -    10    14   1.227e-2  4.826e-3  2.239e-3    5.656e0   1.369e0  3.095e-2       0  accepted=10 evals≈14
+frozen1+lb20         0.9     -   -   -    20    25   1.141e-2  4.133e-3  2.084e-3    5.061e0   1.225e0  1.408e-2       0  accepted=20 evals≈25
 gn1+lb1              0.2     -   -   -     1     6   1.581e-1  6.937e-2  2.886e-2    2.934e0  7.100e-1   9.811e0       1  accepted=1 evals≈6
-gn1+lb3              0.4     -   -   -     3     9   1.129e-1  3.984e-2  2.061e-2    2.866e0  6.936e-1   2.625e0       1  accepted=3 evals≈9
+gn1+lb3              0.3     -   -   -     3     9   1.129e-1  3.984e-2  2.061e-2    2.866e0  6.936e-1   2.625e0       1  accepted=3 evals≈9
 gn1+lb10             0.6     -   -   -    10    16   5.869e-2  2.191e-2  1.071e-2    3.929e0  9.508e-1  7.651e-1       1  accepted=10 evals≈16
 gn1+lb20             1.0     -   -   -    20    27   3.254e-2  1.417e-2  5.941e-3    4.351e0   1.053e0  1.378e-1       0  accepted=20 evals≈27
+pipe+lb1             0.1     -   -   -     1     3   8.930e-3  4.524e-3  1.630e-3    6.199e0   1.500e0  3.160e-3       0  accepted=1 evals≈3
+pipe+lb3             0.2     -   -   -     3     5   8.929e-3  4.521e-3  1.630e-3    6.198e0   1.500e0  1.645e-3       1  accepted=3 evals≈5
+pipe+lb10            0.5     -   -   -    10    12   8.926e-3  4.462e-3  1.630e-3    6.179e0   1.495e0  8.302e-4       1  accepted=10 evals≈12
+pipe+lb20            0.9     -   -   -    20    23   8.924e-3  4.454e-3  1.629e-3    6.165e0   1.492e0  7.779e-4       1  accepted=20 evals≈23
   trace s1+lb10 geom/L per eval: 5.319e-1 2.433e1 5.154e-1 9.110e-1 4.883e-1 4.443e-1 3.749e-1 3.339e0 3.420e-1 2.599e-1 2.596e-1 2.508e-1 3.900e-1 2.345e-1 2.845e-1 2.289e-1
   trace frozen1+lb10 geom/L per eval: 1.874e-2 5.907e-1 2.253e-2 1.592e-2 1.557e-2 1.416e-2 1.402e-2 1.301e-2 1.328e-2 1.279e-2 1.254e-2 1.244e-2 1.239e-2 1.227e-2
   trace gn1+lb10 geom/L per eval: 1.653e-1 1.736e1 2.260e-1 1.825e-1 1.680e-1 1.581e-1 1.326e-1 1.300e-1 1.129e-1 1.071e-1 1.032e-1 8.988e-2 7.925e-2 6.938e-2 6.505e-2 5.869e-2
+  trace pipe+lb10 geom/L per eval: 8.930e-3 1.057e-2 8.930e-3 8.930e-3 8.929e-3 8.929e-3 8.928e-3 8.928e-3 8.927e-3 8.926e-3 8.926e-3 8.926e-3
   identity check s1: forward ‖x−x*‖=1.064e1  scored geom=1.064e1  (should match)
 
 === oculus21h7 bump10%d box=loose (ne=728, nfree=312)  L=20.0000 ===
   q-space step cosine from s1:  <frozen, lb1>=6.968e-3  <frozen, gn1>=9.997e-1  <gn1, lb1>=6.967e-3   ||Δfr||=3.457e0  ||Δgn||=3.454e0  ||Δlb1||=4.078e-2
 -- linearised CWLS / Gauss–Newton from q* (seed guard off except pipe_guard) --
 method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
-s1                  11.5     -   0   0     -     -   1.870e-2  1.988e-3  1.059e-3   1.447e-1  3.204e-2   1.193e0       0  lib_err=3.74e-1
-frozen1             15.7     1   1   0     -     -   4.888e-3  1.176e-3  2.768e-4   4.220e-1  9.347e-2  3.619e-3       0  s1e=3.74e-1 fr1 gn0 fac=1
-frozen2             18.2     2   2   0     -     -   4.859e-3  1.150e-3  2.751e-4   4.349e-1  9.631e-2  1.032e-3       0  s1e=3.74e-1 fr2 gn0 fac=2
+s1                  11.9     -   0   0     -     -   1.870e-2  1.988e-3  1.059e-3   1.447e-1  3.204e-2   1.193e0       0  lib_err=3.74e-1
+frozen1             15.8     1   1   0     -     -   4.888e-3  1.176e-3  2.768e-4   4.220e-1  9.347e-2  3.619e-3       0  s1e=3.74e-1 fr1 gn0 fac=1
+frozen2             18.6     2   2   0     -     -   4.859e-3  1.150e-3  2.751e-4   4.349e-1  9.631e-2  1.032e-3       0  s1e=3.74e-1 fr2 gn0 fac=2
 gn1                 15.8     1   0   1     -     -   4.888e-3  1.183e-3  2.767e-4   4.220e-1  9.345e-2  7.249e-3       0  s1e=3.74e-1 fr0 gn1 fac=1
 gn2                 18.5     2   0   2     -     -   4.849e-3  1.148e-3  2.745e-4   4.407e-1  9.760e-2  1.569e-4       0  s1e=3.74e-1 fr0 gn2 fac=2
-gn3                 21.1     3   0   3     -     -   4.847e-3  1.138e-3  2.744e-4   4.460e-1  9.877e-2  2.859e-5       0  s1e=3.74e-1 fr0 gn3 fac=3
-pipe                21.6     3   1   2     -     -   4.847e-3  1.138e-3  2.744e-4   4.460e-1  9.877e-2  2.823e-5       0  s1e=3.74e-1 fr1 gn2 fac=3
-pipe_guard          28.4     3   1   2     -     -   4.847e-3  1.138e-3  2.744e-4   4.460e-1  9.877e-2  2.823e-5       0  s1e=3.74e-1 fr1 gn2 fac=3
+gn3                 21.4     3   0   3     -     -   4.847e-3  1.138e-3  2.744e-4   4.460e-1  9.877e-2  2.859e-5       0  s1e=3.74e-1 fr0 gn3 fac=3
+pipe                21.8     3   1   2     -     -   4.847e-3  1.138e-3  2.744e-4   4.460e-1  9.877e-2  2.823e-5       0  s1e=3.74e-1 fr1 gn2 fac=3
+pipe_guard          28.2     3   1   2     -     -   4.847e-3  1.138e-3  2.744e-4   4.460e-1  9.877e-2  2.823e-5       0  s1e=3.74e-1 fr1 gn2 fac=3
 -- L-BFGS-B on ‖x(q)−x*‖² from those seeds (history m=10) --
 method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
-s1+lb1               1.2     -   -   -     1     4   1.078e-2  1.934e-3  6.105e-4   1.864e-1  4.129e-2  4.987e-1       0  accepted=1 evals≈4
+s1+lb1               1.1     -   -   -     1     4   1.078e-2  1.934e-3  6.105e-4   1.864e-1  4.129e-2  4.987e-1       0  accepted=1 evals≈4
 s1+lb3               1.2     -   -   -     3     6   8.731e-3  1.563e-3  4.943e-4   2.043e-1  4.525e-2  1.029e-1       0  accepted=3 evals≈6
-s1+lb10              2.4     -   -   -    10    13   7.272e-3  1.389e-3  4.117e-4   2.442e-1  5.409e-2  7.033e-2       0  accepted=10 evals≈13
-s1+lb20              4.4     -   -   -    20    23   6.657e-3  1.405e-3  3.769e-4   3.078e-1  6.817e-2  3.205e-2       0  accepted=20 evals≈23
-frozen1+lb1          0.7     -   -   -     1     3   4.888e-3  1.177e-3  2.767e-4   4.221e-1  9.347e-2  2.230e-3       0  accepted=1 evals≈3
-frozen1+lb3          1.0     -   -   -     3     5   4.888e-3  1.177e-3  2.767e-4   4.221e-1  9.348e-2  1.407e-3       0  accepted=3 evals≈5
-frozen1+lb10         2.6     -   -   -    10    12   4.887e-3  1.177e-3  2.767e-4   4.220e-1  9.346e-2  1.231e-3       0  accepted=10 evals≈12
-frozen1+lb20         4.2     -   -   -    20    22   4.886e-3  1.176e-3  2.766e-4   4.223e-1  9.352e-2  1.211e-3       0  accepted=20 evals≈22
+s1+lb10              2.5     -   -   -    10    13   7.272e-3  1.389e-3  4.117e-4   2.442e-1  5.409e-2  7.033e-2       0  accepted=10 evals≈13
+s1+lb20              4.1     -   -   -    20    23   6.657e-3  1.405e-3  3.769e-4   3.078e-1  6.817e-2  3.205e-2       0  accepted=20 evals≈23
+frozen1+lb1          0.8     -   -   -     1     3   4.888e-3  1.177e-3  2.767e-4   4.221e-1  9.347e-2  2.230e-3       0  accepted=1 evals≈3
+frozen1+lb3          1.1     -   -   -     3     5   4.888e-3  1.177e-3  2.767e-4   4.221e-1  9.348e-2  1.407e-3       0  accepted=3 evals≈5
+frozen1+lb10         2.5     -   -   -    10    12   4.887e-3  1.177e-3  2.767e-4   4.220e-1  9.346e-2  1.231e-3       0  accepted=10 evals≈12
+frozen1+lb20         5.0     -   -   -    20    22   4.886e-3  1.176e-3  2.766e-4   4.223e-1  9.352e-2  1.211e-3       0  accepted=20 evals≈22
 gn1+lb1              0.7     -   -   -     1     3   4.887e-3  1.185e-3  2.767e-4   4.220e-1  9.346e-2  4.205e-3       0  accepted=1 evals≈3
 gn1+lb3              1.1     -   -   -     3     5   4.887e-3  1.186e-3  2.767e-4   4.221e-1  9.347e-2  1.713e-3       0  accepted=3 evals≈5
-gn1+lb10             2.4     -   -   -    10    13   4.886e-3  1.187e-3  2.766e-4   4.221e-1  9.348e-2  1.635e-3       0  accepted=10 evals≈13
-gn1+lb20             4.8     -   -   -    20    25   4.885e-3  1.186e-3  2.765e-4   4.224e-1  9.355e-2  8.377e-4       0  accepted=20 evals≈25
+gn1+lb10             2.5     -   -   -    10    13   4.886e-3  1.187e-3  2.766e-4   4.221e-1  9.348e-2  1.635e-3       0  accepted=10 evals≈13
+gn1+lb20             4.3     -   -   -    20    25   4.885e-3  1.186e-3  2.765e-4   4.224e-1  9.355e-2  8.377e-4       0  accepted=20 evals≈25
+pipe+lb1             0.7     -   -   -     1     3   4.847e-3  1.138e-3  2.744e-4   4.460e-1  9.877e-2  5.605e-5       0  accepted=1 evals≈3
+pipe+lb3             1.1     -   -   -     3     5   4.847e-3  1.138e-3  2.744e-4   4.460e-1  9.877e-2  3.100e-5       0  accepted=3 evals≈5
+pipe+lb10            2.2     -   -   -    10    12   4.847e-3  1.138e-3  2.744e-4   4.460e-1  9.877e-2  2.828e-5       0  accepted=10 evals≈12
+pipe+lb20            4.1     -   -   -    20    22   4.847e-3  1.138e-3  2.744e-4   4.460e-1  9.878e-2  5.165e-5       0  accepted=20 evals≈22
   trace s1+lb10 geom/L per eval: 1.870e-2 2.831e0 3.298e-1 1.078e-2 9.543e-3 8.731e-3 8.212e-3 7.847e-3 7.815e-3 7.590e-3 7.540e-3 7.418e-3 7.272e-3
   trace frozen1+lb10 geom/L per eval: 4.888e-3 6.769e-3 4.888e-3 4.888e-3 4.888e-3 4.888e-3 4.887e-3 4.887e-3 4.887e-3 4.887e-3 4.887e-3 4.887e-3
   trace gn1+lb10 geom/L per eval: 4.888e-3 1.324e-2 4.887e-3 4.887e-3 4.887e-3 4.886e-3 4.886e-3 4.886e-3 4.886e-3 4.886e-3 4.886e-3 4.886e-3 4.886e-3
+  trace pipe+lb10 geom/L per eval: 4.847e-3 4.847e-3 4.847e-3 4.847e-3 4.847e-3 4.847e-3 4.847e-3 4.847e-3 4.847e-3 4.847e-3 4.847e-3 4.847e-3
   identity check s1: forward ‖x−x*‖=3.740e-1  scored geom=3.740e-1  (should match)
+# jax-fdm creased_shell from bench/external/cases/jaxfdm_creased_shell.json  (ne=324, nfree=156, box=case)
+# A creased compression shell network (193 nodes, 37 leaf supports) under uniform vertical loads. The original example is a best-fit problem: it drives every free node onto the designer's target surface stored in the input JSON (kept here as target_original).
+
+=== jaxfdm_creased_shell exact box=case (ne=324, nfree=156)  L=30.1906 ===
+  q-space step cosine from s1:  <frozen, lb1>=4.490e-2  <frozen, gn1>=1.000e0  <gn1, lb1>=4.490e-2   ||Δfr||=2.407e-5  ||Δgn||=2.407e-5  ||Δlb1||=5.753e-6
+-- linearised CWLS / Gauss–Newton from q* (seed guard off except pipe_guard) --
+method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
+s1                   5.1     -   0   0     -     -   3.100e-6  1.197e-6  2.482e-7   1.162e-5  4.651e-6  1.468e-3       0  lib_err=9.36e-5
+frozen1              7.1     1   1   0     -     -  2.342e-12 6.029e-13 1.875e-13  2.290e-10 9.169e-11  7.151e-9       1  s1e=9.36e-5 fr1 gn0 fac=1
+frozen2              7.0     1   1   0     -     -  2.342e-12 6.029e-13 1.875e-13  2.290e-10 9.169e-11  7.151e-9       1  s1e=9.36e-5 fr1 gn0 fac=1
+gn1                  9.0     3   0   1     -     -  2.395e-11 9.201e-12 1.917e-12  2.841e-10 1.137e-10  2.036e-8       4  s1e=9.36e-5 fr0 gn1 fac=3
+gn2                  9.0     3   0   1     -     -  2.395e-11 9.201e-12 1.917e-12  2.841e-10 1.137e-10  2.036e-8       4  s1e=9.36e-5 fr0 gn1 fac=3
+gn3                  8.9     3   0   1     -     -  2.395e-11 9.201e-12 1.917e-12  2.841e-10 1.137e-10  2.036e-8       4  s1e=9.36e-5 fr0 gn1 fac=3
+pipe                 7.3     1   1   0     -     -  2.342e-12 6.029e-13 1.875e-13  2.290e-10 9.169e-11  7.151e-9       1  s1e=9.36e-5 fr1 gn0 fac=1
+pipe_guard          11.0     1   1   0     -     -  2.342e-12 6.029e-13 1.875e-13  2.290e-10 9.169e-11  7.151e-9       1  s1e=9.36e-5 fr1 gn0 fac=1
+-- L-BFGS-B on ‖x(q)−x*‖² from those seeds (history m=10) --
+method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
+s1+lb1               0.4     -   -   -     1     3   1.522e-6  4.068e-7  1.219e-7   1.835e-5  7.348e-6  2.059e-4       0  accepted=1 evals≈3
+s1+lb3               0.7     -   -   -     3     5   9.991e-7  3.137e-7  7.999e-8   2.088e-5  8.358e-6  3.659e-5       0  accepted=3 evals≈5
+s1+lb10              1.7     -   -   -    10    13   4.028e-7  9.224e-8  3.225e-8   1.334e-5  5.342e-6  5.510e-5       0  accepted=10 evals≈13
+s1+lb20              3.1     -   -   -    20    25   1.728e-7  4.767e-8  1.383e-8   1.145e-5  4.583e-6  4.101e-6       0  accepted=20 evals≈25
+frozen1+lb1          0.3     -   -   -     -     1  2.342e-12 6.029e-13 1.875e-13  2.290e-10 9.169e-11  7.151e-9       1  accepted=0 evals≈1
+frozen1+lb3          0.3     -   -   -     -     1  2.342e-12 6.029e-13 1.875e-13  2.290e-10 9.169e-11  7.151e-9       1  accepted=0 evals≈1
+frozen1+lb10         0.3     -   -   -     -     1  2.342e-12 6.029e-13 1.875e-13  2.290e-10 9.169e-11  7.151e-9       1  accepted=0 evals≈1
+frozen1+lb20         0.3     -   -   -     -     1  2.342e-12 6.029e-13 1.875e-13  2.290e-10 9.169e-11  7.151e-9       1  accepted=0 evals≈1
+gn1+lb1              0.5     -   -   -     1     3  1.609e-11 6.241e-12 1.288e-12  2.764e-10 1.106e-10  2.320e-9       0  accepted=1 evals≈3
+gn1+lb3              0.5     -   -   -     1     3  1.609e-11 6.241e-12 1.288e-12  2.764e-10 1.106e-10  2.320e-9       0  accepted=1 evals≈3
+gn1+lb10             0.5     -   -   -     1     3  1.609e-11 6.241e-12 1.288e-12  2.764e-10 1.106e-10  2.320e-9       0  accepted=1 evals≈3
+gn1+lb20             0.5     -   -   -     1     3  1.609e-11 6.241e-12 1.288e-12  2.764e-10 1.106e-10  2.320e-9       0  accepted=1 evals≈3
+pipe+lb1             0.3     -   -   -     -     1  2.342e-12 6.029e-13 1.875e-13  2.290e-10 9.169e-11  7.151e-9       1  accepted=0 evals≈1
+pipe+lb3             0.3     -   -   -     -     1  2.342e-12 6.029e-13 1.875e-13  2.290e-10 9.169e-11  7.151e-9       1  accepted=0 evals≈1
+pipe+lb10            0.3     -   -   -     -     1  2.342e-12 6.029e-13 1.875e-13  2.290e-10 9.169e-11  7.151e-9       1  accepted=0 evals≈1
+pipe+lb20            0.3     -   -   -     -     1  2.342e-12 6.029e-13 1.875e-13  2.290e-10 9.169e-11  7.151e-9       1  accepted=0 evals≈1
+  trace s1+lb10 geom/L per eval: 3.100e-6 1.073e-3 1.522e-6 1.402e-6 9.990e-7 9.204e-7 6.883e-7 8.758e-7 6.305e-7 5.921e-7 5.099e-7 4.213e-7 4.028e-7
+  trace frozen1+lb10 geom/L per eval: 3.388e-11
+  trace gn1+lb10 geom/L per eval: 4.796e-11 3.652e-8 3.049e-11
+  trace pipe+lb10 geom/L per eval: 3.388e-11
+  identity check s1: forward ‖x−x*‖=9.360e-5  scored geom=9.360e-5  (should match)
+
+=== jaxfdm_creased_shell designer box=case (ne=324, nfree=156)  L=30.1906 ===
+  q-space step cosine from s1:  <frozen, lb1>=2.896e-1  <frozen, gn1>=3.043e-1  <gn1, lb1>=3.366e-1   ||Δfr||=1.510e1  ||Δgn||=6.913e0  ||Δlb1||=7.222e0
+-- linearised CWLS / Gauss–Newton from q* (seed guard off except pipe_guard) --
+method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
+s1                   4.2     -   0   0     -     -   6.701e-1  1.414e-1  5.365e-2    1.348e0  5.398e-1   5.366e2       0  lib_err=2.02e1
+frozen1             10.7     6   1   0     -     -   1.700e-1  4.350e-2  1.361e-2    7.092e0   2.839e0   2.612e1       9  s1e=2.02e1 fr1 gn0 fac=6
+frozen2             15.5    11   2   0     -     -   9.540e-2  2.662e-2  7.638e-3    9.177e0   3.674e0   5.539e0      34  s1e=2.02e1 fr2 gn0 fac=11
+gn1                 10.7     6   0   1     -     -   2.641e-1  6.695e-2  2.114e-2    2.388e0  9.558e-1   7.818e1      76  s1e=2.02e1 fr0 gn1 fac=6
+gn2                 16.6    12   0   2     -     -   1.537e-1  3.823e-2  1.231e-2    5.763e0   2.307e0   8.907e1      12  s1e=2.02e1 fr0 gn2 fac=12
+gn3                 21.3    17   0   3     -     -   8.699e-2  2.090e-2  6.965e-3    7.284e0   2.916e0   1.161e1      25  s1e=2.02e1 fr0 gn3 fac=17
+pipe                18.8    14   1   2     -     -   7.769e-2  2.063e-2  6.220e-3    9.218e0   3.690e0   6.340e0      11  s1e=2.02e1 fr1 gn2 fac=14
+pipe_guard          22.5    14   1   2     -     -   7.769e-2  2.063e-2  6.220e-3    9.218e0   3.690e0   6.340e0      11  s1e=2.02e1 fr1 gn2 fac=14
+-- L-BFGS-B on ‖x(q)−x*‖² from those seeds (history m=10) --
+method                ms   fac  fr  gn lb_it lb_ev     geom/L     max/L     rms/L      ||r||||r||/||p||   ||∇f||∞  active  note
+s1+lb1               0.6     -   -   -     1     5   5.994e-1  9.275e-2  4.799e-2    7.558e0   3.026e0   2.430e1       0  accepted=1 evals≈5
+s1+lb3               1.1     -   -   -     3     9   3.365e-1  6.369e-2  2.694e-2    4.724e0   1.891e0   1.874e1       0  accepted=3 evals≈9
+s1+lb10              2.1     -   -   -    10    18   2.139e-1  4.201e-2  1.712e-2    4.419e0   1.769e0   4.548e0       0  accepted=10 evals≈18
+s1+lb20              3.5     -   -   -    20    28   1.368e-1  2.713e-2  1.096e-2    3.100e0   1.241e0   4.006e0       9  accepted=20 evals≈28
+frozen1+lb1          0.5     -   -   -     1     3   1.700e-1  4.350e-2  1.361e-2    7.092e0   2.839e0   2.612e1       9  accepted=1 evals≈3
+frozen1+lb3          0.5     -   -   -     1     3   1.700e-1  4.350e-2  1.361e-2    7.092e0   2.839e0   2.612e1       9  accepted=1 evals≈3
+frozen1+lb10         0.5     -   -   -     1     3   1.700e-1  4.350e-2  1.361e-2    7.092e0   2.839e0   2.612e1       9  accepted=1 evals≈3
+frozen1+lb20         0.5     -   -   -     1     3   1.700e-1  4.350e-2  1.361e-2    7.092e0   2.839e0   2.612e1       9  accepted=1 evals≈3
+gn1+lb1              0.7     -   -   -     1     5   2.310e-1  3.703e-2  1.850e-2    4.401e0   1.762e0   1.538e1       2  accepted=1 evals≈5
+gn1+lb3              0.9     -   -   -     3     7   1.914e-1  3.588e-2  1.533e-2    4.529e0   1.813e0   1.160e1      13  accepted=3 evals≈7
+gn1+lb10             1.8     -   -   -    10    14   1.578e-1  3.373e-2  1.263e-2    3.790e0   1.517e0   2.942e0       4  accepted=10 evals≈14
+gn1+lb20             3.3     -   -   -    20    24   1.220e-1  2.643e-2  9.766e-3    3.480e0   1.393e0   2.164e0      36  accepted=20 evals≈24
+pipe+lb1             0.6     -   -   -     1     5   7.391e-2  1.930e-2  5.917e-3    9.193e0   3.680e0   2.074e0       2  accepted=1 evals≈5
+pipe+lb3             0.9     -   -   -     3     7   7.198e-2  1.971e-2  5.763e-3    9.176e0   3.673e0   1.733e0       0  accepted=3 evals≈7
+pipe+lb10            1.9     -   -   -    10    15   7.075e-2  2.022e-2  5.664e-3    9.150e0   3.663e0  4.326e-1       4  accepted=10 evals≈15
+pipe+lb20            2.8     -   -   -    20    26   7.004e-2  2.061e-2  5.607e-3    9.124e0   3.653e0  3.566e-1       0  accepted=20 evals≈26
+  trace s1+lb10 geom/L per eval: 6.701e-1 1.401e0 1.244e0 9.556e-1 5.994e-1 5.484e-1 3.606e-1 9.595e-1 3.365e-1 2.769e-1 2.557e-1 2.682e-1 2.444e-1 2.307e-1 2.467e-1 2.266e-1 2.198e-1 2.139e-1
+  trace frozen1+lb10 geom/L per eval: 1.700e-1 3.567e10 1.700e-1
+  trace gn1+lb10 geom/L per eval: 2.641e-1 1.095e0 7.323e-1 4.084e-1 2.310e-1 2.232e-1 1.914e-1 1.864e-1 1.747e-1 1.736e-1 1.716e-1 1.673e-1 1.624e-1 1.578e-1
+  trace pipe+lb10 geom/L per eval: 7.769e-2 6.503e-1 2.113e-1 8.192e-2 7.391e-2 7.269e-2 7.198e-2 7.195e-2 7.179e-2 7.168e-2 7.129e-2 7.113e-2 7.098e-2 7.090e-2 7.075e-2
+  identity check s1: forward ‖x−x*‖=2.023e1  scored geom=2.023e1  (should match)
 
 ===== cross-case geometric error / L =====
 case                               s1  frozen1      gn2     pipe  s1+lb10  fr+lb10s1+lb10/frs1+lb10/gn2s1+lb10/pipe
@@ -388,6 +522,8 @@ barrel16x12_jit2%d_loose      1.847e0 3.735e-2 1.381e-1 3.063e-2 2.235e-1 3.598e
 wheel24a4_jit2%d_loose       9.085e-2 1.275e-2 1.260e-2 1.260e-2 3.672e-2 1.265e-2      2.88      2.91      2.92
 tiedarch16_jit2%d_loose      5.319e-1 1.874e-2 5.945e-2 8.930e-3 2.289e-1 1.227e-2     12.21      3.85     25.63
 oculus21h7_bump10%d_loose    1.870e-2 4.888e-3 4.849e-3 4.847e-3 7.272e-3 4.887e-3      1.49      1.50      1.50
+jaxfdm_creased_shell_exact_case 3.100e-62.342e-122.395e-112.342e-12 4.028e-72.342e-12 172023.30  16820.46 172023.30
+jaxfdm_creased_shell_designer_case 6.701e-1 1.700e-1 1.537e-1 7.769e-2 2.139e-1 1.700e-1      1.26      1.39      2.75
 
-# finished 12 cases in 5.4s
-wrote /workspace/bench/figures/data/tradeoff.json
+# finished 14 cases in 5.9s
+wrote bench/figures/data/tradeoff.json

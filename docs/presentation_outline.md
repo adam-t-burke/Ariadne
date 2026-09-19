@@ -257,5 +257,6 @@ steps from the same Stage-1 `q*` — is `warm_start_bench tradeoff` and
 [`docs/gn_vs_lbfgs.md`](gn_vs_lbfgs.md). That note also runs jax-fdm's
 creased-shell designer surface and argues against dropping the
 Gauss–Newton steps as a default (they are already skipped on reachable
-targets; on the unreachable designer mesh they leave a frozen-only
-local min that L-BFGS-B will not).
+targets; on the unreachable designer mesh the first frozen point is a
+terrible Euclidean L-BFGS seed and another CWLS / GN step is what
+moves).
