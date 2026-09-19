@@ -626,6 +626,14 @@ What the trend says:
 | Length-ratio update `q ← q·ℓ(q)/ℓ*` (practitioner heuristic, iterative TNA horizontal equilibrium) | a fixed-point form of the geometric problem | clip | no (diverges with compression) | 1 forward solve | 5× the optimum on shallow tension nets; diverges on the barrel, the tied arch, the dome |
 | **Compliance-weighted LS + active set (this work)** | the geometric objective, linearised with its own metric | exact, active set on the sparse saddle | yes | 3–5 numeric LDLs per step (one symbolic) | within 2 % of the optimum on 64/64 before L-BFGS-B; 19 s at 16 k edges (two seeds raced) vs 52 s for the interior-point variant |
 
+A controlled comparison of those three-to-five saddle solves against a
+short L-BFGS-B run on the exact geometric objective — starting from the
+same Stage-1 `q*`, with the seed guard off — is in
+[`gn_vs_lbfgs.md`](gn_vs_lbfgs.md). Ten accepted L-BFGS-B steps saturate
+the compact history (`m = 10`) but do not invert the compliance-weighted
+Gramian; the experiment reports force, geometric and gradient residuals
+at every budget.
+
 Two remarks for the paper:
 
 * The frozen CWLS step is *exactly* Schek's least-squares inverse with the

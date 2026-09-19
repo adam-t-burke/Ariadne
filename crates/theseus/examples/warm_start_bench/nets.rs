@@ -89,6 +89,7 @@ pub fn safe_err(problem: &Problem, target: &Array2<f64>, q: &[f64]) -> f64 {
     }
 }
 
+#[derive(Clone)]
 pub struct Net {
     pub name: String,
     pub edges: Vec<(usize, usize)>,
