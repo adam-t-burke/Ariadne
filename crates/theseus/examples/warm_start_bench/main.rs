@@ -38,6 +38,13 @@
 //!                        schema (plus `bounds_snug` and `target_variants`),
 //!                        embedded in the Grasshopper plugin by
 //!                        `Ariadne.csproj` (`bench/synthetic/cases/`).
+//! - `tradeoff [dir]`     Frozen CWLS / Gauss–Newton versus short L-BFGS-B
+//!                        from the Stage-1 `q*` (docs/gn_vs_lbfgs.md). Also
+//!                        runs jax-fdm `creased_shell` (exact + designer)
+//!                        when `bench/external/cases/jaxfdm_creased_shell.json`
+//!                        is present. Writes `tradeoff.json` when a directory
+//!                        is given. `BENCH_NETS=jaxfdm_creased_shell` runs
+//!                        only that case.
 
 mod export;
 mod external;
@@ -45,6 +52,7 @@ mod figures;
 mod methods;
 mod nets;
 mod report;
+mod tradeoff;
 
 use methods::{
     clip, dense_gram_solve, diag_note, equilibrium_e, human_bytes, lbfgsb, library_options,
@@ -633,7 +641,7 @@ fn cmd_reactions() {
 
 fn usage() {
     eprintln!(
-        "usage: warm_start_bench <nets|suite [max_iters]|alt [max_iters]|scale|dense|reactions|external <file|dir>..|figures <dir>|export_cases <dir>>"
+        "usage: warm_start_bench <nets|suite [max_iters]|alt [max_iters]|scale|dense|reactions|external <file|dir>..|figures <dir>|export_cases <dir>|tradeoff [outdir]>"
     );
     eprintln!("  env: BENCH_NETS=name1,name2  BENCH_METHODS=uniform,s1,...  BENCH_SIDES=23,46");
     eprintln!("  pipeline ablations: BENCH_LM=1e-4  BENCH_GUARD=3  BENCH_S2=clarabel|activeset  BENCH_NONDIM=0|1  BENCH_CWLS=1e-6");
@@ -680,6 +688,7 @@ fn main() {
             Some(dir) => export::cmd_export_cases(dir),
             None => usage(),
         },
+        Some("tradeoff") => tradeoff::cmd_tradeoff(args.get(2).map(String::as_str)),
         _ => usage(),
     }
 }

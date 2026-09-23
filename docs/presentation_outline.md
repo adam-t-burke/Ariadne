@@ -271,3 +271,12 @@ cd bench/figures && uv run render.py          # writes docs/figures/*.png
 `BENCH_ITERS` caps L-BFGS-B (default 1000), `BENCH_NETS=a,b` restricts the
 showcase cases. The JSON under `bench/figures/data/` is not tracked (5–6 MB);
 `dense.txt` and `scale.txt` are.
+
+A separate residual experiment — frozen / Gauss–Newton versus 10 L-BFGS-B
+steps from the same Stage-1 `q*` — is `warm_start_bench tradeoff` and
+[`docs/gn_vs_lbfgs.md`](gn_vs_lbfgs.md). That note also runs jax-fdm's
+creased-shell designer surface and argues against dropping the
+Gauss–Newton steps as a default (they are already skipped on reachable
+targets; on the unreachable designer mesh the first frozen point is a
+terrible Euclidean L-BFGS seed and another CWLS / GN step is what
+moves).
