@@ -1,0 +1,13 @@
+---
+description: Agents must not launch or automate Rhino or Grasshopper; the user handles GH verification.
+alwaysApply: true
+---
+
+# No Rhino / Grasshopper automation
+
+Agents must not launch, attach to, script, or UI-automate **Rhino** or **Grasshopper**.
+
+- Do not start `Rhino.exe` (or any Rhino host), drive the Rhino/GH UI, or assume a live Rhino session.
+- After a plugin build, stop at local artifacts (`bin/Release/net8.0/Ariadne.gha`, `theseus.dll` / `libtheseus.dylib`, license notices).
+- Tell the user to reload Grasshopper or open the definition themselves when GH verification is needed.
+- Do not claim Grasshopper components “load” or a `.gh` file opens correctly unless the user reports that.
