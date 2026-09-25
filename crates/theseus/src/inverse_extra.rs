@@ -31,13 +31,18 @@ enum InnerKind {
     Qr,
     Lsqr,
     Clarabel,
+    /// Boxed direct least squares, solved by L-BFGS-B. Clarabel is the fallback.
+    Projected,
     Spg,
 }
 
 fn pick_inner(opts: &InverseFdmOptions, bounds: &BoxBounds) -> InnerKind {
     if bounds.has_finite() {
         return match opts.linear_algebra {
-            LinearAlgebra::Direct => InnerKind::Clarabel,
+            LinearAlgebra::Direct => match opts.stage2_method {
+                Stage2Method::ActiveSet => InnerKind::Projected,
+                Stage2Method::Clarabel => InnerKind::Clarabel,
+            },
             LinearAlgebra::Iterative => InnerKind::Spg,
         };
     }
@@ -957,6 +962,135 @@ fn solve_clarabel_once(
     Ok(unknown.to_vec())
 }
 
+/// Boxed least squares `½‖Mx − p‖² + ½λ‖x‖²` by L-BFGS-B.
+///
+/// Column scaling uses `diag(MᵀM) + λ`, the same diagonal change of variables
+/// as the Stage-2 quadratic. The iteration cap is the operating point, so a
+/// solve that moved is returned even when the projected-gradient test is still
+/// open. A line search that never leaves the start is an error and the caller
+/// falls back to Clarabel.
+fn solve_projected_least_squares(
+    m_mat: &SparseColMatOwned,
+    p: &[f64],
+    lambda: f64,
+    bounds: &BoxBounds,
+    x0: &[f64],
+) -> Result<Vec<f64>, TheseusError> {
+    let n = m_mat.ncols;
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    if p.len() != m_mat.nrows {
+        return Err(TheseusError::Shape(format!(
+            "projected least squares: rhs has {} entries, expected {}",
+            p.len(),
+            m_mat.nrows
+        )));
+    }
+    let tikhonov = lambda.max(0.0);
+    let mut sqrt_h = vec![0.0; n];
+    let mut inv_sqrt = vec![0.0; n];
+    let mut z_lower = vec![0.0; n];
+    let mut z_upper = vec![0.0; n];
+    for col in 0..n {
+        let mut gram = 0.0;
+        for nz in m_mat.col_ptrs[col] as usize..m_mat.col_ptrs[col + 1] as usize {
+            gram += m_mat.values[nz] * m_mat.values[nz];
+        }
+        let root = (gram + tikhonov).max(1e-8).sqrt();
+        sqrt_h[col] = root;
+        inv_sqrt[col] = 1.0 / root;
+        z_lower[col] = scale_qp_bound(bounds.lower[col], root, f64::NEG_INFINITY);
+        z_upper[col] = scale_qp_bound(bounds.upper[col], root, f64::INFINITY);
+        if z_lower[col] > z_upper[col] {
+            let mid = 0.5 * (z_lower[col] + z_upper[col]);
+            z_lower[col] = mid;
+            z_upper[col] = mid;
+        }
+    }
+    let z_bounds = ariadne_lbfgsb::Bounds::new(&z_lower, &z_upper, n).map_err(|error| {
+        TheseusError::Solver(format!("projected least squares bounds: {error}"))
+    })?;
+    let mut z = vec![0.0; n];
+    let mut x = vec![0.0; n];
+    for col in 0..n {
+        let seed = x0.get(col).copied().unwrap_or(0.0);
+        x[col] = seed.clamp(bounds.lower[col], bounds.upper[col]);
+        z[col] = x[col] * sqrt_h[col];
+    }
+    let origin = x.clone();
+    let mut residual = vec![0.0; m_mat.nrows];
+    let mut solver = bound_qp_solver();
+    let report = solver
+        .minimize(&mut z, z_bounds, |z, grad_z| {
+            for col in 0..n {
+                x[col] = z[col] * inv_sqrt[col];
+            }
+            residual.fill(0.0);
+            for col in 0..n {
+                let xj = x[col];
+                if xj == 0.0 {
+                    continue;
+                }
+                for nz in m_mat.col_ptrs[col] as usize..m_mat.col_ptrs[col + 1] as usize {
+                    residual[m_mat.row_indices[nz] as usize] += m_mat.values[nz] * xj;
+                }
+            }
+            for (value, &rhs) in residual.iter_mut().zip(p) {
+                *value -= rhs;
+            }
+            let data = 0.5 * residual.iter().map(|value| value * value).sum::<f64>();
+            let penalty = 0.5 * tikhonov * x.iter().map(|value| value * value).sum::<f64>();
+            for col in 0..n {
+                let mut dot = 0.0;
+                for nz in m_mat.col_ptrs[col] as usize..m_mat.col_ptrs[col + 1] as usize {
+                    dot += m_mat.values[nz] * residual[m_mat.row_indices[nz] as usize];
+                }
+                let grad = (dot + tikhonov * x[col]) * inv_sqrt[col];
+                if !grad.is_finite() {
+                    return Err(TheseusError::Solver(
+                        "projected least squares gradient is non-finite".into(),
+                    ));
+                }
+                grad_z[col] = grad;
+            }
+            let value = data + penalty;
+            if !value.is_finite() {
+                return Err(TheseusError::Solver(
+                    "projected least squares objective is non-finite".into(),
+                ));
+            }
+            Ok(value)
+        })
+        .map_err(|error| match error {
+            LbfgsbSolveError::Objective(error) | LbfgsbSolveError::Callback(error) => error,
+            other => TheseusError::Solver(other.to_string()),
+        })?;
+    for col in 0..n {
+        let value = z[col] * inv_sqrt[col];
+        x[col] = if value.is_finite() {
+            value.clamp(bounds.lower[col], bounds.upper[col])
+        } else {
+            value
+        };
+    }
+    if x.iter().any(|value| !value.is_finite()) || !report.value.is_finite() {
+        return Err(TheseusError::Solver(
+            "projected least squares returned a non-finite point".into(),
+        ));
+    }
+    let stuck = x
+        .iter()
+        .zip(&origin)
+        .all(|(value, start)| (value - start).abs() <= 1e-14);
+    if matches!(report.termination, ariadne_lbfgsb::Termination::Failed(_)) && stuck {
+        return Err(TheseusError::Solver(
+            "projected least squares line search failed at the start".into(),
+        ));
+    }
+    Ok(x)
+}
+
 fn solve_clarabel_box(
     m_mat: &SparseColMatOwned,
     p: &[f64],
@@ -1760,6 +1894,22 @@ pub fn solve_inverse_fdm(
                 1,
                 true,
             )),
+            InnerKind::Projected => {
+                let solved = solve_projected_least_squares(m_mat, p, lambda, box_bounds, x0)
+                    .or_else(|_| {
+                        solve_clarabel_box(
+                            m_mat,
+                            p,
+                            lambda,
+                            box_bounds,
+                            None,
+                            opts.max_iter,
+                            opts.tol,
+                            false,
+                        )
+                    })?;
+                Ok((solved, 1, true))
+            }
             InnerKind::Spg => {
                 let result = solve_spg_on(
                     m_mat,

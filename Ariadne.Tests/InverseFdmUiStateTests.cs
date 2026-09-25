@@ -9,7 +9,7 @@ public sealed class InverseFdmUiStateTests
     [Fact]
     public void DefaultsMatchTheBenchmarkPipeline()
     {
-        // Unboxed: one sparse LDL of the augmented saddle. Any bound routes to Clarabel.
+        // Unboxed: one sparse LDL of the augmented saddle. A box uses the projected quadratic.
         Assert.Equal(ParticularMode.Tikhonov, InverseFdmUiState.DefaultParticular);
         Assert.Equal(MetricMode.Geometric, InverseFdmUiState.DefaultMetric);
         Assert.Equal(1, InverseFdmUiState.DefaultFrozenIterations);
@@ -27,7 +27,7 @@ public sealed class InverseFdmUiStateTests
                 InverseFdmUiState.DefaultParticular,
                 hasEffectiveBounds: false));
         Assert.Equal(
-            ActiveInverseEngine.Clarabel,
+            ActiveInverseEngine.Projected,
             InverseFdmUiState.ResolveEngine(
                 LinearAlgebraMode.Direct,
                 InverseFdmUiState.DefaultParticular,
@@ -56,7 +56,7 @@ public sealed class InverseFdmUiStateTests
             Theseus.Interop.InverseStage2Method.Clarabel,
             InverseFdmUiState.NativeStage2Method(Stage2Mode.Clarabel));
 
-        Assert.Equal("AS", InverseFdmUiState.Stage2Label(Stage2Mode.ActiveSet, 3.0, true));
+        Assert.Equal("QP", InverseFdmUiState.Stage2Label(Stage2Mode.ActiveSet, 3.0, true));
         Assert.Equal("IP · guard off · dim", InverseFdmUiState.Stage2Label(Stage2Mode.Clarabel, 0.0, false));
     }
 
@@ -149,29 +149,30 @@ public sealed class InverseFdmUiStateTests
     }
 
     [Fact]
-    public void DirectConstraintsSelectClarabelAndRemovalRetainsIt()
+    public void DirectBoxUsesTheProjectedQuadraticAndKeepsTheParticular()
     {
         ParticularMode selected = InverseFdmUiState.UpdateParticular(
             LinearAlgebraMode.Direct,
             ParticularMode.QrLeastSquares,
             hasEffectiveBounds: true);
 
-        Assert.Equal(ParticularMode.Clarabel, selected);
+        Assert.Equal(ParticularMode.QrLeastSquares, selected);
+        Assert.Equal(
+            ActiveInverseEngine.Projected,
+            InverseFdmUiState.ResolveEngine(
+                LinearAlgebraMode.Direct,
+                selected,
+                hasEffectiveBounds: true));
         Assert.Equal(
             ActiveInverseEngine.Clarabel,
             InverseFdmUiState.ResolveEngine(
                 LinearAlgebraMode.Direct,
                 selected,
-                hasEffectiveBounds: true));
+                hasEffectiveBounds: true,
+                Stage2Mode.Clarabel));
 
-        selected = InverseFdmUiState.UpdateParticular(
-            LinearAlgebraMode.Direct,
-            selected,
-            hasEffectiveBounds: false);
-
-        Assert.Equal(ParticularMode.Clarabel, selected);
         Assert.Equal(
-            ActiveInverseEngine.Clarabel,
+            ActiveInverseEngine.QrLeastSquares,
             InverseFdmUiState.ResolveEngine(
                 LinearAlgebraMode.Direct,
                 selected,

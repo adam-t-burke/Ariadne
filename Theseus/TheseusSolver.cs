@@ -33,12 +33,12 @@ public sealed class SolverResult
     public InverseFdmDiagnostics? InverseDiagnostics { get; init; }
 }
 
-/// <summary>Bound handling for the Stage-2 compliance-weighted steps.</summary>
+/// <summary>Bound handling for every boxed direct inverse-FDM solve.</summary>
 public enum InverseStage2Method
 {
-    /// <summary>Active-set bounded-variable least squares on the sparse weighted saddle.</summary>
+    /// <summary>Projected quadratic (L-BFGS-B) for the boxed particular and Stage 2.</summary>
     ActiveSet = 0,
-    /// <summary>Clarabel interior-point QP (the previous default).</summary>
+    /// <summary>Clarabel interior-point QP for the boxed particular and Stage 2.</summary>
     Clarabel = 1,
 }
 
@@ -58,11 +58,11 @@ public sealed record InverseFdmDiagnostics
     public int FrozenSteps { get; init; }
     /// <summary>Gauss–Newton steps accepted.</summary>
     public int NewtonSteps { get; init; }
-    /// <summary>Stage-2 factorisations performed, including active-set passes and rejected trials.</summary>
+    /// <summary>Stage-2 model evaluations for the projected quadratic, or factorisations for Clarabel and the saddle fallback.</summary>
     public int Stage2Factorizations { get; init; }
-    /// <summary>Stage-2 steps that fell back from the active set to Clarabel.</summary>
+    /// <summary>Stage-2 steps that fell back to Clarabel after the projected solve and the saddle active set both failed.</summary>
     public int ClarabelFallbacks { get; init; }
-    /// <summary>Stage-2 steps on which the active set hit its pass limit and returned a partial step.</summary>
+    /// <summary>Stage-2 steps on which the saddle active-set fallback hit its pass limit.</summary>
     public int ActiveSetCapped { get; init; }
     /// <summary>Gauss–Newton steps whose linearisation point had a collapsed edge (frozen Jacobian used).</summary>
     public int DegenerateLinearizations { get; init; }

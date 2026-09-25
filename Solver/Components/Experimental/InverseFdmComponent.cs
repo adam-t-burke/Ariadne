@@ -68,8 +68,8 @@ public class InverseFdmComponent : GH_Component
         pManager.AddNumberParameter("Upper", "Upper",
             "Upper bound on q. For a force-space Stage 1 this is internally multiplied by target edge length.",
             GH_ParamAccess.tree);
-        pManager.AddIntegerParameter("Max Iterations", "MaxIter", "Iteration budget per inner solve for Clarabel, SPG, and LSQR", GH_ParamAccess.item, 500);
-        pManager.AddNumberParameter("Tolerance", "Tol", "Convergence tolerance for Clarabel, SPG, and LSQR", GH_ParamAccess.item, 1e-6);
+        pManager.AddIntegerParameter("Max Iterations", "MaxIter", "Iteration budget for Clarabel, SPG, and LSQR. The projected quadratic uses a fixed cap of 20 accepted iterations.", GH_ParamAccess.item, 500);
+        pManager.AddNumberParameter("Tolerance", "Tol", "Convergence tolerance for Clarabel, SPG, LSQR, and the geometric phases. The projected quadratic uses its own projected-gradient tolerance.", GH_ParamAccess.item, 1e-6);
         pManager.AddNumberParameter("CWLS Damping", "λcwls", "Stage-2 Tikhonov floor λcwls‖Δq‖² on every compliance-weighted step. Separate from Stage-1 particular regularization.", GH_ParamAccess.item, 1e-6);
         pManager.AddNumberParameter("Seed Guard", "Guard",
             "Stage-1 collapse guard margin. After Stage 1 a scaled uniform sign seed is scored on the same geometric error; when Stage 1 is worse by more than this factor both seeds run Stage 2 and the better result continues. 0 disables the guard (the benchmark's pipeline_noguard / legacy rows).",
@@ -105,7 +105,7 @@ public class InverseFdmComponent : GH_Component
             "True when the seed guard replaced the Stage-1 particular by the scaled uniform sign seed.",
             GH_ParamAccess.item);
         pManager.AddTextParameter("Diagnostics", "Diag",
-            "Stage-2 diagnostics as key = value lines: Stage-1 and uniform-seed errors, accepted frozen / Gauss–Newton steps, factorisations, Clarabel fallbacks, active-set pass-limit hits, degenerate linearisations, realised reaction residual.",
+            "Stage-2 diagnostics as key = value lines: Stage-1 and uniform-seed errors, accepted frozen / Gauss–Newton steps, model evaluations or factorisations, Clarabel fallbacks, saddle pass-limit hits, degenerate linearisations, realised reaction residual.",
             GH_ParamAccess.list);
     }
 
@@ -424,14 +424,31 @@ public class InverseFdmComponent : GH_Component
         AppendDirectSolverItem(directSolverMenu, "Gram (dense)", ParticularMode.GramDense);
         menu.Items.Add(directSolverMenu);
         Menu_AppendSeparator(menu);
-        var stage2Menu = new ToolStripMenuItem("Stage 2 bounds")
+        var boxSolverMenu = new ToolStripMenuItem("Box solver")
         {
-            Enabled = _metric == MetricMode.Geometric,
+            Enabled = _linearAlgebra == LinearAlgebraMode.Direct && BoxInputPresent(),
         };
-        AppendStage2Item(stage2Menu, "Active set (BVLS)", Stage2Mode.ActiveSet);
-        AppendStage2Item(stage2Menu, "Clarabel (interior point)", Stage2Mode.Clarabel);
-        menu.Items.Add(stage2Menu);
+        AppendStage2Item(boxSolverMenu, "Projected quadratic (L-BFGS-B)", Stage2Mode.ActiveSet);
+        AppendStage2Item(boxSolverMenu, "Clarabel (interior point)", Stage2Mode.Clarabel);
+        menu.Items.Add(boxSolverMenu);
         Menu_AppendItem(menu, "Non-dimensionalise", (_, _) => ToggleNondimensionalize(), true, _nondimensionalize);
+    }
+
+    /// <summary>
+    /// True when Sign, Lower, or Upper carries data or a wire, or the last
+    /// solve saw a finite bound. The box solver applies only then.
+    /// </summary>
+    private bool BoxInputPresent()
+    {
+        if (_hasBox)
+            return true;
+        foreach (int index in new[] { 11, 12, 13 })
+        {
+            var param = Params.Input[index];
+            if (param.SourceCount > 0 || param.VolatileDataCount > 0)
+                return true;
+        }
+        return false;
     }
 
     private void AppendStage2Item(ToolStripMenuItem parent, string label, Stage2Mode mode)
@@ -517,9 +534,10 @@ public class InverseFdmComponent : GH_Component
     {
         string unknown = _solveForQ ? "q-init" : "t-init";
         ActiveInverseEngine engine = InverseFdmUiState.ResolveEngine(
-            _linearAlgebra, _particular, _hasBox);
+            _linearAlgebra, _particular, _hasBox, _stage2);
         string engineLabel = engine switch
         {
+            ActiveInverseEngine.Projected => $"QP λ={FormatLambda(_lambda)}",
             ActiveInverseEngine.Clarabel => $"Clarabel λ={FormatLambda(_lambda)}",
             ActiveInverseEngine.MoorePenrose => "MP",
             ActiveInverseEngine.Tikhonov => $"Tikh λ={FormatLambda(_lambda)}",
@@ -599,16 +617,19 @@ The choice affects only this initializer; all CWLS updates use q.
 </p>
 <p>
 The <b>Direct solver</b> menu selects the unboxed particular. Whenever any
-Sign, Lower, or Upper is finite, the Direct path is Clarabel regardless of the
-menu, since only Clarabel and SPG handle the box exactly.
+Sign, Lower, or Upper is finite, that menu is ignored and the <b>Box solver</b>
+menu chooses the boxed particular: projected quadratic (default) or Clarabel.
+Iterative solves keep SPG.
 </p>
 <ul>
 <li><b>Tikhonov (default when unboxed)</b> — one sparse LDLᵀ of the augmented
 saddle <code>[I M; Mᵀ −λI]</code>, solving
 <code>min ½‖Mz−p‖² + ½λ‖z‖²</code>; λ must be positive. Same minimiser as
 Clarabel without bounds, at a fraction of the cost.</li>
-<li><b>Clarabel</b> — convex quadratic least squares with optional q bounds and
-reaction equalities. Forced whenever a box is present.</li>
+<li><b>Clarabel</b> — convex quadratic least squares. With a box it is the
+interior-point choice on the <b>Box solver</b> menu, for both the particular
+and the compliance-weighted steps. Without a box it is one of the Direct
+solver options.</li>
 <li><b>Moore–Penrose</b> — the same augmented saddle at λ = 0 for a minimum-norm
 unconstrained particular. Fails on rank-deficient systems.</li>
 <li><b>QR least squares</b> — sparse QR for tall, full-column-rank systems;
@@ -624,9 +645,9 @@ reference of the talk (<code>gram_dense</code>). Refused above 6000 edges.</li>
 </ul>
 <p>
 With <b>Iterative</b> linear algebra, unconstrained problems use LSQR and
-bounded problems use SPG. <b>MaxIter</b> is the per-inner-solve iteration
-budget for Clarabel, LSQR, SPG, and the Stage-2 solvers; it is not a CWLS phase
-budget.
+bounded problems use SPG. <b>MaxIter</b> budgets Clarabel, LSQR, and SPG. It
+does not budget the projected quadratic, which stops after 20 accepted
+iterations, and it is not a CWLS phase budget.
 </p>
 
 <h2>Seed guard</h2>
@@ -702,23 +723,27 @@ collapsed edge, that step reuses the frozen target Jacobian and the
 <b>Diagnostics</b> output counts it as a degenerate linearisation.
 </p>
 
-<h2>Stage 2 bounds</h2>
+<h2>Box solver</h2>
 <p>
-Each CWLS step is a bounded sparse least-squares problem. The <b>Stage 2
-bounds</b> menu picks the bound handling:
+The <b>Box solver</b> menu is enabled for a Direct solve that has a Sign,
+Lower, or Upper bound. It selects one method for the boxed Stage-1 particular
+and for every boxed compliance-weighted step. Unbounded Direct solves ignore
+it and use the <b>Direct solver</b> menu. Iterative solves ignore it and use
+SPG.
 </p>
 <ul>
-<li><b>Active set (BVLS, default)</b> — bounded-variable least squares on the
-sparse weighted saddle. A pass fixes the active bounds, factors once, frees or
-binds variables from the KKT sign test and repeats; each pass is one LDLᵀ. A
-numerical failure falls back to Clarabel for that step (counted in
-<b>Diagnostics</b>), and the pass limit returns a feasible partial descent
-step (also counted).</li>
-<li><b>Clarabel (interior point)</b> — the QP solver from the previous release
-on the same step. Same optimum; each interior-point iteration is one
-factorisation, so it costs the same as the active set at a few thousand edges
-and 2.7–3.9× at 16 k–65 k. This is the <code>legacy</code> Stage 2 of the
-benchmark.</li>
+<li><b>Projected quadratic (L-BFGS-B, default)</b> — the box is enforced by
+projection. Stage 1 minimises <code>½‖E(x*)q − p‖²</code> on the box. Each
+Stage-2 step minimises the same compliance-weighted quadratic as before, with
+gradients applied through the Laplacian factored once for that step. The cap
+is 20 accepted iterations. A failed Stage-1 solve falls back to Clarabel. A
+failed Stage-2 solve falls back to the saddle active set, then Clarabel
+(counted in <b>Diagnostics</b>). On that saddle fallback, the pass limit
+returns a feasible partial step (also counted).</li>
+<li><b>Clarabel (interior point)</b> — the previous boxed solver, used for both
+the particular and the compliance-weighted steps. This is the
+<code>legacy</code> Stage 2 of the benchmark when the other legacy settings
+are selected too.</li>
 </ul>
 
 <h2>Non-dimensionalisation</h2>
@@ -767,23 +792,23 @@ Tol = 1e-8, and the same Lower / Upper box as the case:
 <table border="1" cellpadding="3" cellspacing="0">
 <tr><th>Bench method</th><th>Component settings</th></tr>
 <tr><td><code>s1</code></td>
-<td>Metric Force (or Geometric with FrozenIter = 0, GNiter = 0); Direct solver
-Clarabel forced by the box; λ = 0.</td></tr>
+<td>Metric Force (or Geometric with FrozenIter = 0, GNiter = 0); Box solver
+Clarabel; λ = 0.</td></tr>
 <tr><td><code>gram_sparse</code></td>
 <td>No box, SolveQ = true, Direct solver Gram (sparse), FrozenIter = GNiter = 0,
 λ = 1e-8 × mean squared entry of <code>E</code>. Clip to the box afterwards.</td></tr>
 <tr><td><code>gram_dense</code></td>
 <td>As <code>gram_sparse</code> with Direct solver Gram (dense).</td></tr>
 <tr><td><code>frozen</code></td>
-<td>FrozenIter = 1, GNiter = 0, Stage 2 Active set, Guard = 3,
+<td>FrozenIter = 1, GNiter = 0, Box solver Projected quadratic, Guard = 3,
 Non-dimensionalise on.</td></tr>
 <tr><td><code>pipeline</code></td>
-<td>Defaults: FrozenIter = 1, GNiter = 2, Stage 2 Active set, Guard = 3,
+<td>Defaults: FrozenIter = 1, GNiter = 2, Box solver Projected quadratic, Guard = 3,
 λLM = 0, Non-dimensionalise on, wR = 1.</td></tr>
 <tr><td><code>pipeline_noguard</code></td>
 <td>As <code>pipeline</code> with Guard = 0.</td></tr>
 <tr><td><code>legacy</code></td>
-<td>FrozenIter = 1, GNiter = 2, Stage 2 Clarabel, Guard = 0, λLM = 0,
+<td>FrozenIter = 1, GNiter = 2, Box solver Clarabel, Guard = 0, λLM = 0,
 Non-dimensionalise off.</td></tr>
 <tr><td><code>uniform</code>, <code>length_ratio</code></td>
 <td>Not library solves; feed the sign seed or the heuristic q directly to the
@@ -814,7 +839,7 @@ can create mechanisms or failed trial factors. The solver deliberately uses the
 exact compliance: no shifted inverse or pseudoinverse is substituted. A
 factorisation failure on a trial is not a warning by itself: the step is
 rejected and the best point kept. The component warns only on recorded events
-(guard swap, degenerate linearisation, Clarabel fallback, active-set cap, or a
+(guard swap, degenerate linearisation, Clarabel fallback, saddle pass-limit, or a
 realised reaction well above the load along an enforced zero-reaction axis).
 </p>
 
@@ -831,9 +856,12 @@ reaction along those axes is reported in <b>Diagnostics</b>.</li>
 <li><b>CWLS Damping λcwls</b> — both geometric phases only.</li>
 <li><b>Guard</b> — seed-guard margin; 0 disables.</li>
 <li><b>λLM</b> — Gauss–Newton Levenberg–Marquardt floor; 0 uses step halving.</li>
-<li><b>MaxIter</b> — each inner Clarabel, SPG, LSQR, or Stage-2 solve.
-Independent of FrozenIter and GNiter.</li>
-<li><b>Tol</b> — inner-solver tolerance and geometric phase stopping tolerance.</li>
+<li><b>MaxIter</b> — each Clarabel, SPG, or LSQR solve. The projected quadratic
+ignores it and stops after 20 accepted iterations. Independent of FrozenIter
+and GNiter.</li>
+<li><b>Tol</b> — Clarabel, SPG, and LSQR tolerance, and the geometric phase
+stopping tolerance. The projected quadratic uses its own projected-gradient
+tolerance.</li>
 </ul>
 
 <h2>Outputs</h2>
@@ -845,7 +873,8 @@ error. A small force residual ratio does not imply a small GeomErr when the
 target is not funicular. <b>Guard</b> is true when the uniform seed won the
 race. <b>Diag</b> lists the Stage-2 record as <code>key = value</code> lines:
 the Stage-1 and uniform-seed errors, accepted frozen and Gauss–Newton steps,
-factorisations, Clarabel fallbacks, active-set cap hits, degenerate
+model evaluations (projected quadratic) or factorisations (Clarabel and the
+saddle fallback), Clarabel fallbacks, saddle pass-limit hits, degenerate
 linearisations, and the realised reaction residual.
 </p>
 </body>
@@ -871,12 +900,12 @@ internal enum ParticularMode
 
 internal enum LinearAlgebraMode { Direct = 0, Iterative = 1 }
 
-/// <summary>Bound handling for the Stage-2 compliance-weighted steps.</summary>
+/// <summary>Bound handling for every boxed direct solve.</summary>
 internal enum Stage2Mode
 {
-    /// <summary>Active-set BVLS on the sparse weighted saddle (default).</summary>
+    /// <summary>Projected quadratic (L-BFGS-B) on the boxed least squares. Default. Stored value stays 0 so existing definitions keep this choice.</summary>
     ActiveSet = 0,
-    /// <summary>Clarabel interior point (the previous default; the talk's "legacy" pipeline).</summary>
+    /// <summary>Clarabel interior point for the boxed particular and Stage 2.</summary>
     Clarabel = 1,
 }
 
@@ -899,15 +928,15 @@ internal enum ActiveInverseEngine
     GramDense,
     Lsqr,
     Spg,
+    Projected,
 }
 
 internal static class InverseFdmUiState
 {
     /// <summary>
-    /// Unboxed Stage-1 default. Any finite sign or bound routes Direct to
-    /// Clarabel regardless (<see cref="UpdateParticular"/>); without bounds the
-    /// augmented saddle is one sparse LDLᵀ where Clarabel is an interior-point
-    /// iteration for the same minimiser.
+    /// Unboxed Stage-1 default: one sparse LDL of the augmented saddle.
+    /// A finite sign or bound leaves this selection stored and solves the box
+    /// with <see cref="Stage2Mode"/> instead.
     /// </summary>
     internal const ParticularMode DefaultParticular = ParticularMode.Tikhonov;
     internal const MetricMode DefaultMetric = MetricMode.Geometric;
@@ -932,7 +961,7 @@ internal static class InverseFdmUiState
     /// <summary>Short Stage-2 label for the component message.</summary>
     internal static string Stage2Label(Stage2Mode stage2, double seedGuardMargin, bool nondimensionalize)
     {
-        string label = stage2 == Stage2Mode.Clarabel ? "IP" : "AS";
+        string label = stage2 == Stage2Mode.Clarabel ? "IP" : "QP";
         if (seedGuardMargin <= 0.0) label += " · guard off";
         if (!nondimensionalize) label += " · dim";
         return label;
@@ -952,11 +981,11 @@ internal static class InverseFdmUiState
             yield return $"{d.DegenerateLinearizations} Gauss–Newton step(s) met a collapsed edge at the "
                 + "current geometry and used the frozen (target) Jacobian instead.";
         if (d.ClarabelFallbacks > 0)
-            yield return $"{d.ClarabelFallbacks} Stage-2 step(s) fell back from the active set to Clarabel "
-                + "after a numerical failure of the sparse saddle solve.";
+            yield return $"{d.ClarabelFallbacks} Stage-2 step(s) fell back to Clarabel "
+                + "after the projected quadratic and the saddle active set both failed.";
         if (d.ActiveSetCapped > 0)
-            yield return $"{d.ActiveSetCapped} Stage-2 step(s) hit the active-set pass limit and returned a "
-                + "partial (feasible descent) step; the warm start may be further from the QP optimum.";
+            yield return $"{d.ActiveSetCapped} Stage-2 step(s) hit the saddle active-set pass limit and returned a "
+                + "partial feasible step.";
         if (d.ReactionResidual > 0.0 && loadNorm > 0.0 && d.ReactionResidual > 0.1 * loadNorm)
             yield return $"Realised reaction along the enforced axes is {d.ReactionResidual:0.###e0} "
                 + $"({d.ReactionResidual / loadNorm:0.##}× the load norm): the zero-reaction request is "
@@ -1024,10 +1053,12 @@ internal static class InverseFdmUiState
     internal static ParticularMode UpdateParticular(
         LinearAlgebraMode linearAlgebra,
         ParticularMode particular,
-        bool hasEffectiveBounds) =>
-        linearAlgebra == LinearAlgebraMode.Direct && hasEffectiveBounds
-            ? ParticularMode.Clarabel
-            : particular;
+        bool hasEffectiveBounds)
+    {
+        _ = linearAlgebra;
+        _ = hasEffectiveBounds;
+        return particular;
+    }
 
     /// <summary>
     /// Every Stage-1 backend can initialize CWLS because Stage 2 dispatches
@@ -1057,13 +1088,16 @@ internal static class InverseFdmUiState
     internal static ActiveInverseEngine ResolveEngine(
         LinearAlgebraMode linearAlgebra,
         ParticularMode particular,
-        bool hasEffectiveBounds)
+        bool hasEffectiveBounds,
+        Stage2Mode stage2 = Stage2Mode.ActiveSet)
     {
         if (hasEffectiveBounds)
         {
-            return linearAlgebra == LinearAlgebraMode.Direct
+            if (linearAlgebra == LinearAlgebraMode.Iterative)
+                return ActiveInverseEngine.Spg;
+            return stage2 == Stage2Mode.Clarabel
                 ? ActiveInverseEngine.Clarabel
-                : ActiveInverseEngine.Spg;
+                : ActiveInverseEngine.Projected;
         }
 
         if (linearAlgebra == LinearAlgebraMode.Iterative)

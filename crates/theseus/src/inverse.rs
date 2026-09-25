@@ -34,14 +34,14 @@
 //!    Levenberg--Marquardt diagonal (`lm_damping`) that grows on rejected
 //!    steps is available but off by default.
 //!
-//! Bounds inside Stage 2 are handled by L-BFGS-B on the same convex
+//! A box on a direct solve is handled by L-BFGS-B (`Stage2Method`). Stage 1
+//! minimises the force residual on that box. Stage 2 minimises the convex
 //! compliance-weighted quadratic, with gradients applied through the cached
-//! Laplacian factorisation (`Stage2Method`). That is the same bound mechanism
-//! as the downstream optimiser, so a box does not rebuild the saddle on every
-//! pass. Clarabel remains the interior-point alternative, and the fallback
-//! when both the projected solve and the saddle active set fail. Unbounded
+//! Laplacian factorisation. Clarabel remains the interior-point alternative.
+//! It is also the fallback when a projected Stage-1 solve fails, and when
+//! both the projected Stage-2 solve and the saddle active set fail. Unbounded
 //! direct steps factor the Schur complement of that saddle instead of the
-//! full indefinite KKT system.
+//! full indefinite KKT system. Iterative solves stay on LSQR and SPG.
 //!
 //! Two facts worth keeping in mind: the compliance weighting is invariant to a
 //! common scale of the metric seed, `D(s·q) = s·D(q)`, so only the pattern of
@@ -235,16 +235,18 @@ pub struct InverseFdmOptions {
     pub reaction_weight: f64,
 }
 
-/// Bound handling for the Stage-2 compliance-weighted steps.
+/// Bound handling for every boxed direct solve: the Stage-1 particular and
+/// each Stage-2 compliance-weighted step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Stage2Method {
-    /// Bounded-variable least squares on the compliance-weighted quadratic,
-    /// solved by L-BFGS-B. The box is enforced by projection and each gradient
-    /// uses the cached Laplacian. Falls back to the saddle active set, then
-    /// Clarabel, if that projected solve fails.
+    /// Projected quadratic (L-BFGS-B). Stage 1 is ordinary least squares on
+    /// the box. Stage 2 is the compliance-weighted quadratic, with each
+    /// gradient applied through the cached Laplacian. A failed Stage-1 solve
+    /// falls back to Clarabel. A failed Stage-2 solve falls back to the saddle
+    /// active set, then Clarabel.
     #[default]
     ActiveSet = 0,
-    /// Clarabel interior-point QP (the previous default).
+    /// Clarabel interior-point QP for both the boxed particular and Stage 2.
     Clarabel = 1,
 }
 
@@ -256,7 +258,7 @@ impl TryFrom<i32> for Stage2Method {
             0 => Ok(Self::ActiveSet),
             1 => Ok(Self::Clarabel),
             other => Err(TheseusError::Solver(format!(
-                "unknown InvFDM stage-2 method {other} (expected 0=ActiveSet, 1=Clarabel)"
+                "unknown InvFDM box solver {other} (expected 0=projected quadratic, 1=Clarabel)"
             ))),
         }
     }
