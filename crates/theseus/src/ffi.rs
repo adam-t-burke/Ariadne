@@ -3091,8 +3091,8 @@ impl From<&crate::inverse::InverseDiagnostics> for TheseusInverseDiagnostics {
 /// with the library defaults) by the Stage-2 options that were previously
 /// fixed inside the FFI, and returns the Stage-2 diagnostics.
 ///
-/// * `stage2_method`: 0 = active-set BVLS on the sparse weighted saddle
-///   (default), 1 = Clarabel interior point (the previous behaviour).
+/// * `stage2_method`: 0 = projected quadratic (L-BFGS-B) for every boxed
+///   direct solve (default), 1 = Clarabel interior point.
 /// * `lm_damping`: Levenberg--Marquardt floor for the Gauss--Newton steps,
 ///   relative to the curvature diagonal; 0 (default) halves the step length
 ///   on the exact merit instead of damping the direction.

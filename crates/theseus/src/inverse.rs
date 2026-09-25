@@ -34,10 +34,14 @@
 //!    Levenberg--Marquardt diagonal (`lm_damping`) that grows on rejected
 //!    steps is available but off by default.
 //!
-//! Bounds inside Stage 2 are handled by an exact active-set bounded-variable
-//! least squares on the sparse weighted saddle system (`Stage2Method`), warm
-//! started across steps; Clarabel remains available as the interior-point
-//! alternative and as the fallback.
+//! A box on a direct solve is handled by L-BFGS-B (`Stage2Method`). Stage 1
+//! minimises the force residual on that box. Stage 2 minimises the convex
+//! compliance-weighted quadratic, with gradients applied through the cached
+//! Laplacian factorisation. Clarabel remains the interior-point alternative.
+//! It is also the fallback when a projected Stage-1 solve fails, and when
+//! both the projected Stage-2 solve and the saddle active set fail. Unbounded
+//! direct steps factor the Schur complement of that saddle instead of the
+//! full indefinite KKT system. Iterative solves stay on LSQR and SPG.
 //!
 //! Two facts worth keeping in mind: the compliance weighting is invariant to a
 //! common scale of the metric seed, `D(s·q) = s·D(q)`, so only the pattern of
@@ -50,6 +54,7 @@ use crate::nullspace::{
 };
 use crate::sparse::SparseColMatOwned;
 use crate::types::{Factorization, FactorizationStrategy, Problem, TheseusError};
+use ariadne_lbfgsb::SolveError as LbfgsbSolveError;
 use dyn_stack::{GlobalPodBuffer, PodStack};
 use faer_core::{Conj, Mat, Parallelism};
 use faer_sparse::qr::{factorize_symbolic_qr, QrSymbolicParams, SymbolicQr};
@@ -230,15 +235,18 @@ pub struct InverseFdmOptions {
     pub reaction_weight: f64,
 }
 
-/// Bound handling for the Stage-2 compliance-weighted steps.
+/// Bound handling for every boxed direct solve: the Stage-1 particular and
+/// each Stage-2 compliance-weighted step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Stage2Method {
-    /// Bounded-variable least squares by an add/release active set on the
-    /// sparse weighted saddle system. Exact and warm-started across steps;
-    /// falls back to Clarabel if the active set cycles.
+    /// Projected quadratic (L-BFGS-B). Stage 1 is ordinary least squares on
+    /// the box. Stage 2 is the compliance-weighted quadratic, with each
+    /// gradient applied through the cached Laplacian. A failed Stage-1 solve
+    /// falls back to Clarabel. A failed Stage-2 solve falls back to the saddle
+    /// active set, then Clarabel.
     #[default]
     ActiveSet = 0,
-    /// Clarabel interior-point QP (the previous default).
+    /// Clarabel interior-point QP for both the boxed particular and Stage 2.
     Clarabel = 1,
 }
 
@@ -250,7 +258,7 @@ impl TryFrom<i32> for Stage2Method {
             0 => Ok(Self::ActiveSet),
             1 => Ok(Self::Clarabel),
             other => Err(TheseusError::Solver(format!(
-                "unknown InvFDM stage-2 method {other} (expected 0=ActiveSet, 1=Clarabel)"
+                "unknown InvFDM box solver {other} (expected 0=projected quadratic, 1=Clarabel)"
             ))),
         }
     }
@@ -337,14 +345,17 @@ pub struct InverseDiagnostics {
     pub frozen_steps: usize,
     /// Gauss--Newton steps accepted.
     pub newton_steps: usize,
-    /// Stage-2 linear solves (factorisations) performed, including active-set
-    /// passes and rejected damping trials.
+    /// Stage-2 linear solves. Unbounded direct steps count Schur factorisations.
+    /// Bounded direct steps count L-BFGS-B evaluations of the convex model
+    /// (each evaluation is a pair of cached Laplacian solves, not a saddle
+    /// refactorisation). Clarabel and the active-set fallback still count
+    /// factorisations.
     pub stage2_factorizations: usize,
-    /// Number of Stage-2 steps that fell back from the active set to Clarabel
-    /// (only after a numerical failure of the sparse saddle solve).
+    /// Number of Stage-2 steps that fell back to Clarabel after the bounded
+    /// projected solve and the saddle active set both failed.
     pub clarabel_fallbacks: usize,
-    /// Number of Stage-2 steps on which the active set reached its pass limit
-    /// and returned the best feasible iterate seen instead of a settled set.
+    /// Number of Stage-2 steps on which the saddle active-set fallback reached
+    /// its pass limit and returned the best feasible iterate seen.
     pub active_set_capped: usize,
     /// Number of Gauss–Newton steps whose linearisation point x(q_k) had a
     /// collapsed edge (two nodes coincident), so the step used the frozen

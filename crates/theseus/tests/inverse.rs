@@ -4,10 +4,9 @@ use ndarray::Array2;
 use std::time::Instant;
 use theseus::fdm;
 use theseus::inverse::{
-    Stage2Method, DEFAULT_LM_DAMPING, DEFAULT_SEED_GUARD_MARGIN,
     compose_box, geometric_error_vector, solve_inverse_fdm, solve_pseudoinverse_dispatch,
-    solve_spg_box, InverseFdmOptions, InverseMetric, LinearAlgebra, ParticularMethod,
-    DEFAULT_MAX_OUTER,
+    solve_spg_box, InverseFdmOptions, InverseMetric, LinearAlgebra, ParticularMethod, Stage2Method,
+    DEFAULT_LM_DAMPING, DEFAULT_MAX_OUTER, DEFAULT_SEED_GUARD_MARGIN,
 };
 use theseus::sparse::SparseColMatOwned;
 use theseus::types::{AnchorInfo, Bounds, FdmCache, NetworkTopology, Problem, SolverOptions};
@@ -624,6 +623,7 @@ fn clarabel_and_spg_agree_on_a_simple_box() {
         true,
     );
     clarabel.signs = vec![1];
+    clarabel.stage2_method = Stage2Method::Clarabel;
     let mut spg = inverse_opts(
         0.0,
         true,
@@ -639,6 +639,28 @@ fn clarabel_and_spg_agree_on_a_simple_box() {
     assert_eq!(left.q.len(), right.q.len());
     for (a, b) in left.q.iter().zip(&right.q) {
         assert!((a - b).abs() < 1e-3, "Clarabel {a} vs SPG {b}");
+    }
+}
+
+#[test]
+fn projected_quadratic_matches_clarabel_on_a_simple_box() {
+    let (problem, _) = triangle_problem();
+    let (target, _) = forward_target(&problem, &[2.0, 3.0]);
+    let mut projected = inverse_opts(
+        0.0,
+        true,
+        ParticularMethod::Augmented,
+        LinearAlgebra::Direct,
+        true,
+    );
+    projected.signs = vec![1];
+    let mut clarabel = projected.clone();
+    clarabel.stage2_method = Stage2Method::Clarabel;
+    let left = solve_inverse_fdm(&problem, &target, projected).unwrap();
+    let right = solve_inverse_fdm(&problem, &target, clarabel).unwrap();
+    assert!(left.q.iter().all(|q| *q >= -1e-8), "{:?}", left.q);
+    for (a, b) in left.q.iter().zip(&right.q) {
+        assert!((a - b).abs() < 1e-3, "projected {a} vs Clarabel {b}");
     }
 }
 
@@ -769,12 +791,20 @@ fn reaction_rows_reduce_reaction_norm_on_clarabel_and_spg() {
 fn reaction_rows_inconsistent_with_the_load_are_rejected() {
     let (problem, _) = arch_problem(false);
     let (target, _) = forward_target(&problem, &[1.0; 8]);
-    let mut opts = inverse_opts(1e-8, true, ParticularMethod::Clarabel, LinearAlgebra::Direct, true);
+    let mut opts = inverse_opts(
+        1e-8,
+        true,
+        ParticularMethod::Clarabel,
+        LinearAlgebra::Direct,
+        true,
+    );
     opts.enforce_zero_rz = true;
     let error = solve_inverse_fdm(&problem, &target, opts)
         .expect_err("zero vertical reactions under vertical load must be rejected");
     assert!(
-        error.to_string().contains("enforce_zero_rz is inconsistent"),
+        error
+            .to_string()
+            .contains("enforce_zero_rz is inconsistent"),
         "unexpected message: {error}"
     );
 }
