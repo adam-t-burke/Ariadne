@@ -72,7 +72,7 @@ public class InverseFdmComponent : GH_Component
         pManager.AddNumberParameter("Tolerance", "Tol", "Convergence tolerance for Clarabel, SPG, LSQR, and the geometric phases. The projected quadratic uses its own projected-gradient tolerance.", GH_ParamAccess.item, 1e-6);
         pManager.AddNumberParameter("CWLS Damping", "λcwls", "Stage-2 Tikhonov floor λcwls‖Δq‖² on every compliance-weighted step. Separate from Stage-1 particular regularization.", GH_ParamAccess.item, 1e-6);
         pManager.AddNumberParameter("Seed Guard", "Guard",
-            "Stage-1 collapse guard margin. After Stage 1 a scaled uniform sign seed is scored on the same geometric error; when Stage 1 is worse by more than this factor both seeds run Stage 2 and the better result continues. 0 disables the guard (the benchmark's pipeline_noguard / legacy rows).",
+            "Stage-1 collapse guard margin. After Stage 1 a uniform sign seed at one common magnitude is scored on the geometric error; when Stage 1 is worse by more than this factor both seeds run the frozen and Gauss–Newton steps and the better result continues. 0 disables the guard.",
             GH_ParamAccess.item, InverseFdmUiState.DefaultSeedGuardMargin);
         pManager.AddNumberParameter("LM Damping", "λLM",
             "Levenberg–Marquardt floor for the Gauss–Newton steps, relative to the curvature diagonal. 0 (default) takes the undamped direction and halves the step on the exact merit; positive values damp the direction and grow ×10 on rejected steps.",
@@ -656,10 +656,10 @@ Stage 1 minimises the force residual at <code>x*</code>. On unbalanced or
 weakly loaded nets a small force residual can hide a collapsed geometry, and
 the mechanism: <code>x(q) − x* = −D(q)⁻¹r(q)</code>, a near-singular
 <code>D(q)</code> amplifies a tiny <code>r</code>. After Stage 1 the guard
-therefore scores a scaled uniform sign seed (one density per sign, scaled so
-the reaction magnitude matches the load) on the exact geometric error. When the
-clipped Stage-1 seed is worse by more than <b>Guard</b>× both seeds run Stage 2
-and the better result continues; <b>Guard Used</b> reports which one. Guard = 0
+therefore scores a uniform sign seed at one common magnitude on the exact
+geometric error. When the clipped Stage-1 seed is worse by more than
+<b>Guard</b>× both seeds run the frozen step and the Gauss–Newton steps and the
+better result continues; <b>Guard Used</b> reports which one. Guard = 0
 disables the race (<code>pipeline_noguard</code>, <code>legacy</code>).
 </p>
 

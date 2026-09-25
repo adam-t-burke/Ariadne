@@ -19,10 +19,12 @@
 //!    in the box. This recovers the *pattern* of `q` (and the self-stress
 //!    distribution of self-tied systems), but it is blind to the scale of `q`
 //!    and its vertical rows are down-weighted on shallow targets.
-//! 3. **Seed guard** (`seed_guard_margin`): the Stage-1 seed is scored on the
-//!    exact geometric error against a uniform-magnitude sign seed scaled per
-//!    sign group. When Stage 1 is worse by more than the margin it has
-//!    collapsed and the uniform seed initialises Stage 2 instead.
+//! 3. **Seed guard** (`seed_guard_margin`): a uniform sign seed is scored on
+//!    the exact geometric error at one common magnitude, fit by a short
+//!    golden-section search around the Stage-1 geometric mean. When Stage 1
+//!    is worse by more than the margin, both seeds run the frozen step and
+//!    the Gauss--Newton steps and the lower merit continues. A sound Stage-1
+//!    seed pays for that search only.
 //! 4. **Frozen compliance-weighted step(s)** (`max_frozen_outer`):
 //!    `min ‖D(q_k)⁻¹(E(x*)q − p)‖²`. Because `x(q) − x* = −D(q)⁻¹(E(x*)q − p)`,
 //!    this is Gauss--Newton on the geometric error with the Jacobian taken at
@@ -217,11 +219,12 @@ pub struct InverseFdmOptions {
     /// benchmark suite `0` is within 2 % of the best warm start on every case,
     /// `1e-4` loses on cable domes and near-exact tied arches.
     pub lm_damping: f64,
-    /// Stage-1 collapse guard. After Stage 1, a scaled uniform sign seed is
-    /// scored on the same geometric error. When Stage 1 is worse by more than
-    /// this factor it is suspect: both seeds then take the frozen step and the
-    /// lower measured error continues. Beyond the square of the margin (or
-    /// without a frozen phase) the uniform seed is used directly. `0` disables.
+    /// Stage-1 collapse guard. After Stage 1, a uniform sign seed at one
+    /// common magnitude (a short golden-section search around the Stage-1
+    /// geometric mean) is scored on the same geometric error. When Stage 1 is
+    /// worse by more than this factor, both seeds run the frozen step and the
+    /// Gauss--Newton steps and the lower merit continues. Without a geometric
+    /// phase the uniform seed is used directly. `0` disables.
     pub seed_guard_margin: f64,
     /// Scale positions by the target extent and loads by their magnitude
     /// before assembling, so that Stage 2 is solved in dimensionless form.
