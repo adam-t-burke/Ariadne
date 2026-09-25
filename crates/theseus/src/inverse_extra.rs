@@ -2169,8 +2169,11 @@ const ACTIVE_SET_RELEASE_PASSES: usize = 12;
 const ACTIVE_SET_LINE_SEARCH_STEPS: usize = 8;
 /// Maximum damping increases per outer step before the step is abandoned.
 const LM_MAX_TRIES: usize = 6;
-/// Golden-section probes per sign group when scoring the uniform seed.
-const SEED_GUARD_PROBES: usize = 20;
+/// Golden-section steps for the uniform seed's common log-scale. The collapse
+/// this guard exists for is a narrow well a few e-folds from the Stage-1
+/// magnitude, so a single probe there misses it. Twelve steps on `[-6, 6]`
+/// locate that well; the former per-group coordinate descent does not.
+const SEED_GUARD_PROBES: usize = 12;
 /// Rademacher probes for the Marquardt curvature diagonal.
 const LM_SCALE_PROBES: usize = 8;
 /// L-BFGS-B history for the bounded Stage-2 quadratic.
@@ -2286,14 +2289,14 @@ impl<'a> Stage2Context<'a> {
         .unwrap_or(f64::INFINITY)
     }
 
-    /// Uniform-magnitude seed with the sign pattern implied by the box (or by
-    /// the Stage-1 seed where the box allows both signs), scaled per sign
-    /// group by golden section on the geometric error.
+    /// Uniform sign pattern of the box (or of the Stage-1 seed where the box
+    /// allows both signs), with one common magnitude chosen by a short
+    /// golden-section search on the geometric error.
     ///
-    /// The compliance weighting is invariant to a common scale of the metric
-    /// seed, so only the sign pattern and the relative scale of the two sign
-    /// groups matter downstream. This costs `SEED_GUARD_PROBES` Laplacian
-    /// factorisations per sign group.
+    /// The search is `SEED_GUARD_PROBES` steps on a log-scale around the
+    /// Stage-1 geometric mean. Both sign groups share that magnitude: the
+    /// compliance-weighted steps are invariant to a common scale, and a
+    /// per-group fit was most of the guard's cost on mixed-sign seeds.
     fn scaled_uniform_seed(&self, reference: &[f64]) -> (Vec<f64>, f64) {
         let ne = reference.len();
         let mut magnitude_log_sum = 0.0;
@@ -2309,10 +2312,10 @@ impl<'a> Stage2Context<'a> {
         } else {
             1.0
         };
-        let mut q: Vec<f64> = (0..ne)
+        let pattern: Vec<f64> = (0..ne)
             .map(|i| {
                 let (lo, hi) = (self.bounds.lower[i], self.bounds.upper[i]);
-                let sign = if lo >= 0.0 {
+                if lo >= 0.0 {
                     1.0
                 } else if hi <= 0.0 {
                     -1.0
@@ -2320,64 +2323,42 @@ impl<'a> Stage2Context<'a> {
                     -1.0
                 } else {
                     1.0
-                };
-                sign * magnitude
+                }
             })
             .collect();
-        let groups: Vec<Vec<usize>> = {
-            let positive: Vec<usize> = (0..ne).filter(|&i| q[i] > 0.0).collect();
-            let negative: Vec<usize> = (0..ne).filter(|&i| q[i] < 0.0).collect();
-            [positive, negative]
-                .into_iter()
-                .filter(|group| !group.is_empty())
-                .collect()
+        let evaluate = |log_scale: f64| -> f64 {
+            let factor = magnitude * log_scale.exp();
+            let mut trial: Vec<f64> = pattern.iter().map(|sign| sign * factor).collect();
+            clip_to_box(&mut trial, self.bounds);
+            self.probe_error(&trial)
         };
-        let rounds = if groups.len() > 1 { 2 } else { 1 };
-        let mut best_error = f64::INFINITY;
-        for _ in 0..rounds {
-            for group in &groups {
-                let base = q.clone();
-                let evaluate = |log_scale: f64| -> f64 {
-                    let mut trial = base.clone();
-                    let factor = log_scale.exp();
-                    for &i in group {
-                        trial[i] *= factor;
-                    }
-                    clip_to_box(&mut trial, self.bounds);
-                    self.probe_error(&trial)
-                };
-                let (mut a, mut b) = (-6.0_f64, 6.0_f64);
-                let ratio = 0.618_033_988_749_895;
-                let mut c = b - ratio * (b - a);
-                let mut d = a + ratio * (b - a);
-                let (mut fc, mut fd) = (evaluate(c), evaluate(d));
-                for _ in 0..SEED_GUARD_PROBES {
-                    if fc < fd {
-                        b = d;
-                        d = c;
-                        fd = fc;
-                        c = b - ratio * (b - a);
-                        fc = evaluate(c);
-                    } else {
-                        a = c;
-                        c = d;
-                        fc = fd;
-                        d = a + ratio * (b - a);
-                        fd = evaluate(d);
-                    }
-                }
-                let factor = (0.5 * (a + b)).exp();
-                for &i in group {
-                    q[i] *= factor;
-                }
-                clip_to_box(&mut q, self.bounds);
-                best_error = self.probe_error(&q);
+        let (mut a, mut b) = (-6.0_f64, 6.0_f64);
+        let ratio = 0.618_033_988_749_895;
+        let mut c = b - ratio * (b - a);
+        let mut d = a + ratio * (b - a);
+        let (mut fc, mut fd) = (evaluate(c), evaluate(d));
+        for _ in 0..SEED_GUARD_PROBES {
+            if fc < fd {
+                b = d;
+                d = c;
+                fd = fc;
+                c = b - ratio * (b - a);
+                fc = evaluate(c);
+            } else {
+                a = c;
+                c = d;
+                fc = fd;
+                d = a + ratio * (b - a);
+                fd = evaluate(d);
             }
         }
-        if groups.is_empty() {
-            best_error = self.probe_error(&q);
-        }
-        (q, best_error)
+        let mut q: Vec<f64> = {
+            let factor = magnitude * (0.5 * (a + b)).exp();
+            pattern.iter().map(|sign| sign * factor).collect()
+        };
+        clip_to_box(&mut q, self.bounds);
+        let error = self.probe_error(&q);
+        (q, error)
     }
 
     /// Marquardt scaling `≈ diag(Jᵀ S⁻² J)`, the curvature diagonal of the

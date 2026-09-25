@@ -3096,9 +3096,10 @@ impl From<&crate::inverse::InverseDiagnostics> for TheseusInverseDiagnostics {
 /// * `lm_damping`: Levenberg--Marquardt floor for the Gauss--Newton steps,
 ///   relative to the curvature diagonal; 0 (default) halves the step length
 ///   on the exact merit instead of damping the direction.
-/// * `seed_guard_margin`: Stage-1 collapse guard; the Stage-1 seed is raced
-///   against a scaled uniform sign seed when it is worse by more than this
-///   factor. 0 disables the guard. Default 3.
+/// * `seed_guard_margin`: Stage-1 collapse guard. A uniform sign seed at one
+///   common magnitude is scored on the geometric error; when Stage 1 is worse
+///   by more than this factor both seeds run the compliance-weighted steps.
+///   0 disables the guard. Default 3.
 /// * `nondimensionalize`: non-zero scales positions by the target extent and
 ///   loads by their magnitude before assembling (default on).
 /// * `reaction_weight`: weight of the `enforce_zero_r*` rows relative to the
