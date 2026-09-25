@@ -524,6 +524,102 @@ fn build_weighted_saddle(
     (k_mat, rhs)
 }
 
+/// Schur complement `(S Sᵀ + M Λ⁻¹ Mᵀ)` of the weighted saddle after
+/// eliminating the residual and the force densities. Explicit products that
+/// cancel are kept, so the sparsity pattern does not depend on the values.
+fn build_weighted_schur(
+    m_mat: &SparseColMatOwned,
+    s_mat: &SparseColMatOwned,
+    damping: &[f64],
+) -> Result<SparseColMatOwned, TheseusError> {
+    let s_t = s_mat.transpose();
+    let sst = SparseColMatOwned::sparse_times_sparse(s_mat, &s_t).map_err(TheseusError::Solver)?;
+    let mut scaled = m_mat.clone();
+    for col in 0..scaled.ncols {
+        let inv = 1.0 / damping[col];
+        for nz in scaled.col_ptrs[col] as usize..scaled.col_ptrs[col + 1] as usize {
+            scaled.values[nz] *= inv;
+        }
+    }
+    let m_t = m_mat.transpose();
+    let gram =
+        SparseColMatOwned::sparse_times_sparse(&scaled, &m_t).map_err(TheseusError::Solver)?;
+    sparse_add(&sst, &gram)
+}
+
+fn sparse_add(
+    left: &SparseColMatOwned,
+    right: &SparseColMatOwned,
+) -> Result<SparseColMatOwned, TheseusError> {
+    if left.nrows != right.nrows || left.ncols != right.ncols {
+        return Err(TheseusError::Shape("sparse add: dimension mismatch".into()));
+    }
+    let mut triplets = Vec::with_capacity(left.nnz() + right.nnz());
+    for mat in [left, right] {
+        for col in 0..mat.ncols {
+            for nz in mat.col_ptrs[col] as usize..mat.col_ptrs[col + 1] as usize {
+                triplets.push((mat.row_indices[nz], col as u32, mat.values[nz]));
+            }
+        }
+    }
+    SparseColMatOwned::from_triplets(left.nrows, left.ncols, &triplets).map_err(TheseusError::Shape)
+}
+
+fn chol_solve_cached(
+    g: &SparseColMatOwned,
+    rhs: &[f64],
+    cache: &mut Option<Factorization>,
+    factor_stack: &mut GlobalPodBuffer,
+    solve_stack: &mut GlobalPodBuffer,
+) -> Result<Vec<f64>, TheseusError> {
+    let factor_result = if cache.is_none() {
+        Factorization::new(g, FactorizationStrategy::Cholesky, factor_stack).map(|fac| {
+            *cache = Some(fac);
+        })
+    } else {
+        cache
+            .as_mut()
+            .expect("Cholesky cache")
+            .update(g, factor_stack)
+    };
+    if let Err(error) = factor_result {
+        *cache = None;
+        match Factorization::new(g, FactorizationStrategy::Cholesky, factor_stack) {
+            Ok(fac) => *cache = Some(fac),
+            Err(_) => return Err(error),
+        }
+    }
+    let mut workspace = vec![0.0; rhs.len().max(1)];
+    match cache
+        .as_ref()
+        .expect("Cholesky cache")
+        .solve(rhs, &mut workspace, solve_stack)
+    {
+        Ok(sol) => Ok(sol),
+        Err(error) => {
+            *cache = None;
+            Err(error)
+        }
+    }
+}
+
+/// Scale one box endpoint into the diagonal `z` coordinate. Infinite
+/// endpoints stay infinite; a finite endpoint that overflows becomes the
+/// corresponding infinity, except a lower endpoint, which stays finite.
+fn scale_qp_bound(bound: f64, sqrt_h: f64, infinite: f64) -> f64 {
+    if !bound.is_finite() {
+        return infinite;
+    }
+    let scaled = bound * sqrt_h;
+    if scaled.is_finite() {
+        scaled
+    } else if bound < 0.0 {
+        f64::NEG_INFINITY
+    } else {
+        f64::MAX / 4.0
+    }
+}
+
 fn solve_saddle_on(
     m_mat: &SparseColMatOwned,
     p: &[f64],
@@ -1898,11 +1994,11 @@ pub fn solve_inverse_fdm(
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage2Kind {
-    /// Exact bounded-variable least squares on the sparse weighted saddle.
+    /// Bounded convex quadratic, solved by L-BFGS-B on the cached Laplacian.
     ActiveSet,
     /// Interior-point QP.
     Clarabel,
-    /// Unbounded weighted saddle (sparse LDL).
+    /// Unbounded weighted least squares (Schur Cholesky, saddle LDL fallback).
     Saddle,
     /// Matrix-free LSQR with `S⁻¹` applied per matvec.
     Lsqr,
@@ -1927,6 +2023,27 @@ const LM_MAX_TRIES: usize = 6;
 const SEED_GUARD_PROBES: usize = 20;
 /// Rademacher probes for the Marquardt curvature diagonal.
 const LM_SCALE_PROBES: usize = 8;
+/// L-BFGS-B history for the bounded Stage-2 quadratic.
+const QP_LBFGS_HISTORY: usize = 8;
+/// Accepted-iteration cap for that quadratic. Measured on the corner quads,
+/// geometric error is flat past this and starts to move below it. The model
+/// is convex and diagonally scaled, so the cap is the usual count.
+const QP_LBFGS_ITERS: usize = 20;
+/// Projected-gradient infinity-norm tolerance for the bounded quadratic.
+const QP_LBFGS_PGTOL: f64 = 1e-5;
+/// Relative decrease of the quadratic that ends the bounded solve.
+const QP_LBFGS_FTOL: f64 = 1e-8;
+
+fn bound_qp_solver() -> ariadne_lbfgsb::Solver {
+    let options = ariadne_lbfgsb::Options::new()
+        .with_history_size(QP_LBFGS_HISTORY)
+        .and_then(|options| options.with_backend(ariadne_lbfgsb::Backend::Deterministic))
+        .and_then(|options| options.with_max_iterations(QP_LBFGS_ITERS))
+        .and_then(|options| options.with_projected_gradient_tolerance(QP_LBFGS_PGTOL))
+        .and_then(|options| options.with_relative_function_tolerance(QP_LBFGS_FTOL))
+        .expect("Stage-2 bound QP options are valid");
+    ariadne_lbfgsb::Solver::new(options)
+}
 
 /// State shared by the Stage-2 phases: caches, the warm-started active set,
 /// the current Levenberg--Marquardt damping, and accumulated diagnostics.
@@ -1941,6 +2058,11 @@ struct Stage2Context<'a> {
     ldl_cache: Option<Factorization>,
     factor_stack: GlobalPodBuffer,
     solve_stack: GlobalPodBuffer,
+    /// Reused across bounded steps. Workspace grows to the edge count once.
+    qp_solver: ariadne_lbfgsb::Solver,
+    /// Nonzeros of the matrix currently in `ldl_cache`. A Schur factor and a
+    /// saddle factor never share a symbolic analysis.
+    factor_nnz: Option<usize>,
     lm: f64,
     diagnostics: InverseDiagnostics,
 }
@@ -1971,6 +2093,8 @@ impl<'a> Stage2Context<'a> {
             ldl_cache: None,
             factor_stack: GlobalPodBuffer::new(dyn_stack::StackReq::empty()),
             solve_stack: GlobalPodBuffer::new(dyn_stack::StackReq::empty()),
+            qp_solver: bound_qp_solver(),
+            factor_nnz: None,
             lm: opts.lm_damping,
             diagnostics: InverseDiagnostics::default(),
         }
@@ -2176,21 +2300,26 @@ impl<'a> Stage2Context<'a> {
         let ne = jacobian.ncols;
         match self.kind {
             Stage2Kind::ActiveSet => {
-                match self.solve_active_set(jacobian, neg_r, damping, step_bounds, weight) {
+                match self.solve_bound_qp(jacobian, neg_r, damping, step_bounds, weight) {
                     Ok(step) => Ok(step),
                     Err(_) => {
-                        self.diagnostics.clarabel_fallbacks += 1;
-                        self.diagnostics.stage2_factorizations += 1;
-                        solve_clarabel_once(
-                            jacobian,
-                            neg_r,
-                            damping,
-                            step_bounds,
-                            Some(weight),
-                            self.opts.max_iter,
-                            self.opts.tol,
-                            true,
-                        )
+                        match self.solve_active_set(jacobian, neg_r, damping, step_bounds, weight) {
+                            Ok(step) => Ok(step),
+                            Err(_) => {
+                                self.diagnostics.clarabel_fallbacks += 1;
+                                self.diagnostics.stage2_factorizations += 1;
+                                solve_clarabel_once(
+                                    jacobian,
+                                    neg_r,
+                                    damping,
+                                    step_bounds,
+                                    Some(weight),
+                                    self.opts.max_iter,
+                                    self.opts.tol,
+                                    true,
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -2207,20 +2336,7 @@ impl<'a> Stage2Context<'a> {
                     true,
                 )
             }
-            Stage2Kind::Saddle => {
-                self.diagnostics.stage2_factorizations += 1;
-                let (k_mat, rhs) = build_weighted_saddle(jacobian, &weight.s, neg_r, damping, None);
-                let sol = ldl_solve_cached(
-                    &k_mat,
-                    &rhs,
-                    1.0,
-                    &mut self.ldl_cache,
-                    &mut self.factor_stack,
-                    &mut self.solve_stack,
-                )?;
-                let m = neg_r.len();
-                Ok(sol[m..m + ne].to_vec())
-            }
+            Stage2Kind::Saddle => self.solve_unbounded_step(jacobian, neg_r, damping, weight),
             Stage2Kind::Lsqr => {
                 let lambda = damping.iter().sum::<f64>() / damping.len().max(1) as f64;
                 let result = solve_lsqr_on(
@@ -2249,6 +2365,215 @@ impl<'a> Stage2Context<'a> {
                 Ok(result.q)
             }
         }
+    }
+
+    /// Drop a cached factor whose pattern or strategy does not match `g`.
+    fn prepare_factor_cache(&mut self, strategy: FactorizationStrategy, nnz: usize) {
+        let matches = self.factor_nnz == Some(nnz)
+            && self
+                .ldl_cache
+                .as_ref()
+                .is_some_and(|fac| fac.strategy() == strategy);
+        if !matches {
+            self.ldl_cache = None;
+        }
+        self.factor_nnz = Some(nnz);
+    }
+
+    /// Unbounded weighted least squares. Positive damping eliminates `e` and
+    /// `q` and factors the Schur complement; a non-positive damping entry, or
+    /// a failed Cholesky, falls back to the 3-block saddle LDL.
+    fn solve_unbounded_step(
+        &mut self,
+        jacobian: &SparseColMatOwned,
+        neg_r: &[f64],
+        damping: &[f64],
+        weight: &MetricWeight,
+    ) -> Result<Vec<f64>, TheseusError> {
+        if damping.iter().all(|&damping_j| damping_j > 0.0) {
+            match self.solve_schur(jacobian, neg_r, damping, weight) {
+                Ok(step) => return Ok(step),
+                Err(_) => {
+                    self.ldl_cache = None;
+                    self.factor_nnz = None;
+                }
+            }
+        }
+        self.diagnostics.stage2_factorizations += 1;
+        let (k_mat, rhs) = build_weighted_saddle(jacobian, &weight.s, neg_r, damping, None);
+        self.prepare_factor_cache(FactorizationStrategy::LDL, k_mat.nnz());
+        let sol = ldl_solve_cached(
+            &k_mat,
+            &rhs,
+            1.0,
+            &mut self.ldl_cache,
+            &mut self.factor_stack,
+            &mut self.solve_stack,
+        )?;
+        let m = neg_r.len();
+        Ok(sol[m..m + jacobian.ncols].to_vec())
+    }
+
+    /// `(S Sᵀ + M Λ⁻¹ Mᵀ) y = p`, `q = Λ⁻¹ Mᵀ y`, with `p` the Stage-2
+    /// right-hand side (`neg_r`).
+    fn solve_schur(
+        &mut self,
+        jacobian: &SparseColMatOwned,
+        neg_r: &[f64],
+        damping: &[f64],
+        weight: &MetricWeight,
+    ) -> Result<Vec<f64>, TheseusError> {
+        let schur = build_weighted_schur(jacobian, &weight.s, damping)?;
+        self.diagnostics.stage2_factorizations += 1;
+        self.prepare_factor_cache(FactorizationStrategy::Cholesky, schur.nnz());
+        let y = chol_solve_cached(
+            &schur,
+            neg_r,
+            &mut self.ldl_cache,
+            &mut self.factor_stack,
+            &mut self.solve_stack,
+        )?;
+        let mut q = vec![0.0; jacobian.ncols];
+        for col in 0..jacobian.ncols {
+            let mut dot = 0.0;
+            for nz in jacobian.col_ptrs[col] as usize..jacobian.col_ptrs[col + 1] as usize {
+                dot += jacobian.values[nz] * y[jacobian.row_indices[nz] as usize];
+            }
+            let value = dot / damping[col];
+            if !value.is_finite() {
+                return Err(TheseusError::Solver(
+                    "Schur complement produced a non-finite step".into(),
+                ));
+            }
+            q[col] = value;
+        }
+        Ok(q)
+    }
+
+    /// Box-constrained convex quadratic by L-BFGS-B.
+    ///
+    /// The model is `½‖S⁻¹(JΔ − p)‖² + ½Σ Λ_j Δ_j²` on the shifted box. A
+    /// diagonal change of variables `Δ_j = z_j / √h_j`, with `h` the
+    /// Hutchinson curvature plus the Tikhonov weight, keeps the projected
+    /// gradient on a scale the iteration cap can finish. Each evaluation is
+    /// two solves with the cached Laplacian. A line search that never leaves
+    /// the origin falls back to the saddle active set; a step that moved is
+    /// returned even when the iteration cap stops the solve, and the outer
+    /// merit backtracking rejects a step that does not descend.
+    fn solve_bound_qp(
+        &mut self,
+        jacobian: &SparseColMatOwned,
+        neg_r: &[f64],
+        damping: &[f64],
+        step_bounds: &BoxBounds,
+        weight: &MetricWeight,
+    ) -> Result<Vec<f64>, TheseusError> {
+        let ne = jacobian.ncols;
+        if ne == 0 {
+            return Ok(Vec::new());
+        }
+        let curvature = self.lm_scale(jacobian, weight);
+        let mut sqrt_h = vec![0.0; ne];
+        let mut inv_sqrt = vec![0.0; ne];
+        let mut z_lower = vec![0.0; ne];
+        let mut z_upper = vec![0.0; ne];
+        for j in 0..ne {
+            let h_j = (curvature[j] + damping[j]).max(1e-8);
+            let root = h_j.sqrt();
+            sqrt_h[j] = root;
+            inv_sqrt[j] = 1.0 / root;
+            z_lower[j] = scale_qp_bound(step_bounds.lower[j], root, f64::NEG_INFINITY);
+            z_upper[j] = scale_qp_bound(step_bounds.upper[j], root, f64::INFINITY);
+            if z_lower[j] > z_upper[j] {
+                let mid = 0.5 * (z_lower[j] + z_upper[j]);
+                z_lower[j] = mid;
+                z_upper[j] = mid;
+            }
+        }
+        let bounds = ariadne_lbfgsb::Bounds::new(&z_lower, &z_upper, ne)
+            .map_err(|error| TheseusError::Solver(format!("bound QP bounds: {error}")))?;
+        let mut z = vec![0.0; ne];
+        let mut x = vec![0.0; ne];
+        let mut residual = vec![0.0; jacobian.nrows];
+        let report = self
+            .qp_solver
+            .minimize(&mut z, bounds, |z, grad_z| {
+                for j in 0..ne {
+                    x[j] = z[j] * inv_sqrt[j];
+                }
+                residual.fill(0.0);
+                for col in 0..ne {
+                    let xj = x[col];
+                    if xj == 0.0 {
+                        continue;
+                    }
+                    for nz in jacobian.col_ptrs[col] as usize..jacobian.col_ptrs[col + 1] as usize {
+                        residual[jacobian.row_indices[nz] as usize] += jacobian.values[nz] * xj;
+                    }
+                }
+                for (value, &rhs) in residual.iter_mut().zip(neg_r) {
+                    *value -= rhs;
+                }
+                let e = weight.apply_inverse(&residual)?;
+                let data = 0.5 * e.iter().map(|value| value * value).sum::<f64>();
+                let tikhonov = 0.5
+                    * x.iter()
+                        .zip(damping)
+                        .map(|(step, lambda)| lambda * step * step)
+                        .sum::<f64>();
+                let dual = weight.apply_inverse_transpose(&e)?;
+                if dual.len() != residual.len() {
+                    return Err(TheseusError::Shape(
+                        "bound QP gradient row count does not match the Jacobian".into(),
+                    ));
+                }
+                for col in 0..ne {
+                    let mut dot = 0.0;
+                    for nz in jacobian.col_ptrs[col] as usize..jacobian.col_ptrs[col + 1] as usize {
+                        dot += jacobian.values[nz] * dual[jacobian.row_indices[nz] as usize];
+                    }
+                    let grad_x = dot + damping[col] * x[col];
+                    let grad = grad_x * inv_sqrt[col];
+                    if !grad.is_finite() {
+                        return Err(TheseusError::Solver(
+                            "bound QP gradient is non-finite".into(),
+                        ));
+                    }
+                    grad_z[col] = grad;
+                }
+                let value = data + tikhonov;
+                if !value.is_finite() {
+                    return Err(TheseusError::Solver(
+                        "bound QP objective is non-finite".into(),
+                    ));
+                }
+                Ok(value)
+            })
+            .map_err(|error| match error {
+                LbfgsbSolveError::Objective(error) | LbfgsbSolveError::Callback(error) => error,
+                other => TheseusError::Solver(other.to_string()),
+            })?;
+        for j in 0..ne {
+            let step = z[j] * inv_sqrt[j];
+            x[j] = if step.is_finite() {
+                step.clamp(step_bounds.lower[j], step_bounds.upper[j])
+            } else {
+                step
+            };
+        }
+        if x.iter().any(|value| !value.is_finite()) || !report.value.is_finite() {
+            return Err(TheseusError::Solver(
+                "bound QP returned a non-finite step".into(),
+            ));
+        }
+        let stuck_at_origin = x.iter().all(|value| value.abs() <= 1e-14);
+        if matches!(report.termination, ariadne_lbfgsb::Termination::Failed(_)) && stuck_at_origin {
+            return Err(TheseusError::Solver(
+                "bound QP line search failed at the origin".into(),
+            ));
+        }
+        self.diagnostics.stage2_factorizations += report.stats.evaluations;
+        Ok(x)
     }
 
     /// Bounded-variable least squares by a primal-dual active set with a
@@ -2349,6 +2674,7 @@ impl<'a> Stage2Context<'a> {
                 Some((&self.active, &fixed)),
             );
             self.diagnostics.stage2_factorizations += 1;
+            self.prepare_factor_cache(FactorizationStrategy::LDL, k_mat.nnz());
             let sol = ldl_solve_cached(
                 &k_mat,
                 &rhs,
