@@ -61,15 +61,7 @@ pub fn update_fixed_positions(
 /// Zero-allocation in-place update of A's values from current q.
 /// A = Cn^T diag(q) Cn  via the precomputed `q_to_nz` mapping.
 pub fn assemble_a(cache: &mut FdmCache) {
-    for v in cache.a_matrix.values.iter_mut() {
-        *v = 0.0;
-    }
-    for (k, entries) in cache.q_to_nz.entries.iter().enumerate() {
-        let qk = cache.q[k];
-        for &(nz_idx, coeff) in entries {
-            cache.a_matrix.values[nz_idx] += qk * coeff;
-        }
-    }
+    cache.q_to_nz.scatter(&cache.q, &mut cache.a_matrix.values);
 }
 
 // ─────────────────────────────────────────────────────────────

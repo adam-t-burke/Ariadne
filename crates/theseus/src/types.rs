@@ -714,6 +714,66 @@ pub struct QToNz {
     pub entries: Vec<Vec<(usize, f64)>>,
 }
 
+impl QToNz {
+    /// Pattern and scatter map for `leftᵀ diag(q) right`.
+    ///
+    /// Both matrices are edge × node, with the edge index in the row. The
+    /// returned matrix is `n_left × n_right` and holds the product at `q = 1`.
+    /// [`Self::scatter`] overwrites those values for any later `q`. The forward
+    /// Laplacian and the inverse metric share this map so neither grows a
+    /// second copy of the incidence product.
+    pub fn from_edge_product(
+        left: &SparseColMatOwned,
+        right: &SparseColMatOwned,
+    ) -> Result<(SparseColMatOwned, Self), TheseusError> {
+        if left.nrows != right.nrows {
+            return Err(TheseusError::Shape(format!(
+                "edge product: left has {} rows, right has {}",
+                left.nrows, right.nrows
+            )));
+        }
+        let left_t = left.transpose();
+        let matrix =
+            SparseColMatOwned::sparse_times_sparse(&left_t, right).map_err(TheseusError::Solver)?;
+        let ne = left.nrows;
+        let mut left_at = vec![Vec::new(); ne];
+        for col in 0..left.ncols {
+            for idx in left.col_ptrs[col] as usize..left.col_ptrs[col + 1] as usize {
+                left_at[left.row_indices[idx] as usize].push((col, left.values[idx]));
+            }
+        }
+        let mut right_at = vec![Vec::new(); ne];
+        for col in 0..right.ncols {
+            for idx in right.col_ptrs[col] as usize..right.col_ptrs[col + 1] as usize {
+                right_at[right.row_indices[idx] as usize].push((col, right.values[idx]));
+            }
+        }
+        let mut entries = vec![Vec::new(); ne];
+        for edge in 0..ne {
+            for &(row, v_left) in &left_at[edge] {
+                for &(col, v_right) in &right_at[edge] {
+                    let nz = find_nz_index(&matrix.col_ptrs, &matrix.row_indices, row, col)
+                        .ok_or(TheseusError::SparsityMismatch { edge, row, col })?;
+                    entries[edge].push((nz, v_left * v_right));
+                }
+            }
+        }
+        Ok((matrix, Self { entries }))
+    }
+
+    /// `values = Σ_k q_k · coeff` into an existing nonzero array. Zeros the
+    /// array first, so structural entries with no contribution stay explicit.
+    pub fn scatter(&self, q: &[f64], values: &mut [f64]) {
+        values.fill(0.0);
+        for (edge, slots) in self.entries.iter().enumerate() {
+            let qk = q[edge];
+            for &(nz, coeff) in slots {
+                values[nz] += qk * coeff;
+            }
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────
 //  Factorization strategy
 // ─────────────────────────────────────────────────────────────
@@ -1071,41 +1131,10 @@ impl FdmCache {
         let nn_free = topo.free_node_indices.len();
         let nn_fixed = topo.fixed_node_indices.len();
 
-        // ── 1. Build A's sparsity pattern from Cn^T * Cn ──
+        // ── 1–2. Laplacian pattern and the edge → nonzero map ──
+        // A = Cnᵀ diag(q) Cn. The pattern is Cnᵀ Cn; values are scattered later.
         let cn = &topo.free_incidence; // ne × nn_free
-        let cn_t = cn.transpose();
-        let a_matrix = SparseColMatOwned::sparse_times_sparse(&cn_t, cn)
-            .map_err(|e| TheseusError::Solver(e))?;
-
-        // ── 2. Build q_to_nz mapping ──────────────────────
-        // For each edge k, find which free nodes it touches in Cn,
-        // then map those (n1, n2) pairs to indices in a_matrix.values.
-        let mut edge_to_free_nodes: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ne];
-        for col in 0..nn_free {
-            let start = cn.col_ptrs[col] as usize;
-            let end_ = cn.col_ptrs[col + 1] as usize;
-            for idx in start..end_ {
-                let row = cn.row_indices[idx] as usize;
-                let val = cn.values[idx];
-                edge_to_free_nodes[row].push((col, val));
-            }
-        }
-
-        let mut q_to_nz_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ne];
-        for k in 0..ne {
-            let nodes = &edge_to_free_nodes[k];
-            for &(n1, v1) in nodes {
-                for &(n2, v2) in nodes {
-                    let nz_idx = find_nz_index(&a_matrix.col_ptrs, &a_matrix.row_indices, n1, n2)
-                        .ok_or(TheseusError::SparsityMismatch {
-                        edge: k,
-                        row: n1,
-                        col: n2,
-                    })?;
-                    q_to_nz_entries[k].push((nz_idx, v1 * v2));
-                }
-            }
-        }
+        let (a_matrix, q_to_nz) = QToNz::from_edge_product(cn, cn)?;
 
         // ── 3. Edge start / end from incidence ────────────
         let mut edge_starts = vec![0usize; ne];
@@ -1156,9 +1185,7 @@ impl FdmCache {
         Ok(FdmCache {
             a_matrix,
             factorization: None,
-            q_to_nz: QToNz {
-                entries: q_to_nz_entries,
-            },
+            q_to_nz,
             edge_starts,
             edge_ends,
             node_to_free_idx,
@@ -1279,4 +1306,41 @@ pub fn find_nz_index(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod q_scatter {
+    use super::*;
+    use crate::sparse::SparseColMatOwned;
+
+    #[test]
+    fn scatter_matches_incidence_product() {
+        // Two edges on three nodes. Rows are edges, columns are nodes.
+        let incidence = SparseColMatOwned::from_triplets(
+            2,
+            3,
+            &[(0, 0, 1.0), (0, 1, -1.0), (1, 1, 1.0), (1, 2, -1.0)],
+        )
+        .unwrap();
+        let (mut matrix, map) = QToNz::from_edge_product(&incidence, &incidence).unwrap();
+        let q = [2.0, 3.0];
+        map.scatter(&q, &mut matrix.values);
+
+        let mut scaled = incidence.clone();
+        for col in 0..scaled.ncols {
+            let start = scaled.col_ptrs[col] as usize;
+            let end = scaled.col_ptrs[col + 1] as usize;
+            for nz in start..end {
+                let edge = scaled.row_indices[nz] as usize;
+                scaled.values[nz] *= q[edge];
+            }
+        }
+        let product =
+            SparseColMatOwned::sparse_times_sparse(&incidence.transpose(), &scaled).unwrap();
+        assert_eq!(matrix.col_ptrs, product.col_ptrs);
+        assert_eq!(matrix.row_indices, product.row_indices);
+        for (got, expected) in matrix.values.iter().zip(&product.values) {
+            assert!((got - expected).abs() <= 1e-12, "{got} vs {expected}");
+        }
+    }
 }
