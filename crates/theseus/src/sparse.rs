@@ -275,4 +275,134 @@ impl SparseColMatOwned {
         }
         Self::from_triplets(self.nrows, ncols, &triplets).expect("extract_columns")
     }
+
+    /// Row of `nz` in column `col`, if that entry exists.
+    pub fn nz_at(&self, row: usize, col: usize) -> Option<usize> {
+        let start = self.col_ptrs[col] as usize;
+        let end = self.col_ptrs[col + 1] as usize;
+        (start..end).find(|&idx| self.row_indices[idx] as usize == row)
+    }
+
+    pub fn same_pattern(&self, other: &Self) -> bool {
+        self.nrows == other.nrows
+            && self.ncols == other.ncols
+            && self.col_ptrs == other.col_ptrs
+            && self.row_indices == other.row_indices
+    }
+}
+
+/// `Aᵀ` whose pattern is fixed. Later calls overwrite values from `A`.
+pub struct FixedTranspose {
+    pub matrix: SparseColMatOwned,
+    /// `at[src_nz]` is the slot in `matrix.values`.
+    at: Vec<usize>,
+}
+
+impl FixedTranspose {
+    pub fn new(src: &SparseColMatOwned) -> Self {
+        let matrix = src.transpose();
+        let mut at = vec![0; src.nnz()];
+        for col in 0..src.ncols {
+            for idx in src.col_ptrs[col] as usize..src.col_ptrs[col + 1] as usize {
+                let row = src.row_indices[idx] as usize;
+                at[idx] = matrix
+                    .nz_at(col, row)
+                    .expect("transpose contains every source nonzero");
+            }
+        }
+        Self { matrix, at }
+    }
+
+    pub fn refresh(&mut self, src_values: &[f64]) {
+        for (src, &dst) in self.at.iter().enumerate() {
+            self.matrix.values[dst] = src_values[src];
+        }
+    }
+}
+
+/// Sparse product whose pattern was captured by [`SparseColMatOwned::sparse_times_sparse`].
+///
+/// Numeric refreshes use a Gustavson column accumulator. The first matrix is
+/// the triplet product, so a caller can check the refresh against it.
+pub struct FixedProduct {
+    pub result: SparseColMatOwned,
+    acc: Vec<f64>,
+}
+
+impl FixedProduct {
+    pub fn new(a: &SparseColMatOwned, b: &SparseColMatOwned) -> Result<Self, String> {
+        let result = SparseColMatOwned::sparse_times_sparse(a, b)?;
+        let acc = vec![0.0; result.nrows];
+        Ok(Self { result, acc })
+    }
+
+    pub fn refresh(&mut self, a: &SparseColMatOwned, b: &SparseColMatOwned) {
+        for j in 0..b.ncols {
+            let start = self.result.col_ptrs[j] as usize;
+            let end = self.result.col_ptrs[j + 1] as usize;
+            for idx in start..end {
+                self.acc[self.result.row_indices[idx] as usize] = 0.0;
+            }
+            for b_idx in b.col_ptrs[j] as usize..b.col_ptrs[j + 1] as usize {
+                let row_b = b.row_indices[b_idx] as usize;
+                let val_b = b.values[b_idx];
+                for a_idx in a.col_ptrs[row_b] as usize..a.col_ptrs[row_b + 1] as usize {
+                    self.acc[a.row_indices[a_idx] as usize] += a.values[a_idx] * val_b;
+                }
+            }
+            for idx in start..end {
+                let row = self.result.row_indices[idx] as usize;
+                self.result.values[idx] = self.acc[row];
+            }
+        }
+    }
+}
+
+/// Sum of two matrices with a fixed union pattern.
+pub struct FixedSum {
+    pub result: SparseColMatOwned,
+    left_at: Vec<usize>,
+    right_at: Vec<usize>,
+}
+
+impl FixedSum {
+    pub fn new(left: &SparseColMatOwned, right: &SparseColMatOwned) -> Result<Self, String> {
+        let mut triplets = Vec::with_capacity(left.nnz() + right.nnz());
+        for mat in [left, right] {
+            for col in 0..mat.ncols {
+                for nz in mat.col_ptrs[col] as usize..mat.col_ptrs[col + 1] as usize {
+                    triplets.push((mat.row_indices[nz], col as u32, mat.values[nz]));
+                }
+            }
+        }
+        let result = SparseColMatOwned::from_triplets(left.nrows, left.ncols, &triplets)?;
+        Ok(Self {
+            left_at: locate_nonzeros(left, &result),
+            right_at: locate_nonzeros(right, &result),
+            result,
+        })
+    }
+
+    pub fn refresh(&mut self, left: &SparseColMatOwned, right: &SparseColMatOwned) {
+        self.result.values.fill(0.0);
+        for (src, &dst) in self.left_at.iter().enumerate() {
+            self.result.values[dst] += left.values[src];
+        }
+        for (src, &dst) in self.right_at.iter().enumerate() {
+            self.result.values[dst] += right.values[src];
+        }
+    }
+}
+
+fn locate_nonzeros(src: &SparseColMatOwned, dst: &SparseColMatOwned) -> Vec<usize> {
+    let mut at = Vec::with_capacity(src.nnz());
+    for col in 0..src.ncols {
+        for idx in src.col_ptrs[col] as usize..src.col_ptrs[col + 1] as usize {
+            at.push(
+                dst.nz_at(src.row_indices[idx] as usize, col)
+                    .expect("sum pattern covers both terms"),
+            );
+        }
+    }
+    at
 }
