@@ -54,8 +54,8 @@ use crate::nullspace::{
     apply_pseudoinverse, solve_lsqr, solve_saddle_pseudoinverse, EquilibriumSystem,
     EquilibriumUnknown,
 };
-use crate::sparse::SparseColMatOwned;
-use crate::types::{Factorization, FactorizationStrategy, Problem, TheseusError};
+use crate::sparse::{FixedProduct, FixedSum, FixedTranspose, SparseColMatOwned};
+use crate::types::{Factorization, FactorizationStrategy, Problem, QToNz, TheseusError};
 use ariadne_lbfgsb::SolveError as LbfgsbSolveError;
 use dyn_stack::{GlobalPodBuffer, PodStack};
 use faer_core::{Conj, Mat, Parallelism};
