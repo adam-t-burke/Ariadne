@@ -11,3 +11,6 @@ dependencies = [
 
 [tool.uv]
 package = false
+# Matplotlib pulls Pillow. Versions before 13.0.0 keep a rejected GIF
+# frame size after DecompressionBombError (CVE-2026-112400).
+constraint-dependencies = ["pillow>=13.0.0"]
