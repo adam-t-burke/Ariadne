@@ -2,7 +2,7 @@
 	
   <PropertyGroup>
     <TargetFrameworks>net8.0</TargetFrameworks>
-    <Version>1.0.11-beta</Version>
+    <Version>1.1.0-beta</Version>
     <Title>Ariadne Dev</Title>
     <Description>PREVIEW / BREAKING development channel (Yak: ariadne-dev). Do not install alongside the stable Ariadne package. Front-end counterpart to the Theseus inverse form-finding solver.</Description>
 <TargetExt>.gha</TargetExt>

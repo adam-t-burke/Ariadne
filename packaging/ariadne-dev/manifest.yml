@@ -1,7 +1,7 @@
 ---
 name: ariadne-dev
 # Keep in sync with <Version> in Ariadne.csproj (yak $version did not resolve from this .gha).
-version: 1.0.11-beta
+version: 1.1.0-beta
 authors:
   - Adam Burke
 description: >
