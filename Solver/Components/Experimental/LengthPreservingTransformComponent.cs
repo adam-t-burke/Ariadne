@@ -25,7 +25,7 @@ public sealed class LengthPreservingTransformComponent : GH_Component
     public LengthPreservingTransformComponent()
         : base("Length-Preserving Transform", "NetXform",
             "Trace finite, per-member length-preserving mechanism paths.",
-            "Ariadne", "Experimental")
+            "Ariadne Dev", "Experimental")
     {
         UpdateMessage();
     }

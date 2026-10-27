@@ -23,7 +23,7 @@ public sealed class InfinitesimalMixComponent : GH_Component
     public InfinitesimalMixComponent()
         : base("Infinitesimal Mix", "Flex",
             "Mix cached self-stress and first-order mechanism modes.",
-            "Ariadne", "Experimental")
+            "Ariadne Dev", "Experimental")
     {
         UpdateMessage();
     }

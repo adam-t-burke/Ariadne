@@ -159,9 +159,12 @@ public static class TheseusSolverService
 
     /// Solve inverse FDM at a target geometry, then forward-solve with the recovered q.
     /// particularMethod: 0 = Gram (sparse), 1 = Augmented, 2 = Sparse QR,
-    /// 3 = Clarabel, 4 = Gram (dense) (Direct unconstrained only; constrained
-    /// Direct always uses Clarabel).
-    /// linearAlgebra: 0 = Direct, 1 = Iterative.
+    /// 3 = Clarabel, 4 = Gram (dense). Used for Direct unconstrained Stage 1;
+    /// when any Sign/Lower/Upper is finite, Stage 1 follows stage2Method instead.
+    /// stage2Method: ActiveSet (default) = projected quadratic via L-BFGS-B for
+    /// every boxed Direct Stage-1 particular and Stage-2 step; Clarabel = the
+    /// interior-point alternative (and the fallback if the projected path fails).
+    /// linearAlgebra: 0 = Direct, 1 = Iterative (LSQR unconstrained / SPG boxed).
     /// metric: 0 = Force, 1 = legacy frozen Geometry, 2 = GeometryNewton.
     /// GeometryNewton may run maxFrozenOuter frozen-target CWLS updates before
     /// maxOuter Gauss–Newton updates. solveForQ selects only the Stage-1

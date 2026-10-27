@@ -17,7 +17,7 @@ public class DefineFacesComponent : GH_Component
     public DefineFacesComponent()
         : base("Define Faces", "DefFaces",
             "Define face topology from vertex index lists. Each branch is one face.",
-            "Ariadne", "Graphs")
+            "Ariadne Dev", "Graphs")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)

@@ -28,7 +28,7 @@ namespace Ariadne.FDM
         public ConstructNetwork()
           : base("Construct FDM Network", "FDM Network",
             "Create FDM network",
-            "Ariadne", "Design")
+            "Ariadne Dev", "Design")
         {
         }
 

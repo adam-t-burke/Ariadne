@@ -31,7 +31,7 @@ public class InverseFdmCaseComponent : GH_Component
     public InverseFdmCaseComponent()
         : base("Load Inverse FDM Case", "InvFdmCase",
             "Load a warm-start benchmark case (synthetic suite, jax_fdm, compas_cem) as an FDM Network with free-node Target, Loads, Load Nodes, and per-edge Signs / Lower / Upper for Inverse FDM and Theseus Solve.",
-            "Ariadne", "Experimental")
+            "Ariadne Dev", "Experimental")
     {
     }
 

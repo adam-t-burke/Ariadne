@@ -19,7 +19,7 @@ public class LengthVariationComponent : GH_Component
     public LengthVariationComponent()
         : base("Length Variation", "LenVar",
             "Minimize variation in edge lengths.",
-            "Ariadne", "Objectives")
+            "Ariadne Dev", "Objectives")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)
@@ -118,7 +118,7 @@ public class ForceVariationComponent : GH_Component
     public ForceVariationComponent()
         : base("Force Variation", "ForceVar",
             "Minimize variation in member forces.",
-            "Ariadne", "Objectives")
+            "Ariadne Dev", "Objectives")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)
@@ -220,7 +220,7 @@ public class PerformanceComponent : GH_Component
     public PerformanceComponent()
         : base("Performance", "Perf",
             "Minimize sum of force x length products (structural efficiency).",
-            "Ariadne", "Objectives")
+            "Ariadne Dev", "Objectives")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)
@@ -259,7 +259,7 @@ public class TargetLengthComponent : GH_Component
     public TargetLengthComponent()
         : base("Target Length", "TargetLen",
             "Target specific edge lengths.",
-            "Ariadne", "Objectives")
+            "Ariadne Dev", "Objectives")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)
@@ -301,7 +301,7 @@ public class TargetForceComponent : GH_Component
     public TargetForceComponent()
         : base("Target Force", "TargetForce",
             "Target specific signed member forces.",
-            "Ariadne", "Objectives")
+            "Ariadne Dev", "Objectives")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)
@@ -343,7 +343,7 @@ public class MinLengthComponent : GH_Component
     public MinLengthComponent()
         : base("Min Length", "MinLen",
             "Barrier penalty for edges below minimum length.",
-            "Ariadne", "Objectives")
+            "Ariadne Dev", "Objectives")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)
@@ -388,7 +388,7 @@ public class MaxLengthComponent : GH_Component
     public MaxLengthComponent()
         : base("Max Length", "MaxLen",
             "Barrier penalty for edges above maximum length.",
-            "Ariadne", "Objectives")
+            "Ariadne Dev", "Objectives")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)
@@ -433,7 +433,7 @@ public class MinForceComponent : GH_Component
     public MinForceComponent()
         : base("Min Force", "MinForce",
             "Barrier penalty for forces below minimum.",
-            "Ariadne", "Objectives")
+            "Ariadne Dev", "Objectives")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)
@@ -478,7 +478,7 @@ public class MaxForceComponent : GH_Component
     public MaxForceComponent()
         : base("Max Force", "MaxForce",
             "Barrier penalty for forces above maximum.",
-            "Ariadne", "Objectives")
+            "Ariadne Dev", "Objectives")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)

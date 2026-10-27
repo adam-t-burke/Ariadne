@@ -18,7 +18,7 @@ public class DirectionalPressureComponent : GH_Component
     public DirectionalPressureComponent()
         : base("Pressure Load (Directional)", "Press-D",
             "Directional pressure proportional to projected face area (e.g. dead load, soil pressure).",
-            "Ariadne", "Design")
+            "Ariadne Dev", "Design")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)

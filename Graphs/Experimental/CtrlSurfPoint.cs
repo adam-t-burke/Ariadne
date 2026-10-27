@@ -50,7 +50,7 @@ namespace Ariadne.GH_Design.Experimental
         public CtrlSurfPoint()
           : base("ControlSurfaceP", "CtrlSurfP",
               "Provides reduced-dimension values for free nodes based on NURBs control surface",
-              "Ariadne", "Experimental")
+              "Ariadne Dev", "Experimental")
         {
         }
 

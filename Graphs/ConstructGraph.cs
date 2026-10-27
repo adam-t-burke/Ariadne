@@ -26,7 +26,7 @@ namespace Ariadne.Graphs
         public ConstructGraph()
           : base("ConstructGraph", "Construct Graph",
             "Create Graph from Curve Network",
-            "Ariadne", "Graphs")
+            "Ariadne Dev", "Graphs")
         {
         }
 

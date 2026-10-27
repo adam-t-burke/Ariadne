@@ -27,7 +27,7 @@ public class OptConfigComponent : GH_Component
     public OptConfigComponent()
         : base("Optimization Config", "OptConfig",
             "Bundle optimization settings for the Theseus solver.",
-            "Ariadne", "Design")
+            "Ariadne Dev", "Design")
     {
         UpdateMessage();
     }

@@ -18,7 +18,7 @@ public class PressureLoadComponent : GH_Component
     public PressureLoadComponent()
         : base("Pressure Load", "Press",
             "Configure pressure loads on faces for form-finding.",
-            "Ariadne", "Design")
+            "Ariadne Dev", "Design")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)

@@ -18,7 +18,13 @@ Ariadne is a Grasshopper plugin for **inverse design of form-found structures** 
 
 ## Installation
 
-**Recommended:** Install via the Package Manager in Rhino (search for *Ariadne*).
+**Stable:** Install via the Package Manager in Rhino (search for *Ariadne*).
+
+**Preview / breaking (`ariadne-dev`):** This branch publishes a separate Yak
+package named **ariadne-dev** (Grasshopper tab **Ariadne Dev**) so existing
+stable installs are not upgraded into incompatible APIs. Do **not** install
+`ariadne-dev` alongside stable Ariadne. Build and push with
+`.\packaging\Pack-Yak.ps1` (add `-Push` after `yak login`).
 
 **From source on Windows:** Clone the repo, run `.\build.ps1`, then open
 `Ariadne.sln` in Visual Studio and build in Release. Copy `Ariadne.gha`,

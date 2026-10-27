@@ -25,7 +25,7 @@ public sealed class RigidityReportComponent : GH_Component
     public RigidityReportComponent()
         : base("Rigidity Report", "Rigidity",
             "Report equilibrium rank, self-stress, and infinitesimal mechanisms.",
-            "Ariadne", "Experimental")
+            "Ariadne Dev", "Experimental")
     {
         UpdateMessage();
     }

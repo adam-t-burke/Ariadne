@@ -51,7 +51,7 @@ namespace Ariadne.GH_Design.Experimental
         public CtrlSurfEdge()
           : base("ControlSurfaceQ", "CtrlSurfQ",
               "Provides reduced-dimension values for network edges based on NURBs control surface",
-              "Ariadne", "Experimental")
+              "Ariadne Dev", "Experimental")
         {
         }
 

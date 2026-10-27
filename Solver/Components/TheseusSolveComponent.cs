@@ -77,7 +77,7 @@ public class TheseusSolveComponent : GH_Component
     public TheseusSolveComponent()
         : base("Theseus Solve", "Theseus",
             "Solve FDM network using Theseus optimization engine.",
-            "Ariadne", "Design")
+            "Ariadne Dev", "Design")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)

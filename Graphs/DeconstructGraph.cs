@@ -19,7 +19,7 @@ namespace Ariadne.Graphs
         public DeconstructGraph()
           : base("DeconstructGraph", "Deconstruct Graph",
             "Deconstruct Curve Graph",
-            "Ariadne", "Graphs")
+            "Ariadne Dev", "Graphs")
         {
         }
 

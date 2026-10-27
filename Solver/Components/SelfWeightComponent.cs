@@ -15,7 +15,7 @@ public class SelfWeightPrescribedComponent : GH_Component
     public SelfWeightPrescribedComponent()
         : base("Self-Weight (Prescribed)", "SW-Presc",
             "Configure prescribed linear density self-weight for form-finding.",
-            "Ariadne", "Design")
+            "Ariadne Dev", "Design")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)
@@ -79,7 +79,7 @@ public class SelfWeightSizingComponent : GH_Component
     public SelfWeightSizingComponent()
         : base("Self-Weight (Sizing)", "SW-Size",
             "Configure force-based sizing self-weight. A_k = |F_k| / σ.",
-            "Ariadne", "Design")
+            "Ariadne Dev", "Design")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)

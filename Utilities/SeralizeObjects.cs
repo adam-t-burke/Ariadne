@@ -21,7 +21,7 @@ namespace Ariadne.Utilities
         public SeralizeObjects()
           : base("SeralizeObjects", "Serialize",
               "Serialize any object to inspect its contents.",
-              "Ariadne", "Utilities")
+              "Ariadne Dev", "Utilities")
         {
         }
 

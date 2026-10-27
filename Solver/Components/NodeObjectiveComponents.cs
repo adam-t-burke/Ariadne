@@ -19,7 +19,7 @@ public abstract class TargetGeometryComponent : GH_Component
     private TargetGeometryReduction _reduction = TargetGeometryReduction.Sse;
 
     protected TargetGeometryComponent(string name, string nickname, string description)
-        : base(name, nickname, description, "Ariadne", "Objectives")
+        : base(name, nickname, description, "Ariadne Dev", "Objectives")
     {
         UpdateMessage();
     }
@@ -220,7 +220,7 @@ public class ProjectToPlaneComponent : GH_Component
     public ProjectToPlaneComponent()
         : base("Project to Plane", "ProjPlane",
             "Pull nodes onto a plane along a direction (default: plane normal). No target positions.",
-            "Ariadne", "Objectives")
+            "Ariadne Dev", "Objectives")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)
@@ -271,7 +271,7 @@ public class RigidPointSetComponent : GH_Component
     public RigidPointSetComponent()
         : base("Rigid Point Set", "RigidSet",
             "Maintain relative distances within a point set.",
-            "Ariadne", "Objectives")
+            "Ariadne Dev", "Objectives")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)
@@ -316,7 +316,7 @@ public class ReactionComponent : GH_Component
     public ReactionComponent()
         : base("Reaction", "Reaction",
             "Align anchor reaction directions, optionally matching magnitudes.",
-            "Ariadne", "Objectives")
+            "Ariadne Dev", "Objectives")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)

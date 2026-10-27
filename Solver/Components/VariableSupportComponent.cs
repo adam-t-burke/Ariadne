@@ -32,7 +32,7 @@ public class VariableSupportComponent : GH_Component
     public VariableSupportComponent()
         : base("Variable Support", "VarSupport",
             "Create variable support constraints for fixed nodes.",
-            "Ariadne", "Variable Support")
+            "Ariadne Dev", "Variable Support")
     {
         UpdateMessage();
     }

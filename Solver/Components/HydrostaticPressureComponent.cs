@@ -18,7 +18,7 @@ public class HydrostaticPressureComponent : GH_Component
     public HydrostaticPressureComponent()
         : base("Pressure Load (Hydrostatic)", "Press-H",
             "Hydrostatic pressure varying with depth below a datum (e.g. fabric formwork).",
-            "Ariadne", "Design")
+            "Ariadne Dev", "Design")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)

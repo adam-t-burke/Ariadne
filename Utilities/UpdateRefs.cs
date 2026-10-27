@@ -33,7 +33,7 @@ namespace Ariadne.Utilities
         public UpdateRefs()
           : base("Update Reference Geometry", "Update",
               "Update ",
-              "Ariadne", "Utilities")
+              "Ariadne Dev", "Utilities")
         {
         }
 

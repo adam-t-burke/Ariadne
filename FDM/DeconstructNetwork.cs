@@ -26,7 +26,7 @@ namespace Ariadne.FDM
         public DeconstructNetwork()
           : base("Deconstruct FDM Network", "Deconstruct Network",
               "Deconstructed attributes of a FDM Network",
-              "Ariadne", "Design")
+              "Ariadne Dev", "Design")
         {
         }
 

@@ -25,7 +25,7 @@ namespace Ariadne.Utilities
         public CurveToCurve()
           : base("CurvetoCurve", "CurvePairs",
               "Connecting the starting Value of edges to equilibrium Values",
-              "Ariadne", "Utilities")
+              "Ariadne Dev", "Utilities")
         {
         }
 

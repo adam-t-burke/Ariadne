@@ -50,7 +50,7 @@ namespace Ariadne.Utilities
         public Baker()
           : base("Baker", "Baker",
               "Component to bake all relevant network geometry",
-              "Ariadne", "Utilities")
+              "Ariadne Dev", "Utilities")
         {
         }
 

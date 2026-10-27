@@ -18,7 +18,7 @@ public class FindFacesComponent : GH_Component
     public FindFacesComponent()
         : base("Find Faces", "FindFaces",
             "Find bounded face cycles in a graph/network. Works directly on 3D geometry without projection.",
-            "Ariadne", "Graphs")
+            "Ariadne Dev", "Graphs")
     { }
 
     protected override void RegisterInputParams(GH_InputParamManager pManager)

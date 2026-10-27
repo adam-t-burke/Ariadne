@@ -29,7 +29,7 @@ namespace Ariadne.Utilities
         public Tagger()
           : base("ElementTagger", "Tagger",
               "Tagged information about elements",
-              "Ariadne", "Utilities")
+              "Ariadne Dev", "Utilities")
         {
         }
 

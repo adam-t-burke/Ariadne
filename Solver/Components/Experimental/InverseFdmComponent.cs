@@ -41,7 +41,7 @@ public class InverseFdmComponent : GH_Component
     public InverseFdmComponent()
         : base("Inverse FDM", "InvFDM",
             "Compliance-weighted warm start for a target geometry: Stage-1 particular, seed guard, frozen CWLS step(s), Gauss–Newton step(s), then forward-solve.",
-            "Ariadne", "Experimental")
+            "Ariadne Dev", "Experimental")
     {
         UpdateMessage();
     }

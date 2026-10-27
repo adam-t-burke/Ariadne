@@ -20,7 +20,7 @@ namespace Ariadne.Utilities
         public NetworkInfo()
           : base("NetworkInformation", "Info",
               "Information about a FDM network",
-              "Ariadne", "Utilities")
+              "Ariadne Dev", "Utilities")
         {
         }
 

@@ -1,0 +1,19 @@
+---
+name: ariadne-dev
+# Keep in sync with <Version> in Ariadne.csproj (yak $version did not resolve from this .gha).
+version: 1.0.11-beta
+authors:
+  - Adam Burke
+description: >
+  PREVIEW / BREAKING development channel for Ariadne + Theseus. This package is
+  intentionally separate from the stable "Ariadne" package so existing users are
+  not upgraded into incompatible APIs. Do not install alongside stable Ariadne.
+  Inverse form-finding for tensile / funicular networks in Rhino 8 (L-BFGS-B
+  box bounds, Rust Theseus backend).
+url: https://github.com/adam-t-burke/Ariadne
+keywords:
+  - fdm
+  - form-finding
+  - inverse-design
+  - preview
+  - breaking

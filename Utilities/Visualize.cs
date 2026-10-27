@@ -42,7 +42,7 @@ namespace Ariadne.Utilities
         public Visualize()
           : base("VisualizeNetwork", "Visualize",
               "Visualize a FDM network",
-              "Ariadne", "Utilities")
+              "Ariadne Dev", "Utilities")
         {
         }
 

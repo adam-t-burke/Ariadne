@@ -21,7 +21,7 @@ namespace Ariadne.Utilities
         public DummyNetwork()
           : base("DummyNetwork", "Dummy",
               "Dummy network to test downstream functionality",
-              "Ariadne", "Utilities")
+              "Ariadne Dev", "Utilities")
         {
         }
 
